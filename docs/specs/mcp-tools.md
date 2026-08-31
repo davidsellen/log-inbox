@@ -73,6 +73,35 @@ Input:
 }
 ```
 
+### suggest_markdown_summary
+
+Use an LLM-backed workflow to propose a concise Markdown summary for a bounded log group. The tool may be implemented by the MCP server or by an agent that calls the MCP read tools first.
+
+Input:
+
+```json
+{
+  "event_ids": ["evt_123", "evt_124"],
+  "vault_context": {
+    "candidate_notes": ["Example CRM", "Example Forms"],
+    "daily_note": "Daily log Aug 31"
+  },
+  "mode": "daily-note"
+}
+```
+
+Output:
+
+```json
+{
+  "target_note": "Daily log Aug 31",
+  "canonical_links": ["[[Example CRM]]"],
+  "markdown": "- Confirmed IIS export failures came from missing route metadata in the CRM host response.",
+  "evidence_event_ids": ["evt_123", "evt_124"],
+  "requires_review": true
+}
+```
+
 ## Output Rules
 
 - Return stable event IDs.
@@ -80,3 +109,4 @@ Input:
 - Default to bounded results.
 - Include truncation metadata when output was limited.
 - Never return secrets that the collector already marked redacted.
+- LLM-generated Markdown must be marked as proposed output until reviewed or explicitly applied.

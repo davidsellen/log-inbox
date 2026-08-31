@@ -1,6 +1,6 @@
 # Log Inbox
 
-Spec-first project for collecting logs from hosts, VMs, and local devices into a durable inbox that can feed curated summaries into an Obsidian vault through agent-readable tools.
+Spec-first project for collecting logs from hosts, VMs, and local devices into a durable inbox that can feed curated summaries into a Markdown vault through agent-readable tools.
 
 ## Goal
 
@@ -9,7 +9,7 @@ Provide a small local logging system with two separate responsibilities:
 - Producers send logs to an ordinary ingest API.
 - An agent reads curated log slices through MCP tools and writes human summaries to notes only when useful.
 
-MCP is not the ingest protocol. It is the agent-facing read/search/ack interface. In this local setup, the main managed output is the Obsidian vault.
+MCP is not the ingest protocol. It is the agent-facing read/search/ack interface. In this local setup, the main managed output is a Markdown vault that may be read with Obsidian.
 
 ## Default Deployment
 
@@ -27,6 +27,7 @@ See [Docker deployment](docs/specs/docker.md).
 - [Architecture](docs/specs/architecture.md)
 - [Ingest API](docs/specs/ingest-api.md)
 - [MCP tools](docs/specs/mcp-tools.md)
+- [LLM consolidation workflow](docs/specs/llm-consolidation.md)
 - [Storage model](docs/specs/storage.md)
 - [Docker deployment](docs/specs/docker.md)
 - [Security](docs/specs/security.md)

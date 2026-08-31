@@ -17,9 +17,9 @@ SQLite or JSONL volume
         v
 MCP server
         |
-        | agent tool calls
+        | agent tool calls and optional LLM consolidation
         v
-Obsidian summaries
+reviewed Markdown summaries
 ```
 
 ## Responsibilities
@@ -51,3 +51,10 @@ Obsidian summaries
 - Pull logs on demand.
 - Correlate log windows with the active task.
 - Update product notes or daily notes only with durable conclusions.
+
+### LLM Consolidation
+
+- Runs after logs are grouped and bounded by source/time/correlation.
+- Produces proposed summaries, canonical note targets, and Markdown patches.
+- Must cite event IDs, source windows, and external links used for the conclusion.
+- Should be review-first by default; automatic vault writes are only safe for low-risk local notes with strict policies.

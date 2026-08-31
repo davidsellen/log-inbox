@@ -6,7 +6,7 @@
 - Require API keys for ingestion.
 - Treat logs as sensitive by default.
 - Keep retention short.
-- Do not publish raw logs to Obsidian.
+- Do not publish raw logs to the Markdown vault.
 
 ## Redaction
 
@@ -31,4 +31,4 @@ If logs must be accepted from another device:
 
 ## Vault Safety
 
-Agent-written vault summaries should avoid secrets, raw stack traces, personal data, and long log dumps. Link to source windows through event IDs or time ranges instead.
+Agent-written Markdown summaries should avoid secrets, raw stack traces, personal data, and long log dumps. Link to source windows through event IDs or time ranges instead.
