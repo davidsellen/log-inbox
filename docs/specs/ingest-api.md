@@ -1,0 +1,66 @@
+# Ingest API
+
+## Protocol
+
+HTTP JSON is the default ingestion protocol because it is easy from Windows, Linux, VMs, shell scripts, browser-based clients, and services.
+
+gRPC is not part of the first version. It can be added later if high-volume structured service ingestion needs it.
+
+## Authentication
+
+Every write request must include an API key:
+
+```http
+Authorization: Bearer <key>
+```
+
+Keys are configured through `LOG_INBOX_API_KEYS`.
+
+## Endpoints
+
+### POST /v1/logs
+
+Ingest one event.
+
+```json
+{
+  "source": "examplewin/iis",
+  "level": "error",
+  "timestamp": "2026-08-31T13:45:00Z",
+  "message": "Request failed",
+  "metadata": {
+    "app": "ExampleOne",
+    "path": "/exampleweb/export",
+    "status": 500
+  }
+}
+```
+
+### POST /v1/logs/batch
+
+Ingest multiple events. The collector should accept partial success only if it returns per-event status.
+
+```json
+{
+  "events": []
+}
+```
+
+### GET /health
+
+Return process and storage health.
+
+```json
+{
+  "status": "ok"
+}
+```
+
+## Event Rules
+
+- `source` is required and should be stable.
+- `message` is required.
+- `timestamp` is optional; collector receive time is used when missing.
+- `metadata` must be JSON object data, not preformatted text.
+- oversized messages should be truncated with a `truncated: true` flag.
+

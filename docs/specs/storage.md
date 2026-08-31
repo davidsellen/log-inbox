@@ -1,0 +1,37 @@
+# Storage Model
+
+## Default
+
+Use SQLite for the first implementation unless a simpler JSONL-only prototype is needed.
+
+SQLite gives enough structure for filtering, review state, retention cleanup, and source counts without operating a separate database service.
+
+## Tables
+
+### log_events
+
+| Column | Purpose |
+|---|---|
+| `id` | Stable event ID |
+| `received_at` | Collector receive time |
+| `timestamp` | Producer event time |
+| `source` | Stable producer/source name |
+| `level` | Trace, debug, info, warn, error, fatal, or unknown |
+| `message` | Main log text |
+| `metadata_json` | Structured producer metadata |
+| `fingerprint` | Optional duplicate/correlation key |
+| `truncated` | Whether message or metadata was truncated |
+
+### review_state
+
+| Column | Purpose |
+|---|---|
+| `event_id` | Reviewed event |
+| `reviewed_at` | Time reviewed |
+| `reviewed_by` | Tool or user identifier |
+| `note` | Short note or vault reference |
+
+## Retention
+
+The first version should keep logs for `LOG_INBOX_RETENTION_DAYS`, defaulting to 14 days. Reviewed state may be kept longer if it only stores IDs and note references.
+

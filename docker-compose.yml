@@ -1,0 +1,33 @@
+services:
+  collector:
+    image: log-inbox:local
+    build:
+      context: .
+      dockerfile: docker/collector.Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "${LOG_INBOX_BIND:-127.0.0.1}:${LOG_INBOX_HTTP_PORT:-8787}:8787"
+    volumes:
+      - log-inbox-data:/data
+    restart: unless-stopped
+
+  mcp:
+    image: log-inbox-mcp:local
+    build:
+      context: .
+      dockerfile: docker/mcp.Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "${LOG_INBOX_BIND:-127.0.0.1}:${LOG_INBOX_MCP_PORT:-8788}:8788"
+    volumes:
+      - log-inbox-data:/data:ro
+    depends_on:
+      - collector
+    restart: unless-stopped
+
+volumes:
+  log-inbox-data:
