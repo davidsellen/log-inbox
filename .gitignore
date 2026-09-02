@@ -9,10 +9,10 @@ tmp/
 node_modules/
 dist/
 coverage/
+target/
 
 *.db
 *.db-shm
 *.db-wal
 *.sqlite
 *.sqlite3
-

@@ -21,6 +21,45 @@ The system should run with Docker Compose:
 
 See [Docker deployment](docs/specs/docker.md).
 
+## First Iteration Usage
+
+Build and run the local stack:
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Send one log event:
+
+```bash
+curl -sS http://127.0.0.1:8787/v1/logs \
+  -H "Authorization: Bearer dev-local-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": "examplewin/iis",
+    "level": "error",
+    "message": "Request failed",
+    "metadata": { "app": "ExampleOne", "status": 500 }
+  }'
+```
+
+Call the MCP-style tools endpoint:
+
+```bash
+curl -sS http://127.0.0.1:8788/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "search_logs",
+      "arguments": { "query": "Request failed", "limit": 10 }
+    }
+  }'
+```
+
 ## Specs
 
 - [Product brief](docs/specs/product-brief.md)

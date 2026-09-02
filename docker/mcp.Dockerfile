@@ -1,11 +1,21 @@
-# Placeholder image definition. Implementation language is intentionally undecided.
-FROM alpine:3.20
+FROM rust:1.98-bookworm AS builder
 
-RUN adduser -D -h /app app
 WORKDIR /app
+COPY Cargo.toml Cargo.lock* ./
+COPY crates ./crates
+RUN cargo build --release --bin log-inbox-mcp-server
+
+FROM debian:bookworm-slim
+
+RUN useradd --system --create-home --home-dir /app app \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /app/target/release/log-inbox-mcp-server /usr/local/bin/log-inbox-mcp-server
+RUN mkdir -p /data && chown app:app /data
 
 EXPOSE 8788
 USER app
-
-CMD ["sh", "-c", "echo 'mcp implementation pending'; sleep infinity"]
-
+CMD ["log-inbox-mcp-server"]

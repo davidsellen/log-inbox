@@ -1,0 +1,27 @@
+[workspace]
+members = [
+  "crates/collector",
+  "crates/core",
+  "crates/mcp-server",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.98"
+
+[workspace.dependencies]
+anyhow = "1.0.99"
+axum = "0.8.4"
+chrono = { version = "0.4.41", features = ["serde"] }
+regex = "1.11.1"
+rusqlite = { version = "0.37.0", features = ["bundled", "chrono"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+thiserror = "2.0.16"
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "signal"] }
+tower-http = { version = "0.6.6", features = ["trace"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+uuid = { version = "1.18.1", features = ["v4"] }
