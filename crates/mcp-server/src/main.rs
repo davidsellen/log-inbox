@@ -1,6 +1,10 @@
 use axum::{
     Json, Router,
+    body::Body,
     extract::State,
+    http::Request,
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
 };
 use chrono::{DateTime, Duration, Utc};
@@ -8,7 +12,6 @@ use log_inbox_core::{models::LogQuery, settings::Settings, store::Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
-use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Clone)]
@@ -95,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/mcp", post(mcp))
-        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(log_request_response))
         .with_state(state);
 
     let addr: SocketAddr = "0.0.0.0:8788".parse()?;
@@ -103,6 +106,23 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn log_request_response(request: Request<Body>, next: Next) -> Response {
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+    tracing::info!(%method, %uri, "incoming request");
+
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    tracing::info!(
+        %method,
+        %uri,
+        status = response.status().as_u16(),
+        latency_ms = started.elapsed().as_millis(),
+        "outgoing response"
+    );
+    response
 }
 
 async fn health() -> Json<Value> {
