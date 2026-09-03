@@ -2,6 +2,8 @@
 
 The MCP server is the agent-facing interface. It reads from the durable log store; it does not receive logs directly from devices.
 
+The same service exposes a small browser dashboard. `GET /api/dashboard` returns pending proposals, saved non-secret preferences, and generated agent instructions. `PUT /api/preferences` saves those preferences, and `POST /api/proposals/{proposal_id}/apply` uses the same apply operation documented below.
+
 ## Tools
 
 ### list_sources

@@ -8,7 +8,7 @@ use crate::{
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use std::{fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -79,6 +79,12 @@ impl Store {
 
             CREATE INDEX IF NOT EXISTS idx_proposal_state_proposal
                 ON proposal_state(proposal_id);
+
+            CREATE TABLE IF NOT EXISTS app_preferences (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             "#,
         )?;
         Ok(())
@@ -353,6 +359,34 @@ impl Store {
         })
     }
 
+    pub fn get_preferences(&self) -> Result<BTreeMap<String, String>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare("SELECT key, value FROM app_preferences ORDER BY key")?;
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn set_preferences(&self, preferences: &BTreeMap<String, String>) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        for (key, value) in preferences {
+            tx.execute(
+                r#"
+                INSERT INTO app_preferences (key, value, updated_at)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                "#,
+                params![key, value, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     fn get_event(&self, event_id: &str) -> Result<Option<StoredLogEvent>> {
         let conn = self.connect()?;
         conn.query_row(
@@ -562,6 +596,24 @@ mod tests {
             .expect("query succeeds");
 
         assert_eq!(result.events.len(), 1);
+    }
+
+    #[test]
+    fn persists_application_preferences() {
+        let store = temp_store();
+        let preferences = BTreeMap::from([
+            ("agent_name".to_owned(), "codex".to_owned()),
+            ("ingest_url".to_owned(), "http://127.0.0.1:8787".to_owned()),
+        ]);
+
+        store
+            .set_preferences(&preferences)
+            .expect("preferences save");
+
+        assert_eq!(
+            store.get_preferences().expect("preferences load"),
+            preferences
+        );
     }
 
     #[test]

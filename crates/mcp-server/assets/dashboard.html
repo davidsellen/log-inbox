@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Log Inbox</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --canvas: #f4f6f5;
+      --surface: #ffffff;
+      --ink: #17201c;
+      --muted: #607068;
+      --line: #d8dfdb;
+      --accent: #147a51;
+      --accent-hover: #0f6240;
+      --active: #e7f1ec;
+      --pending: #9a6500;
+      --danger: #a93434;
+      --code: #eef1ef;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--canvas); color: var(--ink); }
+    button, input, textarea { font: inherit; letter-spacing: 0; }
+    button { cursor: pointer; }
+    .topbar { background: #17201c; color: #fff; border-bottom: 1px solid #0d120f; }
+    .topbar-inner { max-width: 1180px; margin: 0 auto; min-height: 58px; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .brand { font-size: 18px; font-weight: 700; }
+    .health { display: flex; align-items: center; gap: 8px; color: #cbd5d0; font-size: 13px; }
+    .health-dot { width: 9px; height: 9px; border-radius: 50%; background: #60c991; }
+    .shell { max-width: 1180px; margin: 0 auto; padding: 26px 24px 48px; }
+    .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
+    .tab { border: 0; border-bottom: 3px solid transparent; background: transparent; color: var(--muted); padding: 10px 14px 9px; font-weight: 650; }
+    .tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+    .panel { display: none; padding-top: 24px; }
+    .panel.active { display: block; }
+    .section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font-size: 24px; margin-bottom: 4px; }
+    h2 { font-size: 18px; margin-bottom: 4px; }
+    .count, .subtle { color: var(--muted); font-size: 13px; }
+    .button { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); min-height: 36px; padding: 7px 12px; font-weight: 650; }
+    .button:hover { border-color: #aab7b0; background: #f9faf9; }
+    .button.primary { border-color: var(--accent); background: var(--accent); color: #fff; }
+    .button.primary:hover { background: var(--accent-hover); }
+    .button:disabled { cursor: wait; opacity: .6; }
+    .queue { border-top: 1px solid var(--line); }
+    .proposal { border-bottom: 1px solid var(--line); padding: 18px 0; }
+    .proposal-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: start; }
+    .proposal-title { font-size: 16px; font-weight: 700; margin-bottom: 7px; overflow-wrap: anywhere; }
+    .meta { display: flex; flex-wrap: wrap; gap: 7px 14px; color: var(--muted); font-size: 12px; }
+    .badge { color: var(--pending); font-weight: 700; text-transform: uppercase; }
+    .links { margin: 12px 0 0; color: var(--accent); font-size: 13px; }
+    details { margin-top: 14px; }
+    summary { cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 650; }
+    pre { margin: 12px 0 0; padding: 14px; background: var(--code); border: 1px solid var(--line); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .empty { padding: 48px 0; text-align: center; color: var(--muted); border-bottom: 1px solid var(--line); }
+    .settings { display: grid; grid-template-columns: minmax(280px, 390px) minmax(0, 1fr); gap: 32px; align-items: start; }
+    form { display: grid; gap: 15px; }
+    label { display: grid; gap: 6px; color: #34423b; font-size: 13px; font-weight: 650; }
+    input, textarea { width: 100%; border: 1px solid #bfc9c3; border-radius: 5px; background: var(--surface); color: var(--ink); padding: 9px 10px; }
+    input:focus, textarea:focus { outline: 2px solid #9bcdb5; outline-offset: 1px; border-color: var(--accent); }
+    textarea { min-height: 110px; resize: vertical; }
+    .form-actions, .instruction-actions { display: flex; align-items: center; gap: 10px; }
+    .status { min-height: 20px; color: var(--accent); font-size: 13px; }
+    .status.error { color: var(--danger); }
+    .instructions { min-width: 0; }
+    .instructions pre { max-height: 620px; overflow: auto; background: #202723; color: #edf3ef; border-color: #202723; }
+    @media (max-width: 760px) {
+      .topbar-inner, .shell { padding-left: 16px; padding-right: 16px; }
+      .shell { padding-top: 18px; }
+      .settings { grid-template-columns: 1fr; }
+      .proposal-head { grid-template-columns: 1fr; }
+      .proposal-head .button { justify-self: start; }
+      .section-head { align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">Log Inbox</div>
+      <div class="health"><span class="health-dot"></span><span id="health-text">Connected</span></div>
+    </div>
+  </header>
+  <main class="shell">
+    <nav class="tabs" aria-label="Dashboard views">
+      <button class="tab" data-tab="queue" aria-selected="true">Queue</button>
+      <button class="tab" data-tab="setup" aria-selected="false">Agent setup</button>
+    </nav>
+
+    <section id="queue-panel" class="panel active">
+      <div class="section-head">
+        <div><h1>Pending proposals</h1><div id="queue-count" class="count"></div></div>
+        <button id="refresh" class="button" type="button">Refresh</button>
+      </div>
+      <div id="queue" class="queue" aria-live="polite"></div>
+    </section>
+
+    <section id="setup-panel" class="panel">
+      <div class="section-head"><div><h1>Agent setup</h1><div class="subtle">Saved locally in SQLite</div></div></div>
+      <div class="settings">
+        <form id="preferences-form">
+          <label>Ingest URL<input id="ingest-url" name="ingest_url" type="url" required></label>
+          <label>Agent name<input id="agent-name" name="agent_name" required></label>
+          <label>Source prefix<input id="source-prefix" name="source_prefix" required></label>
+          <label>Default host<input id="default-host" name="default_host"></label>
+          <label>API key for copy<input id="api-key" type="password" autocomplete="off" placeholder="Not saved"></label>
+          <label>Additional instructions<textarea id="extra-instructions" name="extra_instructions"></textarea></label>
+          <div class="form-actions"><button class="button primary" type="submit">Save preferences</button><span id="save-status" class="status"></span></div>
+        </form>
+        <div class="instructions">
+          <div class="section-head"><div><h2>AGENTS.md</h2><div class="subtle">Windows-ready instructions</div></div><button id="copy" class="button" type="button">Copy</button></div>
+          <pre id="instructions"></pre>
+          <div id="copy-status" class="status"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const state = { instructions: "" };
+    const queue = document.querySelector("#queue");
+    const count = document.querySelector("#queue-count");
+    const healthText = document.querySelector("#health-text");
+
+    document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => {
+      document.querySelectorAll(".tab").forEach((item) => item.setAttribute("aria-selected", String(item === tab)));
+      document.querySelectorAll(".panel").forEach((panel) => panel.classList.toggle("active", panel.id === `${tab.dataset.tab}-panel`));
+    }));
+
+    function element(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+
+    function renderProposals(proposals) {
+      queue.replaceChildren();
+      count.textContent = `${proposals.length} awaiting review`;
+      if (!proposals.length) {
+        queue.append(element("div", "empty", "No pending proposals"));
+        return;
+      }
+      proposals.forEach((proposal) => {
+        const row = element("article", "proposal");
+        const head = element("div", "proposal-head");
+        const identity = element("div");
+        const summary = proposal.markdown
+          .split("\n")
+          .map((line) => line.trim())
+          .find(Boolean)
+          ?.replace(/^[-#*>\s]+/, "") || proposal.target_note;
+        identity.append(element("div", "proposal-title", summary));
+        const meta = element("div", "meta");
+        meta.append(element("span", "badge", proposal.confidence || "unknown"));
+        meta.append(element("span", "", proposal.target_note));
+        meta.append(element("span", "", new Date(proposal.created_at).toLocaleString()));
+        meta.append(element("span", "", `${proposal.evidence_event_ids.length} evidence event${proposal.evidence_event_ids.length === 1 ? "" : "s"}`));
+        meta.append(element("span", "", proposal.provider));
+        identity.append(meta);
+        if (proposal.canonical_links.length) identity.append(element("div", "links", proposal.canonical_links.join("  ")));
+        const apply = element("button", "button primary", "Apply");
+        apply.type = "button";
+        apply.addEventListener("click", () => applyProposal(proposal, apply));
+        head.append(identity, apply);
+        const details = document.createElement("details");
+        details.append(element("summary", "", "Read proposal"));
+        details.append(element("pre", "", proposal.markdown));
+        row.append(head, details);
+        queue.append(row);
+      });
+    }
+
+    function fillPreferences(preferences, instructions) {
+      document.querySelector("#ingest-url").value = preferences.ingest_url;
+      document.querySelector("#agent-name").value = preferences.agent_name;
+      document.querySelector("#source-prefix").value = preferences.source_prefix;
+      document.querySelector("#default-host").value = preferences.default_host;
+      document.querySelector("#extra-instructions").value = preferences.extra_instructions;
+      state.instructions = instructions;
+      document.querySelector("#instructions").textContent = instructions;
+    }
+
+    async function load() {
+      try {
+        const response = await fetch("/api/dashboard");
+        if (!response.ok) throw new Error((await response.json()).error || "Dashboard request failed");
+        const data = await response.json();
+        renderProposals(data.proposals);
+        fillPreferences(data.preferences, data.instructions);
+        healthText.textContent = "Connected";
+      } catch (error) {
+        healthText.textContent = "Unavailable";
+        queue.replaceChildren(element("div", "empty", error.message));
+      }
+    }
+
+    async function applyProposal(proposal, button) {
+      if (!confirm(`Apply ${proposal.proposal_id} to ${proposal.target_note}?`)) return;
+      button.disabled = true;
+      button.textContent = "Applying";
+      try {
+        const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.proposal_id)}/apply`, { method: "POST" });
+        if (!response.ok) throw new Error((await response.json()).error || "Apply failed");
+        await load();
+      } catch (error) {
+        alert(error.message);
+        button.disabled = false;
+        button.textContent = "Apply";
+      }
+    }
+
+    document.querySelector("#preferences-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const status = document.querySelector("#save-status");
+      status.className = "status";
+      status.textContent = "Saving";
+      const preferences = {
+        ingest_url: document.querySelector("#ingest-url").value.trim(),
+        agent_name: document.querySelector("#agent-name").value.trim(),
+        source_prefix: document.querySelector("#source-prefix").value.trim(),
+        default_host: document.querySelector("#default-host").value.trim(),
+        extra_instructions: document.querySelector("#extra-instructions").value.trim()
+      };
+      try {
+        const response = await fetch("/api/preferences", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(preferences) });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Save failed");
+        fillPreferences(data.preferences, data.instructions);
+        status.textContent = "Saved";
+      } catch (error) {
+        status.className = "status error";
+        status.textContent = error.message;
+      }
+    });
+
+    document.querySelector("#copy").addEventListener("click", async () => {
+      const key = document.querySelector("#api-key").value.trim() || "<LOG_INBOX_API_KEY>";
+      const content = state.instructions.replaceAll("{{API_KEY}}", key);
+      const status = document.querySelector("#copy-status");
+      try {
+        await navigator.clipboard.writeText(content);
+        status.className = "status";
+        status.textContent = "Copied";
+      } catch (error) {
+        status.className = "status error";
+        status.textContent = "Clipboard access failed";
+      }
+    });
+
+    document.querySelector("#refresh").addEventListener("click", load);
+    load();
+  </script>
+</body>
+</html>

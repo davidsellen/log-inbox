@@ -105,6 +105,41 @@ impl ProposalInbox {
             .map_err(|error| format!("removing consolidated proposal: {error}"))
     }
 
+    pub fn list(&self) -> Result<Vec<PendingProposal>, String> {
+        let mut paths = fs::read_dir(&self.pending_dir)
+            .map_err(|error| format!("reading proposal inbox: {error}"))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("md"))
+            .collect::<Vec<_>>();
+        paths.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+
+        paths
+            .into_iter()
+            .map(|path| {
+                let filename = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .ok_or_else(|| "proposal filename is not valid UTF-8".to_owned())?
+                    .to_owned();
+                let contents = fs::read_to_string(&path)
+                    .map_err(|error| format!("reading proposal {}: {error}", path.display()))?;
+                let parsed = parse_proposal(&contents)?;
+                Ok(PendingProposal {
+                    filename,
+                    proposal_id: parsed.frontmatter.proposal_id,
+                    created_at: parsed.frontmatter.created_at,
+                    target_note: parsed.frontmatter.target_note,
+                    confidence: parsed.frontmatter.confidence,
+                    provider: parsed.frontmatter.provider,
+                    evidence_event_ids: parsed.frontmatter.evidence_event_ids,
+                    canonical_links: parsed.frontmatter.canonical_links,
+                    markdown: parsed.markdown,
+                })
+            })
+            .collect()
+    }
+
     fn find_proposal(&self, proposal_id: &str) -> Result<PathBuf, String> {
         let suffix = format!("-{proposal_id}.md");
         let matches = fs::read_dir(&self.pending_dir)
@@ -142,10 +177,29 @@ pub struct AppliedProposal {
     pub status: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+pub struct PendingProposal {
+    pub filename: String,
+    pub proposal_id: String,
+    pub created_at: String,
+    pub target_note: String,
+    pub confidence: String,
+    pub provider: String,
+    pub evidence_event_ids: Vec<String>,
+    pub canonical_links: Vec<String>,
+    pub markdown: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct ProposalFrontmatter {
     proposal_id: String,
+    #[serde(default)]
+    created_at: String,
     target_note: String,
+    #[serde(default)]
+    confidence: String,
+    #[serde(default)]
+    provider: String,
     #[serde(default)]
     evidence_event_ids: Vec<String>,
     #[serde(default)]
@@ -339,6 +393,10 @@ mod tests {
         let second = inbox.stage(&proposal()).expect("second proposal stages");
 
         assert_ne!(first.path, second.path);
+        let listed = inbox.list().expect("proposals list");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].target_note, "Daily log Sep 3");
+        assert_eq!(listed[0].evidence_event_ids, ["evt_123"]);
         let contents = fs::read_to_string(first.path).expect("proposal is readable");
         assert!(contents.contains("status: pending"));
         assert!(contents.contains("evt_123"));

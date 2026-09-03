@@ -45,6 +45,14 @@ reviewed Markdown summaries
 - Return bounded results with stable IDs.
 - Support search and time-window review.
 - Mark reviewed events after the agent has handled them.
+- Serve the local proposal reader and agent-preference dashboard on the same private port.
+
+### Local Dashboard
+
+- Read pending proposal files through structured server responses.
+- Apply one reviewed proposal through the same serialized path used by MCP.
+- Store non-secret display and instruction preferences in SQLite.
+- Generate copy-ready agent instructions without persisting the API key.
 
 ### Agent
 

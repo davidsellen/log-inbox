@@ -82,6 +82,18 @@ curl -sS http://127.0.0.1:8788/mcp \
 
 For coding agents, use a correlated start and terminal event with repository, branch, changed-module, commit, and validation metadata. A copy-ready `AGENTS.md` policy and complete payload examples are in [Agent activity reporting](docs/agent-integration.md).
 
+### Local Dashboard
+
+Open the MCP service root in a browser:
+
+```text
+http://127.0.0.1:8788/
+```
+
+The dashboard provides a Markdown proposal reader, one-at-a-time Apply actions, persisted non-secret agent preferences, and generated Windows-ready `AGENTS.md` instructions. The API key field is browser-only and is inserted when copying; it is not saved in SQLite.
+
+When the stack is hosted behind a VM address, use that address with port `8788`, for example `http://10.0.2.2:8788/`.
+
 ### Local LLM Consolidation
 
 The Compose stack runs Ollama locally and pulls the text-only `granite3.3:2b` model on first start. Ollama is reachable only by other Compose services at `http://ollama:11434`; prompts and log summaries are not sent to a hosted model API. Model downloads are retained in the `ollama-data` volume.
@@ -99,6 +111,12 @@ To select another locally installed Ollama model, change:
 
 ```env
 LOG_INBOX_LLM_MODEL=granite3.3:2b
+```
+
+Set the URL shown in generated agent instructions independently from the collector's internal Compose address:
+
+```env
+LOG_INBOX_PUBLIC_INGEST_URL=http://127.0.0.1:8787
 ```
 
 Call the summary proposal tool with selected event IDs:

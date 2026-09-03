@@ -1,17 +1,18 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::State,
-    http::Request,
+    extract::{Path as AxumPath, State},
+    http::{Request, StatusCode},
     middleware::{self, Next},
-    response::Response,
-    routing::{get, post},
+    response::{Html, IntoResponse, Response},
+    routing::{get, post, put},
 };
 use chrono::{DateTime, Duration, Utc};
 use log_inbox_core::{models::LogQuery, settings::Settings, store::Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     env,
     net::SocketAddr,
     path::PathBuf,
@@ -102,6 +103,22 @@ struct ApplyMarkdownProposalArgs {
     proposal_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DashboardPreferences {
+    ingest_url: String,
+    agent_name: String,
+    source_prefix: String,
+    default_host: String,
+    extra_instructions: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DashboardData {
+    preferences: DashboardPreferences,
+    instructions: String,
+    proposals: Vec<proposal_inbox::PendingProposal>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -140,6 +157,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let app = Router::new()
+        .route("/", get(dashboard_page))
+        .route("/api/dashboard", get(dashboard_data))
+        .route("/api/preferences", put(save_preferences))
+        .route(
+            "/api/proposals/{proposal_id}/apply",
+            post(apply_dashboard_proposal),
+        )
         .route("/health", get(health))
         .route("/mcp", post(mcp))
         .layer(middleware::from_fn(log_request_response))
@@ -171,6 +195,48 @@ async fn log_request_response(request: Request<Body>, next: Next) -> Response {
 
 async fn health() -> Json<Value> {
     Json(json!({ "status": "ok" }))
+}
+
+async fn dashboard_page() -> Html<&'static str> {
+    Html(include_str!("../assets/dashboard.html"))
+}
+
+async fn dashboard_data(State(state): State<AppState>) -> Result<Json<DashboardData>, ApiError> {
+    let preferences = DashboardPreferences::load(&state.store)?;
+    let proposals = state
+        .proposal_inbox
+        .as_ref()
+        .map_or_else(|| Ok(Vec::new()), proposal_inbox::ProposalInbox::list)
+        .map_err(ApiError::internal)?;
+    let instructions = render_agent_instructions(&preferences);
+    Ok(Json(DashboardData {
+        preferences,
+        instructions,
+        proposals,
+    }))
+}
+
+async fn save_preferences(
+    State(state): State<AppState>,
+    Json(preferences): Json<DashboardPreferences>,
+) -> Result<Json<Value>, ApiError> {
+    preferences.validate()?;
+    state
+        .store
+        .set_preferences(&preferences.to_map())
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(json!({
+        "preferences": preferences,
+        "instructions": render_agent_instructions(&preferences),
+    })))
+}
+
+async fn apply_dashboard_proposal(
+    State(state): State<AppState>,
+    AxumPath(proposal_id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let applied = apply_proposal(&state, &proposal_id).map_err(ApiError::bad_request)?;
+    Ok(Json(json!(applied)))
 }
 
 async fn mcp(
@@ -318,30 +384,147 @@ async fn call_tool(state: &AppState, params: Value) -> Result<Value, String> {
         }
         "apply_markdown_proposal" => {
             let args: ApplyMarkdownProposalArgs = parse_args(arguments)?;
-            let _guard = state
-                .apply_lock
-                .lock()
-                .map_err(|_| "daily-note apply lock is poisoned".to_owned())?;
-            let inbox = state.proposal_inbox.as_ref().ok_or_else(|| {
-                "proposal inbox is not configured; set LOG_INBOX_PROPOSAL_DIR".to_owned()
-            })?;
-            let daily_notes_dir = state.daily_notes_dir.as_deref().ok_or_else(|| {
-                "daily notes directory is not configured; set LOG_INBOX_DAILY_NOTES_DIR".to_owned()
-            })?;
-            let mut applied = inbox.apply(&args.proposal_id, daily_notes_dir)?;
-            state
-                .store
-                .mark_reviewed(
-                    &applied.evidence_event_ids,
-                    &applied.daily_path.display().to_string(),
-                    "mcp-apply",
-                )
-                .map_err(|error| error.to_string())?;
-            inbox.discard(&args.proposal_id)?;
-            applied.proposal_removed = true;
+            let applied = apply_proposal(state, &args.proposal_id)?;
             Ok(tool_text(json!(applied)))
         }
         _ => Err(format!("unknown tool {name}")),
+    }
+}
+
+fn apply_proposal(
+    state: &AppState,
+    proposal_id: &str,
+) -> Result<proposal_inbox::AppliedProposal, String> {
+    let _guard = state
+        .apply_lock
+        .lock()
+        .map_err(|_| "daily-note apply lock is poisoned".to_owned())?;
+    let inbox = state
+        .proposal_inbox
+        .as_ref()
+        .ok_or_else(|| "proposal inbox is not configured; set LOG_INBOX_PROPOSAL_DIR".to_owned())?;
+    let daily_notes_dir = state.daily_notes_dir.as_deref().ok_or_else(|| {
+        "daily notes directory is not configured; set LOG_INBOX_DAILY_NOTES_DIR".to_owned()
+    })?;
+    let mut applied = inbox.apply(proposal_id, daily_notes_dir)?;
+    state
+        .store
+        .mark_reviewed(
+            &applied.evidence_event_ids,
+            &applied.daily_path.display().to_string(),
+            "proposal-apply",
+        )
+        .map_err(|error| error.to_string())?;
+    inbox.discard(proposal_id)?;
+    applied.proposal_removed = true;
+    Ok(applied)
+}
+
+impl DashboardPreferences {
+    fn load(store: &Store) -> Result<Self, ApiError> {
+        let values = store
+            .get_preferences()
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        Ok(Self {
+            ingest_url: preference(
+                &values,
+                "ingest_url",
+                env::var("LOG_INBOX_PUBLIC_INGEST_URL")
+                    .unwrap_or_else(|_| "http://127.0.0.1:8787".to_owned()),
+            ),
+            agent_name: preference(&values, "agent_name", "codex"),
+            source_prefix: preference(&values, "source_prefix", "codex"),
+            default_host: preference(&values, "default_host", "windows"),
+            extra_instructions: preference(&values, "extra_instructions", ""),
+        })
+    }
+
+    fn validate(&self) -> Result<(), ApiError> {
+        if !(self.ingest_url.starts_with("http://") || self.ingest_url.starts_with("https://")) {
+            return Err(ApiError::bad_request(
+                "ingest URL must begin with http:// or https://",
+            ));
+        }
+        for (name, value, maximum) in [
+            ("ingest URL", &self.ingest_url, 500),
+            ("agent name", &self.agent_name, 100),
+            ("source prefix", &self.source_prefix, 100),
+            ("default host", &self.default_host, 100),
+            ("extra instructions", &self.extra_instructions, 4000),
+        ] {
+            if value.len() > maximum {
+                return Err(ApiError::bad_request(format!(
+                    "{name} exceeds {maximum} bytes"
+                )));
+            }
+        }
+        if self.agent_name.trim().is_empty() || self.source_prefix.trim().is_empty() {
+            return Err(ApiError::bad_request(
+                "agent name and source prefix are required",
+            ));
+        }
+        Ok(())
+    }
+
+    fn to_map(&self) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("ingest_url".to_owned(), self.ingest_url.clone()),
+            ("agent_name".to_owned(), self.agent_name.clone()),
+            ("source_prefix".to_owned(), self.source_prefix.clone()),
+            ("default_host".to_owned(), self.default_host.clone()),
+            (
+                "extra_instructions".to_owned(),
+                self.extra_instructions.clone(),
+            ),
+        ])
+    }
+}
+
+fn preference<T: Into<String>>(values: &BTreeMap<String, String>, key: &str, default: T) -> String {
+    values.get(key).cloned().unwrap_or_else(|| default.into())
+}
+
+fn render_agent_instructions(preferences: &DashboardPreferences) -> String {
+    let mut instructions = include_str!("../assets/agent-instructions.md")
+        .replace(
+            "{{INGEST_URL}}",
+            preferences.ingest_url.trim_end_matches('/'),
+        )
+        .replace("{{AGENT_NAME}}", preferences.agent_name.trim())
+        .replace("{{SOURCE_PREFIX}}", preferences.source_prefix.trim())
+        .replace("{{DEFAULT_HOST}}", preferences.default_host.trim());
+    if !preferences.extra_instructions.trim().is_empty() {
+        instructions.push_str("\n\n### Local additions\n\n");
+        instructions.push_str(preferences.extra_instructions.trim());
+        instructions.push('\n');
+    }
+    instructions
+}
+
+struct ApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(json!({ "error": self.message }))).into_response()
     }
 }
 
