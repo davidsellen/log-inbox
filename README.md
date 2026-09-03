@@ -90,7 +90,7 @@ Open the MCP service root in a browser:
 http://127.0.0.1:8788/
 ```
 
-The dashboard provides a Markdown proposal reader, one-at-a-time Apply actions, persisted non-secret agent preferences, and generated Windows-ready `AGENTS.md` instructions. The API key field is browser-only and is inserted when copying; it is not saved in SQLite.
+The dashboard provides a Markdown proposal reader, Apply and Discard actions, a durable and cancellable LLM-backed daily consolidation preview, persisted non-secret agent and consolidation preferences, and generated Windows-ready `AGENTS.md` instructions. Refreshing the page restores consolidation status from SQLite. The API key field is browser-only and is inserted when copying; it is not saved in SQLite. See the [dashboard specification](docs/specs/dashboard.md) for the review and cleanup lifecycle.
 
 When the stack is hosted behind a VM address, use that address with port `8788`, for example `http://10.0.2.2:8788/`.
 

@@ -44,7 +44,10 @@
     .button:hover { border-color: #aab7b0; background: #f9faf9; }
     .button.primary { border-color: var(--accent); background: var(--accent); color: #fff; }
     .button.primary:hover { background: var(--accent-hover); }
+    .button.danger { color: var(--danger); }
     .button:disabled { cursor: wait; opacity: .6; }
+    .queue-actions, .proposal-actions { display: flex; align-items: center; gap: 8px; }
+    .queue-actions input { width: 145px; }
     .queue { border-top: 1px solid var(--line); }
     .proposal { border-bottom: 1px solid var(--line); padding: 18px 0; }
     .proposal-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: start; }
@@ -67,6 +70,14 @@
     .status.error { color: var(--danger); }
     .instructions { min-width: 0; }
     .instructions pre { max-height: 620px; overflow: auto; background: #202723; color: #edf3ef; border-color: #202723; }
+    dialog { width: min(760px, calc(100% - 32px)); max-height: calc(100vh - 48px); border: 1px solid var(--line); border-radius: 7px; padding: 0; color: var(--ink); background: var(--surface); }
+    dialog::backdrop { background: rgba(15, 24, 19, .46); }
+    .dialog-body { padding: 22px; }
+    .dialog-head, .dialog-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .dialog-head { margin-bottom: 14px; }
+    .dialog-head h2 { margin: 0; }
+    .dialog-actions { justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
+    .dialog-body pre { max-height: 55vh; overflow: auto; }
     @media (max-width: 760px) {
       .topbar-inner, .shell { padding-left: 16px; padding-right: 16px; }
       .shell { padding-top: 18px; }
@@ -74,6 +85,8 @@
       .proposal-head { grid-template-columns: 1fr; }
       .proposal-head .button { justify-self: start; }
       .section-head { align-items: flex-start; }
+      .queue-actions { align-items: flex-end; flex-wrap: wrap; justify-content: flex-end; }
+      .proposal-actions { justify-content: flex-start; }
     }
   </style>
 </head>
@@ -93,7 +106,14 @@
     <section id="queue-panel" class="panel active">
       <div class="section-head">
         <div><h1>Pending proposals</h1><div id="queue-count" class="count"></div></div>
-        <button id="refresh" class="button" type="button">Refresh</button>
+        <div class="queue-actions">
+          <span id="consolidate-status" class="status"></span>
+          <input id="consolidate-date" type="date" aria-label="Day to consolidate">
+          <button id="consolidate" class="button primary" type="button">Consolidate day</button>
+          <button id="cancel-consolidation" class="button danger" type="button" hidden>Cancel</button>
+          <button id="preview-result" class="button" type="button" hidden>Preview result</button>
+          <button id="refresh" class="button" type="button">Refresh</button>
+        </div>
       </div>
       <div id="queue" class="queue" aria-live="polite"></div>
     </section>
@@ -108,6 +128,7 @@
           <label>Default host<input id="default-host" name="default_host"></label>
           <label>API key for copy<input id="api-key" type="password" autocomplete="off" placeholder="Not saved"></label>
           <label>Additional instructions<textarea id="extra-instructions" name="extra_instructions"></textarea></label>
+          <label>Daily consolidation instructions<textarea id="consolidation-instructions" name="consolidation_instructions"></textarea></label>
           <div class="form-actions"><button class="button primary" type="submit">Save preferences</button><span id="save-status" class="status"></span></div>
         </form>
         <div class="instructions">
@@ -119,8 +140,20 @@
     </section>
   </main>
 
+  <dialog id="preview-dialog">
+    <div class="dialog-body">
+      <div class="dialog-head"><div><h2>Daily consolidation preview</h2><div id="preview-meta" class="subtle"></div></div><button id="preview-close" class="button" type="button">Close</button></div>
+      <pre id="preview-markdown"></pre>
+      <div class="dialog-actions">
+        <button id="preview-discard" class="button danger" type="button">Discard</button>
+        <button id="preview-keep" class="button" type="button">Keep in queue</button>
+        <button id="preview-apply" class="button primary" type="button">Apply to daily note</button>
+      </div>
+    </div>
+  </dialog>
+
   <script>
-    const state = { instructions: "" };
+    const state = { instructions: "", preview: null, proposals: [], consolidations: [], awaitingJobId: null, pollTimer: null, preferencesLoaded: false };
     const queue = document.querySelector("#queue");
     const count = document.querySelector("#queue-count");
     const healthText = document.querySelector("#health-text");
@@ -162,10 +195,15 @@
         meta.append(element("span", "", proposal.provider));
         identity.append(meta);
         if (proposal.canonical_links.length) identity.append(element("div", "links", proposal.canonical_links.join("  ")));
+        const actions = element("div", "proposal-actions");
+        const discard = element("button", "button danger", "Discard");
+        discard.type = "button";
+        discard.addEventListener("click", () => discardProposal(proposal, discard));
         const apply = element("button", "button primary", "Apply");
         apply.type = "button";
         apply.addEventListener("click", () => applyProposal(proposal, apply));
-        head.append(identity, apply);
+        actions.append(discard, apply);
+        head.append(identity, actions);
         const details = document.createElement("details");
         details.append(element("summary", "", "Read proposal"));
         details.append(element("pre", "", proposal.markdown));
@@ -180,8 +218,52 @@
       document.querySelector("#source-prefix").value = preferences.source_prefix;
       document.querySelector("#default-host").value = preferences.default_host;
       document.querySelector("#extra-instructions").value = preferences.extra_instructions;
+      document.querySelector("#consolidation-instructions").value = preferences.consolidation_instructions;
       state.instructions = instructions;
+      state.preferencesLoaded = true;
       document.querySelector("#instructions").textContent = instructions;
+    }
+
+    function selectedDay() {
+      const parts = document.querySelector("#consolidate-date").value.split("-").map(Number);
+      const start = new Date(parts[0], parts[1] - 1, parts[2]);
+      const end = new Date(parts[0], parts[1] - 1, parts[2] + 1);
+      const label = new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).format(start);
+      return { start, end, targetNote: `Daily log ${label}` };
+    }
+
+    function renderConsolidationState() {
+      clearTimeout(state.pollTimer);
+      const selected = selectedDay();
+      const job = state.consolidations.find((item) =>
+        item.target_note === selected.targetNote && new Date(item.start).getTime() === selected.start.getTime()
+      );
+      const proposal = job?.proposal_id ? state.proposals.find((item) => item.proposal_id === job.proposal_id) : null;
+      const active = job && ["pending", "running", "cancel_requested"].includes(job.status);
+      const status = document.querySelector("#consolidate-status");
+      const consolidate = document.querySelector("#consolidate");
+      const cancel = document.querySelector("#cancel-consolidation");
+      const preview = document.querySelector("#preview-result");
+      consolidate.disabled = Boolean(active);
+      consolidate.textContent = active ? "Consolidating" : "Consolidate day";
+      cancel.hidden = !active;
+      cancel.dataset.jobId = active ? job.id : "";
+      preview.hidden = !proposal;
+      preview.onclick = proposal ? () => openPreview(proposal) : null;
+      status.className = job?.status === "failed" ? "status error" : "status";
+      status.textContent = !job ? "" : ({
+        pending: `${job.event_count} events queued`,
+        running: `LLM processing ${job.event_count} events`,
+        cancel_requested: "Cancelling",
+        cancelled: "Cancelled",
+        failed: job.error || "Consolidation failed",
+        completed: proposal ? `${job.event_count} events ready` : "Result handled"
+      }[job.status] || job.status);
+      if (state.awaitingJobId === job?.id && proposal) {
+        state.awaitingJobId = null;
+        openPreview(proposal);
+      }
+      if (active) state.pollTimer = setTimeout(load, 1200);
     }
 
     async function load() {
@@ -189,8 +271,11 @@
         const response = await fetch("/api/dashboard");
         if (!response.ok) throw new Error((await response.json()).error || "Dashboard request failed");
         const data = await response.json();
+        state.proposals = data.proposals;
+        state.consolidations = data.consolidations || [];
         renderProposals(data.proposals);
-        fillPreferences(data.preferences, data.instructions);
+        if (!state.preferencesLoaded) fillPreferences(data.preferences, data.instructions);
+        renderConsolidationState();
         healthText.textContent = "Connected";
       } catch (error) {
         healthText.textContent = "Unavailable";
@@ -200,18 +285,98 @@
 
     async function applyProposal(proposal, button) {
       if (!confirm(`Apply ${proposal.proposal_id} to ${proposal.target_note}?`)) return;
+      const original = button.textContent;
       button.disabled = true;
       button.textContent = "Applying";
       try {
         const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.proposal_id)}/apply`, { method: "POST" });
         if (!response.ok) throw new Error((await response.json()).error || "Apply failed");
         await load();
+        return true;
       } catch (error) {
         alert(error.message);
         button.disabled = false;
-        button.textContent = "Apply";
+        button.textContent = original;
+        return false;
       }
     }
+
+    async function discardProposal(proposal, button, confirmDiscard = true) {
+      if (confirmDiscard && !confirm(`Discard ${proposal.proposal_id}? Its original events remain in SQLite.`)) return false;
+      button.disabled = true;
+      const original = button.textContent;
+      button.textContent = "Discarding";
+      try {
+        const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.proposal_id)}/discard`, { method: "POST" });
+        if (!response.ok) throw new Error((await response.json()).error || "Discard failed");
+        await load();
+        return true;
+      } catch (error) {
+        alert(error.message);
+        button.disabled = false;
+        button.textContent = original;
+        return false;
+      }
+    }
+
+    function openPreview(proposal) {
+      state.preview = proposal;
+      document.querySelector("#preview-meta").textContent = `${proposal.target_note} · ${proposal.evidence_event_ids.length} evidence events · ${proposal.confidence} confidence`;
+      document.querySelector("#preview-markdown").textContent = proposal.markdown;
+      document.querySelector("#preview-dialog").showModal();
+    }
+
+    document.querySelector("#consolidate").addEventListener("click", async () => {
+      const button = document.querySelector("#consolidate");
+      const status = document.querySelector("#consolidate-status");
+      const selected = selectedDay();
+      button.disabled = true;
+      button.textContent = "Queuing";
+      status.className = "status";
+      status.textContent = "Saving job";
+      try {
+        const response = await fetch("/api/consolidations/daily", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ start: selected.start.toISOString(), end: selected.end.toISOString(), target_note: selected.targetNote })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Consolidation failed");
+        state.awaitingJobId = data.id;
+        await load();
+      } catch (error) {
+        status.className = "status error";
+        status.textContent = error.message;
+        button.disabled = false;
+        button.textContent = "Consolidate day";
+      }
+    });
+
+    document.querySelector("#cancel-consolidation").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const response = await fetch(`/api/consolidations/${encodeURIComponent(button.dataset.jobId)}/cancel`, { method: "POST" });
+        if (!response.ok) throw new Error((await response.json()).error || "Cancel failed");
+        state.awaitingJobId = null;
+        await load();
+      } catch (error) {
+        const status = document.querySelector("#consolidate-status");
+        status.className = "status error";
+        status.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    document.querySelector("#preview-close").addEventListener("click", () => document.querySelector("#preview-dialog").close());
+    document.querySelector("#preview-keep").addEventListener("click", () => document.querySelector("#preview-dialog").close());
+    document.querySelector("#preview-apply").addEventListener("click", async (event) => {
+      if (state.preview && await applyProposal(state.preview, event.currentTarget)) document.querySelector("#preview-dialog").close();
+    });
+    document.querySelector("#preview-discard").addEventListener("click", async (event) => {
+      if (state.preview && await discardProposal(state.preview, event.currentTarget, false)) document.querySelector("#preview-dialog").close();
+    });
 
     document.querySelector("#preferences-form").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -223,7 +388,8 @@
         agent_name: document.querySelector("#agent-name").value.trim(),
         source_prefix: document.querySelector("#source-prefix").value.trim(),
         default_host: document.querySelector("#default-host").value.trim(),
-        extra_instructions: document.querySelector("#extra-instructions").value.trim()
+        extra_instructions: document.querySelector("#extra-instructions").value.trim(),
+        consolidation_instructions: document.querySelector("#consolidation-instructions").value.trim()
       };
       try {
         const response = await fetch("/api/preferences", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(preferences) });
@@ -252,6 +418,8 @@
     });
 
     document.querySelector("#refresh").addEventListener("click", load);
+    document.querySelector("#consolidate-date").valueAsDate = new Date();
+    document.querySelector("#consolidate-date").addEventListener("change", renderConsolidationState);
     load();
   </script>
 </body>

@@ -53,6 +53,10 @@ reviewed Markdown summaries
 - Apply one reviewed proposal through the same serialized path used by MCP.
 - Store non-secret display and instruction preferences in SQLite.
 - Generate copy-ready agent instructions without persisting the API key.
+- Build a bounded whole-day consolidation proposal and return the stored result for preview.
+- Persist consolidation jobs and frozen evidence snapshots so work survives refresh and service restart.
+- Support cooperative cancellation while the worker awaits the LLM.
+- Consume explicitly superseded proposals only after the consolidated proposal is applied.
 
 ### Agent
 

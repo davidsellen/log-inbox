@@ -42,6 +42,8 @@ The MCP service may run an automatic staging worker. It waits for a quiet period
 
 Each model request has a finite timeout, and group failures are isolated so one malformed or slow event cannot block later proposals. Failed groups remain unstaged and are eligible for a later retry.
 
+The dashboard may request a whole-day consolidation across staged, reviewed, and unstaged events. The event IDs are frozen in a SQLite-backed job before an asynchronous worker calls the model. Jobs are idempotent per event snapshot, recover interrupted work after restart, expose durable status to the browser, and support cooperative cancellation of an in-flight model future. A completed job creates one previewable proposal that records the older pending proposals fully covered by its evidence. Those older proposals remain available until the consolidated proposal is applied, then they are removed. User-defined consolidation instructions may shape presentation but cannot override evidence boundaries, redaction, allowed-link validation, or the output schema.
+
 Concurrent producers never share a target file. The consolidator should use an advisory lock plus a content hash check before replacing a canonical note so an edit from any Markdown tool cannot be silently overwritten. A daily-note template or query may show pending proposals by `created_at` without appending links for each proposal.
 
 Storage and model limits are intentionally separate. The store retains every accepted redacted byte; the LLM receives a bounded projection containing correlation and task fields plus an explicit notice when content was omitted from that model call.

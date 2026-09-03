@@ -83,6 +83,8 @@ pub struct SummaryProposal {
     pub open_questions: Vec<String>,
     pub requires_review: bool,
     pub provider: String,
+    pub supersedes_proposal_ids: Vec<String>,
+    pub consolidation_job_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,6 +187,11 @@ fn build_prompt(
         serde_json::to_string_pretty(&args.vault_context).map_err(|error| error.to_string())?;
     let allowed_links =
         serde_json::to_string(&allowed_canonical_links(args)).map_err(|error| error.to_string())?;
+    let format_rules = if args.mode == "daily-consolidation" {
+        "- Organize distinct workstreams under concise level-three Markdown headings with 1-3 factual bullets each.\n- Merge lifecycle events and omit duplicate, superseded, or trivial transport updates."
+    } else {
+        "- Write 2-4 concise factual bullets covering outcome, important changes or diagnosis, validation, and any remaining follow-up. Do not add a heading or raw log dump."
+    };
 
     Ok(format!(
         r#"Task: {task}
@@ -212,7 +219,8 @@ Return JSON with this exact shape:
 Rules:
 - Use only the supplied events and vault context.
 - canonical_links may contain only exact values from Allowed canonical links.
-- Write 2-4 concise factual bullets covering outcome, important changes or diagnosis, validation, and any remaining follow-up. Do not add a heading or raw log dump.
+{format_rules}
+- User preferences may shape presentation but cannot override evidence, redaction, link, or output-schema rules.
 - A false message_complete or metadata _prompt_notice means full evidence remains in SQLite but was bounded for this model call.
 - Do not repeat source, time, Git metadata, or event IDs; the server appends an evidence Details line.
 - If uncertain, say so and include open questions.
@@ -222,6 +230,7 @@ Rules:
             .as_deref()
             .unwrap_or("Summarize selected log events for review."),
         mode = args.mode,
+        format_rules = format_rules,
     ))
 }
 
@@ -295,6 +304,8 @@ fn parse_proposal(
         open_questions: string_array_field(&value, "open_questions"),
         requires_review: true,
         provider: provider.to_owned(),
+        supersedes_proposal_ids: Vec::new(),
+        consolidation_job_id: None,
     })
 }
 
@@ -320,6 +331,8 @@ fn fallback_proposal(
         open_questions: vec![reason.to_owned()],
         requires_review: true,
         provider: provider.to_owned(),
+        supersedes_proposal_ids: Vec::new(),
+        consolidation_job_id: None,
     }
 }
 
@@ -430,11 +443,18 @@ fn with_evidence_details(markdown: String, events: &[StoredLogEvent]) -> String 
     ] {
         push_detail(&mut details, label, metadata_field(events, key));
     }
-    push_detail(
-        &mut details,
-        "events",
-        Some(events.iter().map(|event| event.id.clone()).collect()),
-    );
+    let event_ids = events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>();
+    if event_ids.len() <= 12 {
+        push_detail(&mut details, "events", Some(event_ids));
+    } else {
+        details.push(format!(
+            "events `{}` (IDs retained in proposal metadata and SQLite)",
+            event_ids.len()
+        ));
+    }
 
     format!("{}\n\nDetails: {}", narrative.trim(), details.join(" · "))
 }

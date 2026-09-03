@@ -1,7 +1,7 @@
 use crate::{
     models::{
-        LogEventInput, LogQuery, LogQueryResult, MarkReviewedResult, SourceSummary,
-        StagedEventGroup, StoredLogEvent,
+        DailyConsolidationJob, LogEventInput, LogQuery, LogQueryResult, MarkReviewedResult,
+        SourceSummary, StagedEventGroup, StoredLogEvent,
     },
     redaction::{redact_metadata, redact_text},
 };
@@ -84,6 +84,32 @@ impl Store {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_consolidation_jobs (
+                id TEXT PRIMARY KEY,
+                snapshot_key TEXT NOT NULL UNIQUE,
+                start TEXT NOT NULL,
+                end TEXT NOT NULL,
+                target_note TEXT NOT NULL,
+                status TEXT NOT NULL,
+                event_count INTEGER NOT NULL,
+                proposal_id TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_daily_consolidation_jobs_updated
+                ON daily_consolidation_jobs(updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS daily_consolidation_job_events (
+                job_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                PRIMARY KEY(job_id, event_id),
+                FOREIGN KEY(job_id) REFERENCES daily_consolidation_jobs(id),
+                FOREIGN KEY(event_id) REFERENCES log_events(id)
             );
             "#,
         )?;
@@ -214,6 +240,40 @@ impl Store {
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(values), stored_event_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let truncated = rows.len() > limit;
+        Ok(LogQueryResult {
+            events: rows.into_iter().take(limit).collect(),
+            truncated,
+            limit,
+        })
+    }
+
+    pub fn get_events_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<LogQueryResult> {
+        let limit = limit.clamp(1, MAX_LIMIT);
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT e.id, e.received_at, e.timestamp, e.source, e.level, e.message,
+                   e.metadata_json, e.fingerprint, e.truncated,
+                   CASE WHEN r.event_id IS NULL THEN 0 ELSE 1 END AS reviewed
+            FROM log_events e
+            LEFT JOIN review_state r ON r.event_id = e.id
+            WHERE e.timestamp >= ?1 AND e.timestamp < ?2
+            ORDER BY e.timestamp ASC, e.received_at ASC
+            LIMIT ?3
+            "#,
+        )?;
+        let rows = stmt
+            .query_map(
+                params![start.to_rfc3339(), end.to_rfc3339(), (limit + 1) as i64],
+                stored_event_from_row,
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let truncated = rows.len() > limit;
         Ok(LogQueryResult {
@@ -387,6 +447,224 @@ impl Store {
         Ok(())
     }
 
+    pub fn enqueue_daily_consolidation(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        target_note: &str,
+        event_ids: &[String],
+    ) -> Result<DailyConsolidationJob> {
+        let last_event_id = event_ids.last().map(String::as_str).unwrap_or_default();
+        let snapshot_key = format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            start.to_rfc3339(),
+            end.to_rfc3339(),
+            target_note,
+            event_ids.len(),
+            last_event_id
+        );
+        let now = Utc::now();
+        let id = format!("consolidation_{}", Uuid::new_v4().simple());
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            r#"
+            INSERT OR IGNORE INTO daily_consolidation_jobs
+                (id, snapshot_key, start, end, target_note, status, event_count, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?7)
+            "#,
+            params![
+                id,
+                snapshot_key,
+                start.to_rfc3339(),
+                end.to_rfc3339(),
+                target_note,
+                event_ids.len() as i64,
+                now.to_rfc3339(),
+            ],
+        )?;
+        let job_id: String = tx.query_row(
+            "SELECT id FROM daily_consolidation_jobs WHERE snapshot_key = ?1",
+            params![snapshot_key],
+            |row| row.get(0),
+        )?;
+        if job_id == id {
+            for (position, event_id) in event_ids.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO daily_consolidation_job_events (job_id, event_id, position) VALUES (?1, ?2, ?3)",
+                    params![job_id, event_id, position as i64],
+                )?;
+            }
+        }
+        tx.commit()?;
+        self.get_daily_consolidation_job(&job_id)?
+            .context("queued daily consolidation disappeared")
+    }
+
+    pub fn list_daily_consolidations(&self, limit: usize) -> Result<Vec<DailyConsolidationJob>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, start, end, target_note, status, event_count, proposal_id, error,
+                   created_at, updated_at
+            FROM daily_consolidation_jobs
+            ORDER BY updated_at DESC
+            LIMIT ?1
+            "#,
+        )?;
+        stmt.query_map(
+            params![limit.clamp(1, 50) as i64],
+            consolidation_job_from_row,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+    }
+
+    pub fn claim_next_daily_consolidation(&self) -> Result<Option<DailyConsolidationJob>> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        let id = tx
+            .query_row(
+                "SELECT id FROM daily_consolidation_jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(id) = id else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        let changed = tx.execute(
+            "UPDATE daily_consolidation_jobs SET status = 'running', updated_at = ?2 WHERE id = ?1 AND status = 'pending'",
+            params![id, now],
+        )?;
+        tx.commit()?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_daily_consolidation_job(&id)
+    }
+
+    pub fn get_daily_consolidation_events(&self, job_id: &str) -> Result<Vec<StoredLogEvent>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT e.id, e.received_at, e.timestamp, e.source, e.level, e.message,
+                   e.metadata_json, e.fingerprint, e.truncated,
+                   CASE WHEN r.event_id IS NULL THEN 0 ELSE 1 END AS reviewed
+            FROM daily_consolidation_job_events j
+            JOIN log_events e ON e.id = j.event_id
+            LEFT JOIN review_state r ON r.event_id = e.id
+            WHERE j.job_id = ?1
+            ORDER BY j.position ASC
+            "#,
+        )?;
+        stmt.query_map(params![job_id], stored_event_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn request_daily_consolidation_cancel(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<DailyConsolidationJob>> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.connect()?;
+        conn.execute(
+            r#"
+            UPDATE daily_consolidation_jobs
+            SET status = CASE status WHEN 'pending' THEN 'cancelled' ELSE 'cancel_requested' END,
+                updated_at = ?2
+            WHERE id = ?1 AND status IN ('pending', 'running')
+            "#,
+            params![job_id, now],
+        )?;
+        self.get_daily_consolidation_job(job_id)
+    }
+
+    pub fn requeue_daily_consolidation(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<DailyConsolidationJob>> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.connect()?;
+        conn.execute(
+            r#"
+            UPDATE daily_consolidation_jobs
+            SET status = 'pending', proposal_id = NULL, error = NULL, updated_at = ?2
+            WHERE id = ?1 AND status IN ('completed', 'failed', 'cancelled')
+            "#,
+            params![job_id, now],
+        )?;
+        self.get_daily_consolidation_job(job_id)
+    }
+
+    pub fn daily_consolidation_cancel_requested(&self, job_id: &str) -> Result<bool> {
+        let conn = self.connect()?;
+        Ok(conn
+            .query_row(
+                "SELECT status = 'cancel_requested' FROM daily_consolidation_jobs WHERE id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    pub fn finish_daily_consolidation(
+        &self,
+        job_id: &str,
+        status: &str,
+        proposal_id: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.connect()?;
+        conn.execute(
+            r#"
+            UPDATE daily_consolidation_jobs
+            SET status = ?2, proposal_id = ?3, error = ?4, updated_at = ?5
+            WHERE id = ?1
+            "#,
+            params![job_id, status, proposal_id, error, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn recover_daily_consolidations(&self) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE daily_consolidation_jobs SET status = 'pending', updated_at = ?1 WHERE status = 'running'",
+            params![now],
+        )?;
+        conn.execute(
+            "UPDATE daily_consolidation_jobs SET status = 'cancelled', updated_at = ?1 WHERE status = 'cancel_requested'",
+            params![now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_daily_consolidation_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<DailyConsolidationJob>> {
+        let conn = self.connect()?;
+        conn.query_row(
+            r#"
+            SELECT id, start, end, target_note, status, event_count, proposal_id, error,
+                   created_at, updated_at
+            FROM daily_consolidation_jobs
+            WHERE id = ?1
+            "#,
+            params![job_id],
+            consolidation_job_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     fn get_event(&self, event_id: &str) -> Result<Option<StoredLogEvent>> {
         let conn = self.connect()?;
         conn.query_row(
@@ -477,6 +755,21 @@ fn source_summary_from_row(row: &Row<'_>) -> rusqlite::Result<SourceSummary> {
         source: row.get(0)?,
         event_count: row.get::<_, i64>(1)? as u64,
         latest_timestamp: parse_utc(row.get::<_, String>(2)?),
+    })
+}
+
+fn consolidation_job_from_row(row: &Row<'_>) -> rusqlite::Result<DailyConsolidationJob> {
+    Ok(DailyConsolidationJob {
+        id: row.get(0)?,
+        start: parse_utc(row.get::<_, String>(1)?),
+        end: parse_utc(row.get::<_, String>(2)?),
+        target_note: row.get(3)?,
+        status: row.get(4)?,
+        event_count: row.get::<_, i64>(5)? as usize,
+        proposal_id: row.get(6)?,
+        error: row.get(7)?,
+        created_at: parse_utc(row.get::<_, String>(8)?),
+        updated_at: parse_utc(row.get::<_, String>(9)?),
     })
 }
 
@@ -614,6 +907,104 @@ mod tests {
             store.get_preferences().expect("preferences load"),
             preferences
         );
+    }
+
+    #[test]
+    fn reads_a_complete_bounded_event_day_in_time_order() {
+        let store = temp_store();
+        let day = Utc::now().date_naive();
+        let start = day.and_hms_opt(0, 0, 0).unwrap().and_utc();
+        for seconds in [20, 10, 30] {
+            store
+                .insert_event(LogEventInput {
+                    source: "codex/test".to_owned(),
+                    level: Some("info".to_owned()),
+                    timestamp: Some(start + Duration::seconds(seconds)),
+                    message: format!("event {seconds}"),
+                    metadata: None,
+                    fingerprint: None,
+                })
+                .expect("event stores");
+        }
+
+        let result = store
+            .get_events_between(start, start + Duration::days(1), 2)
+            .expect("daily events load");
+
+        assert!(result.truncated);
+        assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[0].message, "event 10");
+        assert_eq!(result.events[1].message, "event 20");
+    }
+
+    #[test]
+    fn persists_and_deduplicates_daily_consolidation_jobs() {
+        let store = temp_store();
+        let start = Utc::now();
+        let event = store
+            .insert_event(LogEventInput {
+                source: "codex/test".to_owned(),
+                level: Some("info".to_owned()),
+                timestamp: Some(start),
+                message: "durable work".to_owned(),
+                metadata: None,
+                fingerprint: None,
+            })
+            .expect("event stores");
+        let event_ids = vec![event.id];
+        let first = store
+            .enqueue_daily_consolidation(
+                start,
+                start + Duration::days(1),
+                "Daily log Sep 3",
+                &event_ids,
+            )
+            .expect("job queues");
+        let duplicate = store
+            .enqueue_daily_consolidation(
+                start,
+                start + Duration::days(1),
+                "Daily log Sep 3",
+                &event_ids,
+            )
+            .expect("duplicate resolves");
+
+        assert_eq!(duplicate.id, first.id);
+        let running = store
+            .claim_next_daily_consolidation()
+            .expect("job claims")
+            .expect("job exists");
+        assert_eq!(running.status, "running");
+        assert_eq!(
+            store
+                .get_daily_consolidation_events(&running.id)
+                .expect("snapshot loads")
+                .len(),
+            1
+        );
+        let cancelling = store
+            .request_daily_consolidation_cancel(&running.id)
+            .expect("cancel stores")
+            .expect("job remains");
+        assert_eq!(cancelling.status, "cancel_requested");
+        assert!(
+            store
+                .daily_consolidation_cancel_requested(&running.id)
+                .expect("cancel reads")
+        );
+        store
+            .recover_daily_consolidations()
+            .expect("interrupted state recovers");
+        let cancelled = store
+            .get_daily_consolidation_job(&running.id)
+            .expect("job reads")
+            .expect("job remains");
+        assert_eq!(cancelled.status, "cancelled");
+        let pending = store
+            .requeue_daily_consolidation(&running.id)
+            .expect("job requeues")
+            .expect("job remains");
+        assert_eq!(pending.status, "pending");
     }
 
     #[test]

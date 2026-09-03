@@ -93,6 +93,7 @@ impl ProposalInbox {
             proposal_id: proposal_id.to_owned(),
             daily_path,
             evidence_event_ids: proposal.frontmatter.evidence_event_ids,
+            supersedes_proposal_ids: proposal.frontmatter.supersedes_proposal_ids,
             proposal_removed: false,
             status: "applied",
         })
@@ -105,6 +106,19 @@ impl ProposalInbox {
             .map_err(|error| format!("removing consolidated proposal: {error}"))
     }
 
+    pub fn discard_if_present(&self, proposal_id: &str) -> Result<bool, String> {
+        validate_proposal_id(proposal_id)?;
+        match self.find_proposal(proposal_id) {
+            Ok(path) => {
+                fs::remove_file(path)
+                    .map_err(|error| format!("removing superseded proposal: {error}"))?;
+                Ok(true)
+            }
+            Err(error) if error.contains("no pending proposal matches") => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn list(&self) -> Result<Vec<PendingProposal>, String> {
         let mut paths = fs::read_dir(&self.pending_dir)
             .map_err(|error| format!("reading proposal inbox: {error}"))?
@@ -114,30 +128,12 @@ impl ProposalInbox {
             .collect::<Vec<_>>();
         paths.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
 
-        paths
-            .into_iter()
-            .map(|path| {
-                let filename = path
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .ok_or_else(|| "proposal filename is not valid UTF-8".to_owned())?
-                    .to_owned();
-                let contents = fs::read_to_string(&path)
-                    .map_err(|error| format!("reading proposal {}: {error}", path.display()))?;
-                let parsed = parse_proposal(&contents)?;
-                Ok(PendingProposal {
-                    filename,
-                    proposal_id: parsed.frontmatter.proposal_id,
-                    created_at: parsed.frontmatter.created_at,
-                    target_note: parsed.frontmatter.target_note,
-                    confidence: parsed.frontmatter.confidence,
-                    provider: parsed.frontmatter.provider,
-                    evidence_event_ids: parsed.frontmatter.evidence_event_ids,
-                    canonical_links: parsed.frontmatter.canonical_links,
-                    markdown: parsed.markdown,
-                })
-            })
-            .collect()
+        paths.into_iter().map(pending_proposal).collect()
+    }
+
+    pub fn get(&self, proposal_id: &str) -> Result<PendingProposal, String> {
+        validate_proposal_id(proposal_id)?;
+        pending_proposal(self.find_proposal(proposal_id)?)
     }
 
     fn find_proposal(&self, proposal_id: &str) -> Result<PathBuf, String> {
@@ -173,6 +169,7 @@ pub struct AppliedProposal {
     pub proposal_id: String,
     pub daily_path: PathBuf,
     pub evidence_event_ids: Vec<String>,
+    pub supersedes_proposal_ids: Vec<String>,
     pub proposal_removed: bool,
     pub status: &'static str,
 }
@@ -187,6 +184,8 @@ pub struct PendingProposal {
     pub provider: String,
     pub evidence_event_ids: Vec<String>,
     pub canonical_links: Vec<String>,
+    pub supersedes_proposal_ids: Vec<String>,
+    pub consolidation_job_id: Option<String>,
     pub markdown: String,
 }
 
@@ -204,11 +203,39 @@ struct ProposalFrontmatter {
     evidence_event_ids: Vec<String>,
     #[serde(default)]
     canonical_links: Vec<String>,
+    #[serde(default)]
+    supersedes_proposal_ids: Vec<String>,
+    #[serde(default)]
+    consolidation_job_id: Option<String>,
 }
 
 struct ParsedProposal {
     frontmatter: ProposalFrontmatter,
     markdown: String,
+}
+
+fn pending_proposal(path: PathBuf) -> Result<PendingProposal, String> {
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "proposal filename is not valid UTF-8".to_owned())?
+        .to_owned();
+    let contents = fs::read_to_string(&path)
+        .map_err(|error| format!("reading proposal {}: {error}", path.display()))?;
+    let parsed = parse_proposal(&contents)?;
+    Ok(PendingProposal {
+        filename,
+        proposal_id: parsed.frontmatter.proposal_id,
+        created_at: parsed.frontmatter.created_at,
+        target_note: parsed.frontmatter.target_note,
+        confidence: parsed.frontmatter.confidence,
+        provider: parsed.frontmatter.provider,
+        evidence_event_ids: parsed.frontmatter.evidence_event_ids,
+        canonical_links: parsed.frontmatter.canonical_links,
+        supersedes_proposal_ids: parsed.frontmatter.supersedes_proposal_ids,
+        consolidation_job_id: parsed.frontmatter.consolidation_job_id,
+        markdown: parsed.markdown,
+    })
 }
 
 fn parse_proposal(contents: &str) -> Result<ParsedProposal, String> {
@@ -334,6 +361,17 @@ fn render_proposal(
         output.push_str("canonical_links:\n");
         append_yaml_list(&mut output, &proposal.canonical_links);
     }
+    if proposal.supersedes_proposal_ids.is_empty() {
+        output.push_str("supersedes_proposal_ids: []\n");
+    } else {
+        output.push_str("supersedes_proposal_ids:\n");
+        append_yaml_list(&mut output, &proposal.supersedes_proposal_ids);
+    }
+    if let Some(job_id) = &proposal.consolidation_job_id {
+        output.push_str("consolidation_job_id: ");
+        output.push_str(&yaml_string(job_id));
+        output.push('\n');
+    }
     output.push_str("---\n\n# Log summary proposal\n\n");
     output.push_str(&proposal.markdown);
     output.push('\n');
@@ -376,6 +414,8 @@ mod tests {
             open_questions: vec!["Confirm the target note.".to_owned()],
             requires_review: true,
             provider: "local".to_owned(),
+            supersedes_proposal_ids: vec!["proposal_previous".to_owned()],
+            consolidation_job_id: Some("consolidation_test".to_owned()),
         }
     }
 
@@ -397,6 +437,11 @@ mod tests {
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].target_note, "Daily log Sep 3");
         assert_eq!(listed[0].evidence_event_ids, ["evt_123"]);
+        assert_eq!(listed[0].supersedes_proposal_ids, ["proposal_previous"]);
+        assert_eq!(
+            listed[0].consolidation_job_id.as_deref(),
+            Some("consolidation_test")
+        );
         let contents = fs::read_to_string(first.path).expect("proposal is readable");
         assert!(contents.contains("status: pending"));
         assert!(contents.contains("evt_123"));
@@ -434,6 +479,7 @@ mod tests {
         assert!(daily.starts_with("# Daily log Sep 3\n\n## [[Log Inbox]] activity report"));
         assert!(daily.contains("[[Log Inbox]]"));
         assert!(daily.contains("evt_123"));
+        assert_eq!(applied.supersedes_proposal_ids, ["proposal_previous"]);
         assert!(staged.path.exists());
         inbox
             .discard(&staged.proposal_id)

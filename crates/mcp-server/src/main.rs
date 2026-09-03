@@ -8,11 +8,15 @@ use axum::{
     routing::{get, post, put},
 };
 use chrono::{DateTime, Duration, Utc};
-use log_inbox_core::{models::LogQuery, settings::Settings, store::Store};
+use log_inbox_core::{
+    models::{DailyConsolidationJob, LogQuery},
+    settings::Settings,
+    store::Store,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, HashSet},
     env,
     net::SocketAddr,
     path::PathBuf,
@@ -21,6 +25,7 @@ use std::{
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod auto_stage;
+mod daily_consolidation;
 mod llm;
 mod proposal_inbox;
 mod vault_context;
@@ -110,6 +115,15 @@ struct DashboardPreferences {
     source_prefix: String,
     default_host: String,
     extra_instructions: String,
+    #[serde(default)]
+    consolidation_instructions: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DailyConsolidationRequest {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    target_note: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,6 +131,7 @@ struct DashboardData {
     preferences: DashboardPreferences,
     instructions: String,
     proposals: Vec<proposal_inbox::PendingProposal>,
+    consolidations: Vec<DailyConsolidationJob>,
 }
 
 #[tokio::main]
@@ -130,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
 
     let settings = Settings::from_env();
     let store = Store::open(settings.database_path())?;
+    store.recover_daily_consolidations()?;
     let vault_context = vault_context::VaultContextProvider::from_env();
     let state = AppState {
         store,
@@ -156,6 +172,15 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
+    if let Some(inbox) = state.proposal_inbox.clone() {
+        tokio::spawn(daily_consolidation::run(
+            state.store.clone(),
+            state.llm_config.clone(),
+            inbox,
+            state.vault_context.clone(),
+        ));
+    }
+
     let app = Router::new()
         .route("/", get(dashboard_page))
         .route("/api/dashboard", get(dashboard_data))
@@ -163,6 +188,19 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/proposals/{proposal_id}/apply",
             post(apply_dashboard_proposal),
+        )
+        .route(
+            "/api/proposals/{proposal_id}/discard",
+            post(discard_dashboard_proposal),
+        )
+        .route("/api/consolidations/daily", post(consolidate_dashboard_day))
+        .route(
+            "/api/consolidations/{job_id}",
+            get(get_dashboard_consolidation),
+        )
+        .route(
+            "/api/consolidations/{job_id}/cancel",
+            post(cancel_dashboard_consolidation),
         )
         .route("/health", get(health))
         .route("/mcp", post(mcp))
@@ -209,10 +247,15 @@ async fn dashboard_data(State(state): State<AppState>) -> Result<Json<DashboardD
         .map_or_else(|| Ok(Vec::new()), proposal_inbox::ProposalInbox::list)
         .map_err(ApiError::internal)?;
     let instructions = render_agent_instructions(&preferences);
+    let consolidations = state
+        .store
+        .list_daily_consolidations(20)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(DashboardData {
         preferences,
         instructions,
         proposals,
+        consolidations,
     }))
 }
 
@@ -237,6 +280,133 @@ async fn apply_dashboard_proposal(
 ) -> Result<Json<Value>, ApiError> {
     let applied = apply_proposal(&state, &proposal_id).map_err(ApiError::bad_request)?;
     Ok(Json(json!(applied)))
+}
+
+async fn discard_dashboard_proposal(
+    State(state): State<AppState>,
+    AxumPath(proposal_id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let _guard = state
+        .apply_lock
+        .lock()
+        .map_err(|_| ApiError::internal("proposal operation lock is poisoned"))?;
+    let inbox = state.proposal_inbox.as_ref().ok_or_else(|| {
+        ApiError::bad_request("proposal inbox is not configured; set LOG_INBOX_PROPOSAL_DIR")
+    })?;
+    let proposal = inbox.get(&proposal_id).map_err(ApiError::bad_request)?;
+    state
+        .store
+        .mark_reviewed(
+            &proposal.evidence_event_ids,
+            "discarded proposal",
+            "dashboard-discard",
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    inbox.discard(&proposal_id).map_err(ApiError::internal)?;
+    Ok(Json(json!({
+        "proposal_id": proposal_id,
+        "status": "discarded",
+        "evidence_event_ids": proposal.evidence_event_ids,
+    })))
+}
+
+async fn consolidate_dashboard_day(
+    State(state): State<AppState>,
+    Json(request): Json<DailyConsolidationRequest>,
+) -> Result<(StatusCode, Json<DailyConsolidationJob>), ApiError> {
+    validate_daily_consolidation_request(&request)?;
+    let result = state
+        .store
+        .get_events_between(request.start, request.end, 500)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if result.events.is_empty() {
+        return Err(ApiError::bad_request("no log events exist for this day"));
+    }
+    if result.truncated {
+        return Err(ApiError::conflict(
+            "this day contains more than 500 events; narrow the source data before consolidation",
+        ));
+    }
+    let inbox = state.proposal_inbox.as_ref().ok_or_else(|| {
+        ApiError::bad_request("proposal inbox is not configured; set LOG_INBOX_PROPOSAL_DIR")
+    })?;
+    let event_ids = result
+        .events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>();
+    let mut job = state
+        .store
+        .enqueue_daily_consolidation(request.start, request.end, &request.target_note, &event_ids)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let result_is_missing = job.status == "completed"
+        && job
+            .proposal_id
+            .as_deref()
+            .is_none_or(|proposal_id| inbox.get(proposal_id).is_err());
+    if matches!(job.status.as_str(), "failed" | "cancelled") || result_is_missing {
+        job = state
+            .store
+            .requeue_daily_consolidation(&job.id)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .ok_or_else(|| ApiError::internal("daily consolidation job disappeared"))?;
+    }
+    let status = if matches!(
+        job.status.as_str(),
+        "pending" | "running" | "cancel_requested"
+    ) {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(job)))
+}
+
+async fn cancel_dashboard_consolidation(
+    State(state): State<AppState>,
+    AxumPath(job_id): AxumPath<String>,
+) -> Result<Json<DailyConsolidationJob>, ApiError> {
+    let job = state
+        .store
+        .request_daily_consolidation_cancel(&job_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("daily consolidation job not found"))?;
+    Ok(Json(job))
+}
+
+async fn get_dashboard_consolidation(
+    State(state): State<AppState>,
+    AxumPath(job_id): AxumPath<String>,
+) -> Result<Json<DailyConsolidationJob>, ApiError> {
+    let job = state
+        .store
+        .get_daily_consolidation_job(&job_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("daily consolidation job not found"))?;
+    Ok(Json(job))
+}
+
+fn validate_daily_consolidation_request(
+    request: &DailyConsolidationRequest,
+) -> Result<(), ApiError> {
+    if request.start >= request.end || request.end - request.start > Duration::hours(27) {
+        return Err(ApiError::bad_request(
+            "daily consolidation requires a positive time window of at most 27 hours",
+        ));
+    }
+    if request.target_note.trim().is_empty()
+        || request
+            .target_note
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | '\0'))
+        || request.target_note.contains("..")
+        || request.target_note.len() > 200
+    {
+        return Err(ApiError::bad_request(
+            "target note must be a plain Markdown filename",
+        ));
+    }
+    Ok(())
 }
 
 async fn mcp(
@@ -406,6 +576,29 @@ fn apply_proposal(
     let daily_notes_dir = state.daily_notes_dir.as_deref().ok_or_else(|| {
         "daily notes directory is not configured; set LOG_INBOX_DAILY_NOTES_DIR".to_owned()
     })?;
+    let selected = inbox.get(proposal_id)?;
+    let selected_event_ids = selected
+        .evidence_event_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut covered_proposals = selected
+        .supersedes_proposal_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for proposal in inbox.list()? {
+        if proposal.proposal_id != proposal_id
+            && proposal.target_note == selected.target_note
+            && !proposal.evidence_event_ids.is_empty()
+            && proposal
+                .evidence_event_ids
+                .iter()
+                .all(|event_id| selected_event_ids.contains(event_id.as_str()))
+        {
+            covered_proposals.insert(proposal.proposal_id);
+        }
+    }
     let mut applied = inbox.apply(proposal_id, daily_notes_dir)?;
     state
         .store
@@ -415,6 +608,12 @@ fn apply_proposal(
             "proposal-apply",
         )
         .map_err(|error| error.to_string())?;
+    applied.supersedes_proposal_ids = covered_proposals.into_iter().collect();
+    for superseded_id in &applied.supersedes_proposal_ids {
+        if superseded_id != proposal_id {
+            inbox.discard_if_present(superseded_id)?;
+        }
+    }
     inbox.discard(proposal_id)?;
     applied.proposal_removed = true;
     Ok(applied)
@@ -436,6 +635,11 @@ impl DashboardPreferences {
             source_prefix: preference(&values, "source_prefix", "codex"),
             default_host: preference(&values, "default_host", "windows"),
             extra_instructions: preference(&values, "extra_instructions", ""),
+            consolidation_instructions: preference(
+                &values,
+                "consolidation_instructions",
+                "Group entries by product or workstream and keep the report concise.",
+            ),
         })
     }
 
@@ -451,6 +655,11 @@ impl DashboardPreferences {
             ("source prefix", &self.source_prefix, 100),
             ("default host", &self.default_host, 100),
             ("extra instructions", &self.extra_instructions, 4000),
+            (
+                "consolidation instructions",
+                &self.consolidation_instructions,
+                4000,
+            ),
         ] {
             if value.len() > maximum {
                 return Err(ApiError::bad_request(format!(
@@ -475,6 +684,10 @@ impl DashboardPreferences {
             (
                 "extra_instructions".to_owned(),
                 self.extra_instructions.clone(),
+            ),
+            (
+                "consolidation_instructions".to_owned(),
+                self.consolidation_instructions.clone(),
             ),
         ])
     }
@@ -517,6 +730,20 @@ impl ApiError {
     fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
             message: message.into(),
         }
     }

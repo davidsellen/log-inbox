@@ -63,3 +63,17 @@ pub struct StagedEventGroup {
     pub proposal_id: String,
     pub staged_count: usize,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyConsolidationJob {
+    pub id: String,
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub target_note: String,
+    pub status: String,
+    pub event_count: usize,
+    pub proposal_id: Option<String>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
