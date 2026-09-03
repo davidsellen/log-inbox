@@ -28,6 +28,18 @@ LLM consolidation turns selected log windows into proposed Markdown for a vault.
 7. Mark source events reviewed with the note reference.
 ```
 
+## Proposal Inbox
+
+The preferred service-orchestrated handoff is an append-only folder of Markdown proposals inside, or watched by, the vault:
+
+1. Write one uniquely named file per bounded event group to `pending/`.
+2. Write through a temporary file and atomically rename it into view.
+3. Let Obsidian index proposals without editing the daily note.
+4. Have one consolidator review pending proposals, patch canonical notes, and then move handled proposals to `processed/`.
+5. Mark evidence events reviewed only after the canonical patch succeeds.
+
+Concurrent producers never share a target file. The consolidator should use an advisory lock plus a content hash check before replacing a canonical note so an Obsidian edit cannot be silently overwritten. A daily-note template or query may show pending proposals by `created_at` without appending links for each proposal.
+
 ## Prompt Contract
 
 The LLM request should include only the relevant bounded log slice and compact vault context.
@@ -96,7 +108,7 @@ The MCP server only exposes read/search/mark-reviewed tools. The agent calls the
 
 ### Service-Orchestrated
 
-The MCP server or a background worker calls an LLM API and stores proposed summaries in the log inbox. The agent later reviews and applies them. This is useful when recurring summaries should be prepared before an agent session starts.
+The MCP server or a background worker calls an LLM API and stores proposed summaries in the proposal inbox. The agent later reviews and applies them. This is useful when recurring summaries should be prepared before an agent session starts.
 
 ### Direct Auto-Write
 

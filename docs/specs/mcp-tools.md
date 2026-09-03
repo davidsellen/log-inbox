@@ -90,6 +90,12 @@ Input:
 }
 ```
 
+### stage_markdown_summary
+
+Generate the same reviewable proposal and atomically create a unique Markdown file in `LOG_INBOX_PROPOSAL_DIR`. This operation never edits a daily or product note and does not mark evidence events reviewed.
+
+Input is the same as `suggest_markdown_summary`. Output includes the stable proposal ID, created path, timestamp, and `pending` status.
+
 Output:
 
 ```json

@@ -14,9 +14,14 @@ use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod llm;
+mod proposal_inbox;
+
 #[derive(Clone)]
 struct AppState {
     store: Store,
+    llm_config: Option<llm::LlmConfig>,
+    proposal_inbox: Option<proposal_inbox::ProposalInbox>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,7 +98,11 @@ async fn main() -> anyhow::Result<()> {
 
     let settings = Settings::from_env();
     let store = Store::open(settings.database_path())?;
-    let state = AppState { store };
+    let state = AppState {
+        store,
+        llm_config: llm::LlmConfig::from_env(),
+        proposal_inbox: proposal_inbox::ProposalInbox::from_env(),
+    };
 
     let app = Router::new()
         .route("/health", get(health))
@@ -146,7 +155,7 @@ async fn mcp(
             }
         })),
         "tools/list" => Ok(json!({ "tools": tool_definitions() })),
-        "tools/call" => call_tool(&state.store, request.params),
+        "tools/call" => call_tool(&state, request.params).await,
         _ => Err(format!("unknown method {}", request.method)),
     };
 
@@ -169,7 +178,7 @@ async fn mcp(
     })
 }
 
-fn call_tool(store: &Store, params: Value) -> Result<Value, String> {
+async fn call_tool(state: &AppState, params: Value) -> Result<Value, String> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -182,14 +191,16 @@ fn call_tool(store: &Store, params: Value) -> Result<Value, String> {
     match name {
         "list_sources" => {
             let args: ListSourcesArgs = parse_args(arguments)?;
-            let sources = store
+            let sources = state
+                .store
                 .list_sources(args.since)
                 .map_err(|error| error.to_string())?;
             Ok(tool_text(json!({ "sources": sources })))
         }
         "read_recent_logs" => {
             let args: ReadRecentLogsArgs = parse_args(arguments)?;
-            let result = store
+            let result = state
+                .store
                 .query_logs(LogQuery {
                     source: args.source,
                     since: args.since,
@@ -202,7 +213,8 @@ fn call_tool(store: &Store, params: Value) -> Result<Value, String> {
         }
         "search_logs" => {
             let args: SearchLogsArgs = parse_args(arguments)?;
-            let result = store
+            let result = state
+                .store
                 .query_logs(LogQuery {
                     source: None,
                     since: args.since,
@@ -215,7 +227,8 @@ fn call_tool(store: &Store, params: Value) -> Result<Value, String> {
         }
         "get_log_window" => {
             let args: GetLogWindowArgs = parse_args(arguments)?;
-            let result = store
+            let result = state
+                .store
                 .get_log_window(
                     &args.event_id,
                     parse_duration(&args.before)?,
@@ -227,16 +240,40 @@ fn call_tool(store: &Store, params: Value) -> Result<Value, String> {
         }
         "mark_reviewed" => {
             let args: MarkReviewedArgs = parse_args(arguments)?;
-            let result = store
+            let result = state
+                .store
                 .mark_reviewed(&args.event_ids, &args.note, "mcp")
                 .map_err(|error| error.to_string())?;
             Ok(tool_text(json!(result)))
         }
-        "suggest_markdown_summary" => Ok(tool_text(json!({
-            "requires_review": true,
-            "status": "not_implemented",
-            "message": "First iteration exposes bounded log tools. LLM summary proposal is intentionally deferred."
-        }))),
+        "suggest_markdown_summary" => {
+            let args: llm::SuggestMarkdownSummaryArgs = parse_args(arguments)?;
+            let events = state
+                .store
+                .get_events_by_ids(&args.event_ids)
+                .map_err(|error| error.to_string())?;
+            let proposal =
+                llm::suggest_markdown_summary(state.llm_config.as_ref(), args, events).await?;
+            Ok(tool_text(json!(proposal)))
+        }
+        "stage_markdown_summary" => {
+            let args: llm::SuggestMarkdownSummaryArgs = parse_args(arguments)?;
+            let events = state
+                .store
+                .get_events_by_ids(&args.event_ids)
+                .map_err(|error| error.to_string())?;
+            let proposal =
+                llm::suggest_markdown_summary(state.llm_config.as_ref(), args, events).await?;
+            let staged = state
+                .proposal_inbox
+                .as_ref()
+                .ok_or_else(|| {
+                    "proposal inbox is not configured; set LOG_INBOX_PROPOSAL_DIR".to_owned()
+                })?
+                .stage(&proposal)
+                .map_err(|error| error.to_string())?;
+            Ok(tool_text(json!(staged)))
+        }
         _ => Err(format!("unknown tool {name}")),
     }
 }
@@ -343,10 +380,42 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "suggest_markdown_summary",
-            "description": "Placeholder for future LLM-backed Markdown summary proposals.",
+            "description": "Use configured local or remote LLM to propose Markdown for selected event IDs.",
             "inputSchema": {
                 "type": "object",
-                "properties": {}
+                "required": ["event_ids"],
+                "properties": {
+                    "event_ids": { "type": "array", "items": { "type": "string" } },
+                    "vault_context": {
+                        "type": "object",
+                        "properties": {
+                            "candidate_notes": { "type": "array", "items": { "type": "string" } },
+                            "daily_note": { "type": "string" }
+                        }
+                    },
+                    "mode": { "type": "string", "default": "daily-note" },
+                    "task": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "stage_markdown_summary",
+            "description": "Generate a reviewable summary and atomically write it as a new Markdown file in the configured proposal inbox.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["event_ids"],
+                "properties": {
+                    "event_ids": { "type": "array", "items": { "type": "string" } },
+                    "vault_context": {
+                        "type": "object",
+                        "properties": {
+                            "candidate_notes": { "type": "array", "items": { "type": "string" } },
+                            "daily_note": { "type": "string" }
+                        }
+                    },
+                    "mode": { "type": "string", "default": "daily-note" },
+                    "task": { "type": "string" }
+                }
             }
         }),
     ]

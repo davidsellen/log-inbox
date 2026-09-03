@@ -17,9 +17,23 @@ Docker Compose is the default way to run the system locally.
 - Reads `/data` as read-only when possible.
 - Exposes MCP tools for an agent.
 
+### ollama
+
+- Runs local model inference inside the Compose network.
+- Does not publish port `11434` to the host.
+- Stores downloaded models in `ollama-data`.
+- Defaults to the text-only `granite3.3:2b` model for bounded log consolidation.
+
+### ollama-pull
+
+- Runs once after Ollama becomes healthy.
+- Pulls `LOG_INBOX_LLM_MODEL` when it is not already present.
+- Must complete successfully before the MCP service starts.
+
 ## Volumes
 
-`log-inbox-data` stores SQLite/JSONL data.
+- `log-inbox-data` stores SQLite/JSONL data.
+- `ollama-data` stores local model files.
 
 ## VM Access
 
@@ -38,4 +52,4 @@ cp .env.example .env
 docker compose up --build
 ```
 
-The placeholder Dockerfiles should be replaced when the implementation language is chosen.
+The first run downloads the configured local model and can take several minutes. Later starts reuse the model volume.

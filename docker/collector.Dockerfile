@@ -7,7 +7,11 @@ RUN cargo build --release --bin log-inbox-collector
 
 FROM debian:bookworm-slim
 
-RUN useradd --system --create-home --home-dir /app app \
+ARG APP_UID=1000
+ARG APP_GID=1000
+
+RUN groupadd --gid "$APP_GID" app \
+  && useradd --uid "$APP_UID" --gid "$APP_GID" --create-home --home-dir /app app \
   && apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/*

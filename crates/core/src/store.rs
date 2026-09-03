@@ -243,6 +243,16 @@ impl Store {
         })
     }
 
+    pub fn get_events_by_ids(&self, event_ids: &[String]) -> Result<Vec<StoredLogEvent>> {
+        event_ids
+            .iter()
+            .map(|event_id| {
+                self.get_event(event_id)?
+                    .with_context(|| format!("event {event_id} not found"))
+            })
+            .collect()
+    }
+
     pub fn mark_reviewed(
         &self,
         event_ids: &[String],

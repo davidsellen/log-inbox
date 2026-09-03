@@ -31,6 +31,8 @@ Before applying Markdown to the vault, the workflow should:
 
 Automatic writes are acceptable only for narrow daily-log summaries when the source window is bounded, redacted, and clearly connected to the active workstream.
 
+Prefer writing immutable proposal files into a vault inbox over appending directly to a daily note. This lets multiple producers work concurrently without sharing a file. A single consolidator may later patch canonical notes after checking that their content has not changed since review.
+
 ## Format
 
 Daily entries should name:
