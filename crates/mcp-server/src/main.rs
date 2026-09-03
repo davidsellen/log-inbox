@@ -328,7 +328,7 @@ async fn call_tool(state: &AppState, params: Value) -> Result<Value, String> {
             let daily_notes_dir = state.daily_notes_dir.as_deref().ok_or_else(|| {
                 "daily notes directory is not configured; set LOG_INBOX_DAILY_NOTES_DIR".to_owned()
             })?;
-            let applied = inbox.apply(&args.proposal_id, daily_notes_dir)?;
+            let mut applied = inbox.apply(&args.proposal_id, daily_notes_dir)?;
             state
                 .store
                 .mark_reviewed(
@@ -337,6 +337,8 @@ async fn call_tool(state: &AppState, params: Value) -> Result<Value, String> {
                     "mcp-apply",
                 )
                 .map_err(|error| error.to_string())?;
+            inbox.discard(&args.proposal_id)?;
+            applied.proposal_removed = true;
             Ok(tool_text(json!(applied)))
         }
         _ => Err(format!("unknown tool {name}")),
@@ -501,7 +503,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "apply_markdown_proposal",
-            "description": "Apply one reviewed pending proposal to its daily-note filename, archive the proposal, and mark its evidence reviewed.",
+            "description": "Apply one reviewed pending proposal to its daily-note filename, mark its evidence reviewed, and remove the consumed proposal.",
             "inputSchema": {
                 "type": "object",
                 "required": ["proposal_id"],

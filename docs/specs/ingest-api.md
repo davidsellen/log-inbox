@@ -65,4 +65,6 @@ Return process and storage health.
 - Accepted events are persisted completely after redaction.
 - Messages larger than 1 MiB or metadata larger than 512 KiB are rejected instead of silently truncated.
 - Producers should split large activity into ordered events sharing `task_id` or `session_id` metadata.
-- `sequence`, `event_type`, `repo`, `branch`, and `canonical_note` preserve consolidation context.
+- `sequence`, `event_type`, `repo` or `project`, `branch`, `product`, `modules`, `changed_paths`, `commit`, and validation fields preserve consolidation context.
+- Meaningful agent work should emit a correlated opening event and a terminal `complete`, `blocked`, or `failed` event.
+- See [Agent activity reporting](../agent-integration.md) for the recommended lifecycle and metadata contract.

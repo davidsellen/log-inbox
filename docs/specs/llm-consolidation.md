@@ -35,7 +35,7 @@ The preferred service-orchestrated handoff is an append-only folder of Markdown 
 1. Write one uniquely named file per bounded event group to `pending/`.
 2. Write through a temporary file and atomically rename it into view.
 3. Let the user's Markdown tools index proposals without editing the daily note.
-4. Have one consolidator review pending proposals, patch canonical notes, and then move handled proposals to `processed/`.
+4. Have one consolidator review pending proposals, patch canonical notes, acknowledge the evidence in SQLite, and delete handled proposals.
 5. Mark evidence events reviewed only after the canonical patch succeeds.
 
 The MCP service may run an automatic staging worker. It waits for a quiet period, groups unstaged events by `task_id`, `session_id`, or `fingerprint`, writes one proposal per group, and records proposal state without marking the evidence reviewed. Events without a correlation identifier remain isolated to avoid merging unrelated work.

@@ -11,7 +11,6 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub struct ProposalInbox {
     pending_dir: PathBuf,
-    processed_dir: PathBuf,
 }
 
 impl ProposalInbox {
@@ -19,21 +18,7 @@ impl ProposalInbox {
         std::env::var_os("LOG_INBOX_PROPOSAL_DIR")
             .filter(|path| !path.is_empty())
             .map(PathBuf::from)
-            .map(|pending_dir| {
-                let processed_dir = std::env::var_os("LOG_INBOX_PROCESSED_DIR")
-                    .filter(|path| !path.is_empty())
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| {
-                        pending_dir
-                            .parent()
-                            .unwrap_or(Path::new("."))
-                            .join("processed")
-                    });
-                Self {
-                    pending_dir,
-                    processed_dir,
-                }
-            })
+            .map(|pending_dir| Self { pending_dir })
     }
 
     pub fn stage(&self, proposal: &SummaryProposal) -> io::Result<StagedProposal> {
@@ -104,22 +89,20 @@ impl ProposalInbox {
             write_result.map_err(|error| format!("writing daily note: {error}"))?;
         }
 
-        fs::create_dir_all(&self.processed_dir)
-            .map_err(|error| format!("creating processed proposal directory: {error}"))?;
-        let file_name = proposal_path
-            .file_name()
-            .ok_or_else(|| "proposal path has no filename".to_owned())?;
-        let processed_path = self.processed_dir.join(file_name);
-        archive_file(&proposal_path, &processed_path, proposal_id)
-            .map_err(|error| format!("archiving applied proposal: {error}"))?;
-
         Ok(AppliedProposal {
             proposal_id: proposal_id.to_owned(),
             daily_path,
-            processed_path,
             evidence_event_ids: proposal.frontmatter.evidence_event_ids,
+            proposal_removed: false,
             status: "applied",
         })
+    }
+
+    pub fn discard(&self, proposal_id: &str) -> Result<(), String> {
+        validate_proposal_id(proposal_id)?;
+        let proposal_path = self.find_proposal(proposal_id)?;
+        fs::remove_file(&proposal_path)
+            .map_err(|error| format!("removing consolidated proposal: {error}"))
     }
 
     fn find_proposal(&self, proposal_id: &str) -> Result<PathBuf, String> {
@@ -154,8 +137,8 @@ pub struct StagedProposal {
 pub struct AppliedProposal {
     pub proposal_id: String,
     pub daily_path: PathBuf,
-    pub processed_path: PathBuf,
     pub evidence_event_ids: Vec<String>,
+    pub proposal_removed: bool,
     pub status: &'static str,
 }
 
@@ -201,17 +184,34 @@ fn render_daily_note(current: &str, proposal: &ParsedProposal, marker: &str) -> 
     } else {
         current.trim_end().to_owned()
     };
-    output.push_str("\n\n## Activity report\n\n");
-    output.push_str(proposal.markdown.trim());
-    output.push_str("\n\nDetails:");
-    if !proposal.frontmatter.canonical_links.is_empty() {
-        output.push(' ');
-        output.push_str(&proposal.frontmatter.canonical_links.join(" · "));
+    output.push_str("\n\n## ");
+    if proposal.frontmatter.canonical_links.len() == 1 {
+        output.push_str(&proposal.frontmatter.canonical_links[0]);
+        output.push_str(" activity report\n\n");
+    } else {
+        output.push_str("Activity report\n\n");
     }
-    for event_id in &proposal.frontmatter.evidence_event_ids {
-        output.push_str(" · `");
-        output.push_str(event_id);
-        output.push('`');
+    output.push_str(proposal.markdown.trim());
+    if proposal
+        .markdown
+        .lines()
+        .any(|line| line.trim_start().starts_with("Details:"))
+    {
+        if proposal.frontmatter.canonical_links.len() > 1 {
+            output.push_str("\n\nRelated: ");
+            output.push_str(&proposal.frontmatter.canonical_links.join(" · "));
+        }
+    } else {
+        output.push_str("\n\nDetails:");
+        if !proposal.frontmatter.canonical_links.is_empty() {
+            output.push(' ');
+            output.push_str(&proposal.frontmatter.canonical_links.join(" · "));
+        }
+        for event_id in &proposal.frontmatter.evidence_event_ids {
+            output.push_str(" · `");
+            output.push_str(event_id);
+            output.push('`');
+        }
     }
     output.push('\n');
     output.push_str(marker);
@@ -257,24 +257,6 @@ fn write_then_rename(temporary_path: &Path, final_path: &Path, contents: &[u8]) 
     file.sync_all()?;
     drop(file);
     fs::rename(temporary_path, final_path)
-}
-
-fn archive_file(source: &Path, destination: &Path, proposal_id: &str) -> io::Result<()> {
-    match fs::rename(source, destination) {
-        Ok(()) => Ok(()),
-        Err(error) if error.raw_os_error() == Some(18) => {
-            let contents = fs::read(source)?;
-            let directory = destination.parent().unwrap_or(Path::new("."));
-            let temporary_path = directory.join(format!(".{proposal_id}.tmp"));
-            let write_result = write_then_rename(&temporary_path, destination, &contents);
-            if write_result.is_err() {
-                let _ = fs::remove_file(&temporary_path);
-            }
-            write_result?;
-            fs::remove_file(source)
-        }
-        Err(error) => Err(error),
-    }
 }
 
 fn render_proposal(
@@ -351,7 +333,6 @@ mod tests {
         ));
         let inbox = ProposalInbox {
             pending_dir: directory.clone(),
-            processed_dir: directory.join("processed"),
         };
 
         let first = inbox.stage(&proposal()).expect("first proposal stages");
@@ -376,12 +357,11 @@ mod tests {
     }
 
     #[test]
-    fn applies_a_proposal_to_an_empty_daily_note_and_archives_it() {
+    fn applies_a_proposal_to_an_empty_daily_note_and_discards_it_after_acknowledgement() {
         let root =
             std::env::temp_dir().join(format!("log-inbox-apply-test-{}", Uuid::new_v4().simple()));
         let inbox = ProposalInbox {
             pending_dir: root.join("pending"),
-            processed_dir: root.join("processed"),
         };
         let staged = inbox.stage(&proposal()).expect("proposal stages");
         let daily_dir = root.join("daily");
@@ -393,11 +373,14 @@ mod tests {
             .expect("proposal applies");
         let daily = fs::read_to_string(&applied.daily_path).expect("daily note is readable");
 
-        assert!(daily.starts_with("# Daily log Sep 3\n\n## Activity report"));
+        assert!(daily.starts_with("# Daily log Sep 3\n\n## [[Log Inbox]] activity report"));
         assert!(daily.contains("[[Log Inbox]]"));
         assert!(daily.contains("evt_123"));
+        assert!(staged.path.exists());
+        inbox
+            .discard(&staged.proposal_id)
+            .expect("consolidated proposal is discarded");
         assert!(!staged.path.exists());
-        assert!(applied.processed_path.exists());
 
         fs::remove_dir_all(root).expect("test directory is removable");
     }

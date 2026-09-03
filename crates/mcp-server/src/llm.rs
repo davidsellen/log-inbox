@@ -1,7 +1,11 @@
 use log_inbox_core::models::StoredLogEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::{borrow::Cow, collections::HashSet, time::Duration};
+use std::{
+    borrow::Cow,
+    collections::{BTreeSet, HashSet},
+    time::Duration,
+};
 
 const MAX_PROMPT_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_PROMPT_METADATA_BYTES: usize = 8 * 1024;
@@ -12,10 +16,21 @@ const CONTEXT_METADATA_KEYS: &[&str] = &[
     "event_type",
     "sequence",
     "repo",
+    "project",
     "product",
     "app",
     "service",
     "branch",
+    "base_branch",
+    "target_branch",
+    "commit",
+    "work_item",
+    "pull_request",
+    "modules",
+    "changed_paths",
+    "tests",
+    "validation",
+    "duration_ms",
     "activity",
     "sender",
     "status",
@@ -197,9 +212,9 @@ Return JSON with this exact shape:
 Rules:
 - Use only the supplied events and vault context.
 - canonical_links may contain only exact values from Allowed canonical links.
-- Keep markdown concise; no raw log dumps.
+- Write 2-4 concise factual bullets covering outcome, important changes or diagnosis, validation, and any remaining follow-up. Do not add a heading or raw log dump.
 - A false message_complete or metadata _prompt_notice means full evidence remains in SQLite but was bounded for this model call.
-- Include source, time window, and event IDs in a Details line when useful.
+- Do not repeat source, time, Git metadata, or event IDs; the server appends an evidence Details line.
 - If uncertain, say so and include open questions.
 "#,
         task = args
@@ -270,8 +285,11 @@ fn parse_proposal(
     Ok(SummaryProposal {
         target_note: default_target_note(args),
         canonical_links: validated_canonical_links(&value, args),
-        markdown: string_field(&value, "markdown")
-            .unwrap_or_else(|| fallback_markdown(events, "LLM response omitted markdown.")),
+        markdown: with_evidence_details(
+            string_field(&value, "markdown")
+                .unwrap_or_else(|| fallback_markdown(events, "LLM response omitted markdown.")),
+            events,
+        ),
         evidence_event_ids: events.iter().map(|event| event.id.clone()).collect(),
         confidence: string_field(&value, "confidence").unwrap_or_else(|| "low".to_owned()),
         open_questions: string_array_field(&value, "open_questions"),
@@ -286,10 +304,17 @@ fn fallback_proposal(
     provider: &str,
     reason: &str,
 ) -> SummaryProposal {
+    let markdown = with_evidence_details(fallback_markdown(&events, reason), &events);
+    let allowed_links = allowed_canonical_links(&args);
+    let canonical_links = if allowed_links.len() == 1 {
+        allowed_links
+    } else {
+        Vec::new()
+    };
     SummaryProposal {
         target_note: default_target_note(&args),
-        canonical_links: Vec::new(),
-        markdown: fallback_markdown(&events, reason),
+        canonical_links,
+        markdown,
         evidence_event_ids: events.into_iter().map(|event| event.id).collect(),
         confidence: "low".to_owned(),
         open_questions: vec![reason.to_owned()],
@@ -299,20 +324,9 @@ fn fallback_proposal(
 }
 
 fn fallback_markdown(events: &[StoredLogEvent], reason: &str) -> String {
-    let first = events.first().expect("fallback requires events");
-    let last = events.last().unwrap_or(first);
-    let event_ids = events
-        .iter()
-        .map(|event| event.id.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-
     format!(
-        "- Review {count} `{source}` log events manually. {reason}\n\nDetails: source `{source}` · window `{start}/{end}` · events `{event_ids}`",
+        "- Review {count} log events manually. {reason}",
         count = events.len(),
-        source = first.source,
-        start = first.timestamp.to_rfc3339(),
-        end = last.timestamp.to_rfc3339(),
     )
 }
 
@@ -363,11 +377,111 @@ fn allowed_canonical_links(args: &SuggestMarkdownSummaryArgs) -> Vec<String> {
 }
 
 fn validated_canonical_links(value: &Value, args: &SuggestMarkdownSummaryArgs) -> Vec<String> {
-    let allowed: HashSet<String> = allowed_canonical_links(args).into_iter().collect();
-    string_array_field(value, "canonical_links")
+    let allowed_links = allowed_canonical_links(args);
+    let allowed: HashSet<&str> = allowed_links.iter().map(String::as_str).collect();
+    let mut selected = string_array_field(value, "canonical_links")
         .into_iter()
-        .filter(|link| allowed.contains(link))
-        .collect()
+        .filter(|link| allowed.contains(link.as_str()))
+        .collect::<Vec<_>>();
+    if selected.is_empty() && allowed_links.len() == 1 {
+        selected.push(allowed_links[0].clone());
+    }
+    selected
+}
+
+fn with_evidence_details(markdown: String, events: &[StoredLogEvent]) -> String {
+    let narrative = markdown
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("Details:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut details = Vec::new();
+    push_detail(
+        &mut details,
+        "source",
+        event_field(events, |event| Some(&event.source)),
+    );
+    if let (Some(first), Some(last)) = (
+        events.iter().map(|event| event.timestamp).min(),
+        events.iter().map(|event| event.timestamp).max(),
+    ) {
+        details.push(format!(
+            "window `{}/{}`",
+            first.to_rfc3339(),
+            last.to_rfc3339()
+        ));
+    }
+    for (label, key) in [
+        ("repo", "repo"),
+        ("project", "project"),
+        ("product", "product"),
+        ("branch", "branch"),
+        ("base", "base_branch"),
+        ("target", "target_branch"),
+        ("commit", "commit"),
+        ("status", "status"),
+        ("work item", "work_item"),
+        ("pull request", "pull_request"),
+        ("modules", "modules"),
+        ("paths", "changed_paths"),
+        ("tests", "tests"),
+        ("validation", "validation"),
+    ] {
+        push_detail(&mut details, label, metadata_field(events, key));
+    }
+    push_detail(
+        &mut details,
+        "events",
+        Some(events.iter().map(|event| event.id.clone()).collect()),
+    );
+
+    format!("{}\n\nDetails: {}", narrative.trim(), details.join(" · "))
+}
+
+fn event_field<F>(events: &[StoredLogEvent], field: F) -> Option<Vec<String>>
+where
+    F: Fn(&StoredLogEvent) -> Option<&String>,
+{
+    let values = events
+        .iter()
+        .filter_map(field)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    (!values.is_empty()).then(|| values.into_iter().collect())
+}
+
+fn metadata_field(events: &[StoredLogEvent], key: &str) -> Option<Vec<String>> {
+    let mut values = BTreeSet::new();
+    for event in events {
+        match event.metadata.get(key) {
+            Some(Value::String(value)) => {
+                values.insert(value.clone());
+            }
+            Some(Value::Array(items)) => {
+                values.extend(
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned),
+                );
+            }
+            _ => {}
+        }
+    }
+    (!values.is_empty()).then(|| values.into_iter().take(12).collect())
+}
+
+fn push_detail(details: &mut Vec<String>, label: &str, values: Option<Vec<String>>) {
+    let Some(values) = values else {
+        return;
+    };
+    let values = values
+        .into_iter()
+        .map(|value| value.replace('`', "'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    details.push(format!("{label} `{values}`"));
 }
 
 fn default_mode() -> String {
@@ -412,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_database_event_ids_instead_of_model_supplied_ids() {
+    fn keeps_database_evidence_and_one_allowed_link() {
         let event = StoredLogEvent {
             id: "evt_real".to_owned(),
             received_at: Utc::now(),
@@ -420,20 +534,26 @@ mod tests {
             source: "codex/test".to_owned(),
             level: "info".to_owned(),
             message: "Completed a useful task".to_owned(),
-            metadata: Map::new(),
+            metadata: Map::from_iter([
+                ("project".to_owned(), Value::from("application-suite")),
+                ("branch".to_owned(), Value::from("feature/test")),
+            ]),
             fingerprint: None,
             truncated: false,
             reviewed: false,
         };
         let args = SuggestMarkdownSummaryArgs {
             event_ids: vec![event.id.clone()],
-            vault_context: json!({ "daily_note": "Approved daily note" }),
+            vault_context: json!({
+                "daily_note": "Approved daily note",
+                "candidate_notes": ["Customer Portal"]
+            }),
             mode: "daily-note".to_owned(),
             task: None,
         };
         let model_output = json!({
             "target_note": "Model-selected note",
-            "markdown": "- A result.",
+            "markdown": "- A result.\n\nDetails: invented evidence",
             "evidence_event_ids": ["evt_invented"],
             "canonical_links": ["[[Invented Note]]"]
         })
@@ -444,7 +564,11 @@ mod tests {
 
         assert_eq!(proposal.evidence_event_ids, ["evt_real"]);
         assert_eq!(proposal.target_note, "Approved daily note");
-        assert!(proposal.canonical_links.is_empty());
+        assert_eq!(proposal.canonical_links, ["[[Customer Portal]]"]);
+        assert!(proposal.markdown.contains("project `application-suite`"));
+        assert!(proposal.markdown.contains("branch `feature/test`"));
+        assert!(proposal.markdown.contains("events `evt_real`"));
+        assert!(!proposal.markdown.contains("invented evidence"));
     }
 
     #[test]

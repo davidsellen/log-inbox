@@ -122,7 +122,7 @@ Input:
 }
 ```
 
-The target is restricted to a plain Markdown filename in `LOG_INBOX_DAILY_NOTES_DIR`. The tool atomically replaces the daily note, embeds a proposal marker for retry safety, archives the proposal under `LOG_INBOX_PROCESSED_DIR`, and only then marks its evidence events reviewed.
+The target is restricted to a plain Markdown filename in `LOG_INBOX_DAILY_NOTES_DIR`. The tool atomically replaces the daily note, embeds a proposal marker for retry safety, marks its evidence events reviewed in SQLite, and then deletes the consumed pending proposal. A failed acknowledgement leaves the proposal pending.
 
 Output:
 
@@ -130,8 +130,8 @@ Output:
 {
   "proposal_id": "proposal_123",
   "daily_path": "/vault-daily/Daily log Aug 31.md",
-  "processed_path": "/vault-processed/20260831T120000.000Z-proposal_123.md",
   "evidence_event_ids": ["evt_123", "evt_124"],
+  "proposal_removed": true,
   "status": "applied"
 }
 ```

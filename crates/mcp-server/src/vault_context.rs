@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, env, fs, path::PathBuf, sync::OnceLock};
 
-const MATCH_METADATA_KEYS: &[&str] = &["product", "repo", "app", "service"];
+const MATCH_METADATA_KEYS: &[&str] = &["product", "repo", "project", "app", "service"];
 
 #[derive(Debug, Clone)]
 pub struct VaultContextProvider {
@@ -61,7 +61,7 @@ impl VaultContextProvider {
         let navigation_notes = self.navigation_notes()?;
 
         for note in &navigation_notes {
-            if event_values.contains(&note.trim().to_lowercase()) {
+            if event_values.contains(&note_identity(note)) {
                 candidate_notes.insert(note.clone());
             }
         }
@@ -72,7 +72,7 @@ impl VaultContextProvider {
                 && product
                     .aliases
                     .iter()
-                    .any(|alias| event_values.contains(&alias.trim().to_lowercase()))
+                    .any(|alias| event_values.contains(&normalized_identity(alias)))
             {
                 candidate_notes.insert(product.note);
             }
@@ -116,14 +116,26 @@ fn explicit_notes(events: &[StoredLogEvent]) -> BTreeSet<String> {
 fn match_values(events: &[StoredLogEvent]) -> BTreeSet<String> {
     let mut values = BTreeSet::new();
     for event in events {
-        values.insert(event.source.trim().to_lowercase());
+        values.insert(normalized_identity(&event.source));
         for key in MATCH_METADATA_KEYS {
             if let Some(value) = event.metadata.get(*key).and_then(Value::as_str) {
-                values.insert(value.trim().to_lowercase());
+                values.insert(normalized_identity(value));
             }
         }
     }
     values
+}
+
+fn note_identity(note: &str) -> String {
+    normalized_identity(note.rsplit('/').next().unwrap_or(note))
+}
+
+fn normalized_identity(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn default_daily_note_format() -> String {
@@ -192,8 +204,19 @@ mod tests {
             config.products[0]
                 .aliases
                 .iter()
-                .any(|alias| values.contains(&alias.to_lowercase()))
+                .any(|alias| values.contains(&normalized_identity(alias)))
         );
+    }
+
+    #[test]
+    fn matches_repository_identifiers_to_product_note_names() {
+        let events = vec![event(Map::from_iter([(
+            "repo".to_owned(),
+            Value::from("CustomerPortal"),
+        )]))];
+        let event_values = match_values(&events);
+
+        assert!(event_values.contains(&note_identity("Products/Customer Portal")));
     }
 
     #[test]

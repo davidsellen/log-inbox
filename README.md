@@ -80,6 +80,8 @@ curl -sS http://127.0.0.1:8788/mcp \
   }'
 ```
 
+For coding agents, use a correlated start and terminal event with repository, branch, changed-module, commit, and validation metadata. A copy-ready `AGENTS.md` policy and complete payload examples are in [Agent activity reporting](docs/agent-integration.md).
+
 ### Local LLM Consolidation
 
 The Compose stack runs Ollama locally and pulls the text-only `granite3.3:2b` model on first start. Ollama is reachable only by other Compose services at `http://ollama:11434`; prompts and log summaries are not sent to a hosted model API. Model downloads are retained in the `ollama-data` volume.
@@ -154,7 +156,7 @@ LOG_INBOX_PRODUCT_INDEX_FILE=/config/product-navigation.md
 
 Wiki-link targets such as `[[Customer Portal]]` and `[[Billing#Operations|Billing ops]]` become allowed canonical note candidates. Exact `product`, `repo`, `app`, `service`, or source values can select them. Configured alias mappings are also checked against this navigation when it is present, preventing stale aliases from creating links to removed products.
 
-On Linux, pre-create the proposal, processed, and daily-note host directories, then set `LOG_INBOX_HOST_UID` and `LOG_INBOX_HOST_GID` to their owner (usually the output of `id -u` and `id -g`). The defaults are `1000:1000`. Pre-creation matters because Docker-created bind directories may be owned by `root` or `nobody`. The MCP service uses the host user namespace so files retain the configured ownership while the process itself remains unprivileged.
+On Linux, pre-create the proposal and daily-note host directories, then set `LOG_INBOX_HOST_UID` and `LOG_INBOX_HOST_GID` to their owner (usually the output of `id -u` and `id -g`). The defaults are `1000:1000`. Pre-creation matters because Docker-created bind directories may be owned by `root` or `nobody`. The MCP service uses the host user namespace so files retain the configured ownership while the process itself remains unprivileged.
 
 Then call `stage_markdown_summary` with the same arguments as `suggest_markdown_summary`. Each call creates a distinct, complete Markdown file with `status: pending`; it does not append to the daily note or mark events reviewed. This keeps concurrent writers isolated.
 
@@ -174,7 +176,7 @@ curl -sS http://127.0.0.1:8788/mcp \
   }'
 ```
 
-The target note must be a plain filename under `LOG_INBOX_DAILY_NOTES_HOST_DIR`. The apply operation writes a complete replacement through a temporary file, includes an idempotency marker, moves the proposal to `processed`, and marks its evidence reviewed. This is the single-writer consolidation boundary; producers never append to a shared daily note.
+The target note must be a plain filename under `LOG_INBOX_DAILY_NOTES_HOST_DIR`. The apply operation writes a complete replacement through a temporary file, includes an idempotency marker, marks its evidence reviewed in SQLite, and removes the consumed pending proposal. If acknowledgement fails, the proposal remains pending for retry. This is the single-writer consolidation boundary; producers never append to a shared daily note.
 
 Compose also enables automatic staging every 30 seconds. Unreviewed events remain quiet for 30 seconds before they are grouped by `task_id`, then `session_id`, then `fingerprint`; events without one of those identifiers are staged separately. The worker drains retained unstaged events in bounded batches. Successfully staged event IDs are recorded in SQLite so they are not proposed repeatedly. Set `LOG_INBOX_AUTO_STAGE_INTERVAL_SECONDS=0` to disable the worker.
 
@@ -191,6 +193,7 @@ The LLM receives a bounded projection (16 KiB message and 8 KiB metadata per eve
 - [Docker deployment](docs/specs/docker.md)
 - [Security](docs/specs/security.md)
 - [Vault writing policy](docs/specs/vault-policy.md)
+- [Agent activity reporting](docs/agent-integration.md)
 
 ## License
 
