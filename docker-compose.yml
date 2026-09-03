@@ -52,7 +52,10 @@ services:
       LOG_INBOX_LLM_BASE_URL: "${LOG_INBOX_LLM_BASE_URL:-http://ollama:11434/v1}"
       LOG_INBOX_LLM_MODEL: "${LOG_INBOX_LLM_MODEL:-granite3.3:2b}"
       LOG_INBOX_PROPOSAL_DIR: "${LOG_INBOX_PROPOSAL_DIR:-/vault-inbox}"
+      LOG_INBOX_PROCESSED_DIR: "${LOG_INBOX_PROCESSED_DIR:-/vault-processed}"
+      LOG_INBOX_DAILY_NOTES_DIR: "${LOG_INBOX_DAILY_NOTES_DIR:-/vault-daily}"
       LOG_INBOX_VAULT_CONTEXT_FILE: "${LOG_INBOX_VAULT_CONTEXT_FILE:-/config/vault-context.json}"
+      LOG_INBOX_PRODUCT_INDEX_FILE: "${LOG_INBOX_PRODUCT_INDEX_FILE:-/config/product-navigation.md}"
       LOG_INBOX_AUTO_STAGE_INTERVAL_SECONDS: "${LOG_INBOX_AUTO_STAGE_INTERVAL_SECONDS:-30}"
       LOG_INBOX_AUTO_STAGE_QUIET_SECONDS: "${LOG_INBOX_AUTO_STAGE_QUIET_SECONDS:-30}"
       LOG_INBOX_AUTO_STAGE_BATCH_SIZE: "${LOG_INBOX_AUTO_STAGE_BATCH_SIZE:-100}"
@@ -61,7 +64,10 @@ services:
     volumes:
       - log-inbox-data:/data
       - "${LOG_INBOX_PROPOSAL_HOST_DIR:-./data/vault-inbox}:${LOG_INBOX_PROPOSAL_DIR:-/vault-inbox}"
+      - "${LOG_INBOX_PROCESSED_HOST_DIR:-./data/vault-processed}:${LOG_INBOX_PROCESSED_DIR:-/vault-processed}"
+      - "${LOG_INBOX_DAILY_NOTES_HOST_DIR:-./data/daily-notes}:${LOG_INBOX_DAILY_NOTES_DIR:-/vault-daily}"
       - "${LOG_INBOX_VAULT_CONTEXT_HOST_FILE:-./config/vault-context.json}:${LOG_INBOX_VAULT_CONTEXT_FILE:-/config/vault-context.json}:ro"
+      - "${LOG_INBOX_PRODUCT_INDEX_HOST_FILE:-./config/product-navigation.md}:${LOG_INBOX_PRODUCT_INDEX_FILE:-/config/product-navigation.md}:ro"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     userns_mode: host

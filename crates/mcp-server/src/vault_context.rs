@@ -1,14 +1,16 @@
 use chrono::Utc;
 use log_inbox_core::models::StoredLogEvent;
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, env, fs, path::PathBuf};
+use std::{collections::BTreeSet, env, fs, path::PathBuf, sync::OnceLock};
 
 const MATCH_METADATA_KEYS: &[&str] = &["product", "repo", "app", "service"];
 
 #[derive(Debug, Clone)]
 pub struct VaultContextProvider {
     path: Option<PathBuf>,
+    product_index_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +43,9 @@ impl VaultContextProvider {
             path: env::var_os("LOG_INBOX_VAULT_CONTEXT_FILE")
                 .filter(|path| !path.is_empty())
                 .map(PathBuf::from),
+            product_index_path: env::var_os("LOG_INBOX_PRODUCT_INDEX_FILE")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
         }
     }
 
@@ -53,9 +58,17 @@ impl VaultContextProvider {
             .unwrap_or_else(Utc::now);
         let mut candidate_notes = explicit_notes(events);
         let event_values = match_values(events);
+        let navigation_notes = self.navigation_notes()?;
+
+        for note in &navigation_notes {
+            if event_values.contains(&note.trim().to_lowercase()) {
+                candidate_notes.insert(note.clone());
+            }
+        }
 
         for product in config.products {
             if !product.note.trim().is_empty()
+                && (navigation_notes.is_empty() || navigation_notes.contains(&product.note))
                 && product
                     .aliases
                     .iter()
@@ -69,6 +82,15 @@ impl VaultContextProvider {
             "daily_note": note_date.format(&config.daily_note_format).to_string(),
             "candidate_notes": candidate_notes,
         }))
+    }
+
+    fn navigation_notes(&self) -> Result<BTreeSet<String>, String> {
+        let Some(path) = &self.product_index_path else {
+            return Ok(BTreeSet::new());
+        };
+        let contents = fs::read_to_string(path)
+            .map_err(|error| format!("reading product navigation {}: {error}", path.display()))?;
+        Ok(wiki_link_targets(&contents))
     }
 
     fn load(&self) -> Result<VaultContextConfig, String> {
@@ -110,8 +132,24 @@ fn default_daily_note_format() -> String {
 
 impl Default for VaultContextProvider {
     fn default() -> Self {
-        Self { path: None }
+        Self {
+            path: None,
+            product_index_path: None,
+        }
     }
+}
+
+fn wiki_link_targets(markdown: &str) -> BTreeSet<String> {
+    static WIKI_LINK: OnceLock<Regex> = OnceLock::new();
+    WIKI_LINK
+        .get_or_init(|| Regex::new(r"\[\[([^\]]+)\]\]").expect("wiki-link regex is valid"))
+        .captures_iter(markdown)
+        .filter_map(|capture| capture.get(1))
+        .filter_map(|target| {
+            let note = target.as_str().split('|').next()?.split('#').next()?.trim();
+            (!note.is_empty()).then(|| note.to_owned())
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -155,6 +193,18 @@ mod tests {
                 .aliases
                 .iter()
                 .any(|alias| values.contains(&alias.to_lowercase()))
+        );
+    }
+
+    #[test]
+    fn discovers_existing_notes_from_markdown_navigation() {
+        let notes = wiki_link_targets(
+            "# Products\n- [[Customer Portal]]\n- [[Billing#Operations|Billing ops]]\n",
+        );
+
+        assert_eq!(
+            notes,
+            BTreeSet::from(["Billing".to_owned(), "Customer Portal".to_owned()])
         );
     }
 

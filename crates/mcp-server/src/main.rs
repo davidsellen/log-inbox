@@ -11,7 +11,12 @@ use chrono::{DateTime, Duration, Utc};
 use log_inbox_core::{models::LogQuery, settings::Settings, store::Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::net::SocketAddr;
+use std::{
+    env,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod auto_stage;
@@ -24,6 +29,9 @@ struct AppState {
     store: Store,
     llm_config: Option<llm::LlmConfig>,
     proposal_inbox: Option<proposal_inbox::ProposalInbox>,
+    daily_notes_dir: Option<PathBuf>,
+    vault_context: vault_context::VaultContextProvider,
+    apply_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,6 +97,11 @@ struct MarkReviewedArgs {
     note: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ApplyMarkdownProposalArgs {
+    proposal_id: String,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -100,10 +113,16 @@ async fn main() -> anyhow::Result<()> {
 
     let settings = Settings::from_env();
     let store = Store::open(settings.database_path())?;
+    let vault_context = vault_context::VaultContextProvider::from_env();
     let state = AppState {
         store,
         llm_config: llm::LlmConfig::from_env(),
         proposal_inbox: proposal_inbox::ProposalInbox::from_env(),
+        daily_notes_dir: env::var_os("LOG_INBOX_DAILY_NOTES_DIR")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from),
+        vault_context,
+        apply_lock: Arc::new(Mutex::new(())),
     };
 
     if let (Some(config), Some(inbox)) = (
@@ -116,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
             state.store.clone(),
             state.llm_config.clone(),
             inbox,
-            vault_context::VaultContextProvider::from_env(),
+            state.vault_context.clone(),
         ));
     }
 
@@ -263,22 +282,24 @@ async fn call_tool(state: &AppState, params: Value) -> Result<Value, String> {
             Ok(tool_text(json!(result)))
         }
         "suggest_markdown_summary" => {
-            let args: llm::SuggestMarkdownSummaryArgs = parse_args(arguments)?;
+            let mut args: llm::SuggestMarkdownSummaryArgs = parse_args(arguments)?;
             let events = state
                 .store
                 .get_events_by_ids(&args.event_ids)
                 .map_err(|error| error.to_string())?;
+            enrich_vault_context(&mut args, state.vault_context.for_events(&events)?);
             let proposal =
                 llm::suggest_markdown_summary(state.llm_config.as_ref(), args, events).await?;
             Ok(tool_text(json!(proposal)))
         }
         "stage_markdown_summary" => {
-            let args: llm::SuggestMarkdownSummaryArgs = parse_args(arguments)?;
+            let mut args: llm::SuggestMarkdownSummaryArgs = parse_args(arguments)?;
             let event_ids = args.event_ids.clone();
             let events = state
                 .store
                 .get_events_by_ids(&event_ids)
                 .map_err(|error| error.to_string())?;
+            enrich_vault_context(&mut args, state.vault_context.for_events(&events)?);
             let proposal =
                 llm::suggest_markdown_summary(state.llm_config.as_ref(), args, events).await?;
             let staged = state
@@ -295,7 +316,46 @@ async fn call_tool(state: &AppState, params: Value) -> Result<Value, String> {
                 .map_err(|error| error.to_string())?;
             Ok(tool_text(json!(staged)))
         }
+        "apply_markdown_proposal" => {
+            let args: ApplyMarkdownProposalArgs = parse_args(arguments)?;
+            let _guard = state
+                .apply_lock
+                .lock()
+                .map_err(|_| "daily-note apply lock is poisoned".to_owned())?;
+            let inbox = state.proposal_inbox.as_ref().ok_or_else(|| {
+                "proposal inbox is not configured; set LOG_INBOX_PROPOSAL_DIR".to_owned()
+            })?;
+            let daily_notes_dir = state.daily_notes_dir.as_deref().ok_or_else(|| {
+                "daily notes directory is not configured; set LOG_INBOX_DAILY_NOTES_DIR".to_owned()
+            })?;
+            let applied = inbox.apply(&args.proposal_id, daily_notes_dir)?;
+            state
+                .store
+                .mark_reviewed(
+                    &applied.evidence_event_ids,
+                    &applied.daily_path.display().to_string(),
+                    "mcp-apply",
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(tool_text(json!(applied)))
+        }
         _ => Err(format!("unknown tool {name}")),
+    }
+}
+
+fn enrich_vault_context(args: &mut llm::SuggestMarkdownSummaryArgs, discovered: Value) {
+    let Some(discovered) = discovered.as_object() else {
+        return;
+    };
+    if !args.vault_context.is_object() {
+        args.vault_context = json!({});
+    }
+    let context = args
+        .vault_context
+        .as_object_mut()
+        .expect("vault context was initialized as an object");
+    for (key, value) in discovered {
+        context.entry(key.clone()).or_insert_with(|| value.clone());
     }
 }
 
@@ -436,6 +496,17 @@ fn tool_definitions() -> Vec<Value> {
                     },
                     "mode": { "type": "string", "default": "daily-note" },
                     "task": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "apply_markdown_proposal",
+            "description": "Apply one reviewed pending proposal to its daily-note filename, archive the proposal, and mark its evidence reviewed.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["proposal_id"],
+                "properties": {
+                    "proposal_id": { "type": "string", "pattern": "^proposal_[A-Za-z0-9_]+$" }
                 }
             }
         }),

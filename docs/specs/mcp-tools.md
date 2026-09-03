@@ -98,15 +98,41 @@ Input is the same as `suggest_markdown_summary`. Output includes the stable prop
 
 Successful staging also records each evidence event in `proposal_state`. The automatic worker uses the same operation after a quiet period and will not repeatedly stage recorded events.
 
-Output:
+Generated proposal content:
 
 ```json
 {
   "target_note": "Daily log Aug 31",
   "canonical_links": ["[[Customer Portal]]"],
-  "markdown": "- Confirmed IIS export failures came from missing route metadata in the CRM host response.",
+  "markdown": "- Confirmed IIS export failures came from missing route metadata in the host response.",
   "evidence_event_ids": ["evt_123", "evt_124"],
   "requires_review": true
+}
+```
+
+### apply_markdown_proposal
+
+Apply one explicitly reviewed pending proposal to its target daily note.
+
+Input:
+
+```json
+{
+  "proposal_id": "proposal_123"
+}
+```
+
+The target is restricted to a plain Markdown filename in `LOG_INBOX_DAILY_NOTES_DIR`. The tool atomically replaces the daily note, embeds a proposal marker for retry safety, archives the proposal under `LOG_INBOX_PROCESSED_DIR`, and only then marks its evidence events reviewed.
+
+Output:
+
+```json
+{
+  "proposal_id": "proposal_123",
+  "daily_path": "/vault-daily/Daily log Aug 31.md",
+  "processed_path": "/vault-processed/20260831T120000.000Z-proposal_123.md",
+  "evidence_event_ids": ["evt_123", "evt_124"],
+  "status": "applied"
 }
 ```
 

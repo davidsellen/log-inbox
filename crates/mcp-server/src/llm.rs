@@ -12,6 +12,9 @@ const CONTEXT_METADATA_KEYS: &[&str] = &[
     "event_type",
     "sequence",
     "repo",
+    "product",
+    "app",
+    "service",
     "branch",
     "activity",
     "sender",
@@ -265,8 +268,7 @@ fn parse_proposal(
     })?;
 
     Ok(SummaryProposal {
-        target_note: string_field(&value, "target_note")
-            .unwrap_or_else(|| default_target_note(args)),
+        target_note: default_target_note(args),
         canonical_links: validated_canonical_links(&value, args),
         markdown: string_field(&value, "markdown")
             .unwrap_or_else(|| fallback_markdown(events, "LLM response omitted markdown.")),
@@ -425,12 +427,12 @@ mod tests {
         };
         let args = SuggestMarkdownSummaryArgs {
             event_ids: vec![event.id.clone()],
-            vault_context: json!({}),
+            vault_context: json!({ "daily_note": "Approved daily note" }),
             mode: "daily-note".to_owned(),
             task: None,
         };
         let model_output = json!({
-            "target_note": "Daily note",
+            "target_note": "Model-selected note",
             "markdown": "- A result.",
             "evidence_event_ids": ["evt_invented"],
             "canonical_links": ["[[Invented Note]]"]
@@ -441,6 +443,7 @@ mod tests {
             parse_proposal(&model_output, &args, &[event], "test").expect("valid proposal parses");
 
         assert_eq!(proposal.evidence_event_ids, ["evt_real"]);
+        assert_eq!(proposal.target_note, "Approved daily note");
         assert!(proposal.canonical_links.is_empty());
     }
 

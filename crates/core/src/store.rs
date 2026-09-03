@@ -190,8 +190,14 @@ impl Store {
             values.push(normalize_level(Some(&level)));
         }
         if let Some(search) = query.query {
-            sql.push_str(" AND (e.message LIKE ? OR e.metadata_json LIKE ?)");
-            let pattern = format!("%{}%", search.replace('%', "\\%").replace('_', "\\_"));
+            sql.push_str(
+                " AND (e.message LIKE ? ESCAPE '\\' OR e.metadata_json LIKE ? ESCAPE '\\')",
+            );
+            let escaped = search
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            let pattern = format!("%{escaped}%");
             values.push(pattern.clone());
             values.push(pattern);
         }
@@ -526,6 +532,36 @@ mod tests {
                 .expect("unstaged events reload")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn searches_literal_underscores_in_metadata() {
+        let store = temp_store();
+        store
+            .insert_event(LogEventInput {
+                source: "codex/test".to_owned(),
+                level: Some("info".to_owned()),
+                timestamp: None,
+                message: "Completed a demonstration".to_owned(),
+                metadata: Some(Map::from_iter([(
+                    "task_id".to_owned(),
+                    Value::from("demo_task_123"),
+                )])),
+                fingerprint: None,
+            })
+            .expect("event inserted");
+
+        let result = store
+            .query_logs(LogQuery {
+                source: None,
+                since: None,
+                level: None,
+                query: Some("demo_task_123".to_owned()),
+                limit: Some(10),
+            })
+            .expect("query succeeds");
+
+        assert_eq!(result.events.len(), 1);
     }
 
     #[test]

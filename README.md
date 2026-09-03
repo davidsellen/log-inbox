@@ -145,9 +145,36 @@ Product names and note targets are user-owned configuration. Point `LOG_INBOX_VA
 
 The worker reloads this file for each group and matches aliases against event `source` plus `product`, `repo`, `app`, and `service` metadata. It may also use an explicit `canonical_note` supplied by the producer. With no match, it emits no product link instead of inventing one.
 
-On Linux, set `LOG_INBOX_HOST_UID` and `LOG_INBOX_HOST_GID` to the owner of that vault folder (usually the output of `id -u` and `id -g`). The defaults are `1000:1000`. The MCP service uses the host user namespace so bind-mounted files retain that ownership while the process itself remains unprivileged.
+To discover existing product notes directly from a Markdown navigation page, bind it read-only:
 
-Then call `stage_markdown_summary` with the same arguments as `suggest_markdown_summary`. Each call creates a distinct, complete Markdown file with `status: pending`; it does not append to the daily note or mark events reviewed. This keeps concurrent writers isolated. A later consolidator reviews `pending`, updates canonical notes with a content-change check, moves handled files to `processed`, and only then calls `mark_reviewed`.
+```env
+LOG_INBOX_PRODUCT_INDEX_HOST_FILE=/absolute/path/to/vault/Products.md
+LOG_INBOX_PRODUCT_INDEX_FILE=/config/product-navigation.md
+```
+
+Wiki-link targets such as `[[Customer Portal]]` and `[[Billing#Operations|Billing ops]]` become allowed canonical note candidates. Exact `product`, `repo`, `app`, `service`, or source values can select them. Configured alias mappings are also checked against this navigation when it is present, preventing stale aliases from creating links to removed products.
+
+On Linux, pre-create the proposal, processed, and daily-note host directories, then set `LOG_INBOX_HOST_UID` and `LOG_INBOX_HOST_GID` to their owner (usually the output of `id -u` and `id -g`). The defaults are `1000:1000`. Pre-creation matters because Docker-created bind directories may be owned by `root` or `nobody`. The MCP service uses the host user namespace so files retain the configured ownership while the process itself remains unprivileged.
+
+Then call `stage_markdown_summary` with the same arguments as `suggest_markdown_summary`. Each call creates a distinct, complete Markdown file with `status: pending`; it does not append to the daily note or mark events reviewed. This keeps concurrent writers isolated.
+
+After reviewing a proposal, apply it with:
+
+```bash
+curl -sS http://127.0.0.1:8788/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "tools/call",
+    "params": {
+      "name": "apply_markdown_proposal",
+      "arguments": { "proposal_id": "proposal_123" }
+    }
+  }'
+```
+
+The target note must be a plain filename under `LOG_INBOX_DAILY_NOTES_HOST_DIR`. The apply operation writes a complete replacement through a temporary file, includes an idempotency marker, moves the proposal to `processed`, and marks its evidence reviewed. This is the single-writer consolidation boundary; producers never append to a shared daily note.
 
 Compose also enables automatic staging every 30 seconds. Unreviewed events remain quiet for 30 seconds before they are grouped by `task_id`, then `session_id`, then `fingerprint`; events without one of those identifiers are staged separately. The worker drains retained unstaged events in bounded batches. Successfully staged event IDs are recorded in SQLite so they are not proposed repeatedly. Set `LOG_INBOX_AUTO_STAGE_INTERVAL_SECONDS=0` to disable the worker.
 
