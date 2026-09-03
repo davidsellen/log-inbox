@@ -20,7 +20,7 @@ SQLite gives enough structure for filtering, review state, retention cleanup, an
 | `message` | Main log text |
 | `metadata_json` | Structured producer metadata |
 | `fingerprint` | Optional duplicate/correlation key |
-| `truncated` | Whether message or metadata was truncated |
+| `truncated` | Whether content from a legacy event was truncated |
 
 ### review_state
 
@@ -35,3 +35,8 @@ SQLite gives enough structure for filtering, review state, retention cleanup, an
 
 The first version should keep logs for `LOG_INBOX_RETENTION_DAYS`, defaulting to 14 days. Reviewed state may be kept longer if it only stores IDs and note references.
 
+## Proposal State
+
+`proposal_state` records each event included in a staged proposal. This is separate from `review_state`: staging prevents duplicate automatic proposals, while review means a human or agent has applied or otherwise handled the proposal.
+
+Accepted redacted content is stored completely. Ingestion rejects values above the API limits rather than accepting partial evidence. LLM prompt projections have smaller independent limits and never overwrite stored content.

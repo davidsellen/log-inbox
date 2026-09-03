@@ -46,6 +46,24 @@ curl -sS http://127.0.0.1:8787/v1/logs \
   }'
 ```
 
+Accepted events are stored completely after secret redaction. Messages up to 1 MiB and metadata up to 512 KiB are accepted; larger values are rejected instead of silently truncated. Split large activity into ordered events with shared context:
+
+```json
+{
+  "source": "codex/windows",
+  "message": "Ran the targeted test suite",
+  "metadata": {
+    "task_id": "task_123",
+    "session_id": "codex_456",
+    "sequence": 3,
+    "event_type": "test",
+    "repo": "log-inbox",
+    "branch": "main",
+    "canonical_note": "Log Inbox"
+  }
+}
+```
+
 Call the MCP-style tools endpoint:
 
 ```bash
@@ -114,6 +132,10 @@ LOG_INBOX_PROPOSAL_DIR=/vault-inbox
 On Linux, set `LOG_INBOX_HOST_UID` and `LOG_INBOX_HOST_GID` to the owner of that vault folder (usually the output of `id -u` and `id -g`). The defaults are `1000:1000`. The MCP service uses the host user namespace so bind-mounted files retain that ownership while the process itself remains unprivileged.
 
 Then call `stage_markdown_summary` with the same arguments as `suggest_markdown_summary`. Each call creates a distinct, complete Markdown file with `status: pending`; it does not append to the daily note or mark events reviewed. This keeps concurrent writers isolated. A later consolidator reviews `pending`, updates canonical notes with a content-change check, moves handled files to `processed`, and only then calls `mark_reviewed`.
+
+Compose also enables automatic staging every 30 seconds. Unreviewed events remain quiet for 30 seconds before they are grouped by `task_id`, then `session_id`, then `fingerprint`; events without one of those identifiers are staged separately. The worker drains retained unstaged events in bounded batches. Successfully staged event IDs are recorded in SQLite so they are not proposed repeatedly. Set `LOG_INBOX_AUTO_STAGE_INTERVAL_SECONDS=0` to disable the worker.
+
+The LLM receives a bounded projection (16 KiB message and 8 KiB metadata per event), but the complete accepted, redacted event remains queryable in SQLite. The context fields shown above remain in that projection even when other metadata is too large.
 
 ## Specs
 

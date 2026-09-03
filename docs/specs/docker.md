@@ -14,8 +14,10 @@ Docker Compose is the default way to run the system locally.
 ### mcp
 
 - Binds to `127.0.0.1:8788` by default.
-- Reads `/data` as read-only when possible.
+- Reads `/data` and records proposal/review state.
 - Exposes MCP tools for an agent.
+- Mounts `LOG_INBOX_PROPOSAL_HOST_DIR` at `LOG_INBOX_PROPOSAL_DIR` for atomic Markdown delivery.
+- Runs automatic staging when `LOG_INBOX_AUTO_STAGE_INTERVAL_SECONDS` is greater than zero.
 
 ### ollama
 
@@ -34,6 +36,7 @@ Docker Compose is the default way to run the system locally.
 
 - `log-inbox-data` stores SQLite/JSONL data.
 - `ollama-data` stores local model files.
+- `LOG_INBOX_PROPOSAL_HOST_DIR` is a host bind mount, normally a `pending/` folder inside the Obsidian vault.
 
 ## VM Access
 

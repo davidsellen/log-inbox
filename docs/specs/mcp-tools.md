@@ -96,6 +96,8 @@ Generate the same reviewable proposal and atomically create a unique Markdown fi
 
 Input is the same as `suggest_markdown_summary`. Output includes the stable proposal ID, created path, timestamp, and `pending` status.
 
+Successful staging also records each evidence event in `proposal_state`. The automatic worker uses the same operation after a quiet period and will not repeatedly stage recorded events.
+
 Output:
 
 ```json
@@ -113,6 +115,6 @@ Output:
 - Return stable event IDs.
 - Return timestamps in ISO 8601 UTC.
 - Default to bounded results.
-- Include truncation metadata when output was limited.
+- Include bounded-result metadata when a query or model projection was limited.
 - Never return secrets that the collector already marked redacted.
 - LLM-generated Markdown must be marked as proposed output until reviewed or explicitly applied.

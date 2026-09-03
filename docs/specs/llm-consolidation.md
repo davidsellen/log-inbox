@@ -38,7 +38,11 @@ The preferred service-orchestrated handoff is an append-only folder of Markdown 
 4. Have one consolidator review pending proposals, patch canonical notes, and then move handled proposals to `processed/`.
 5. Mark evidence events reviewed only after the canonical patch succeeds.
 
+The MCP service may run an automatic staging worker. It waits for a quiet period, groups unstaged events by `task_id`, `session_id`, or `fingerprint`, writes one proposal per group, and records proposal state without marking the evidence reviewed. Events without a correlation identifier remain isolated to avoid merging unrelated work.
+
 Concurrent producers never share a target file. The consolidator should use an advisory lock plus a content hash check before replacing a canonical note so an Obsidian edit cannot be silently overwritten. A daily-note template or query may show pending proposals by `created_at` without appending links for each proposal.
+
+Storage and model limits are intentionally separate. The store retains every accepted redacted byte; the LLM receives a bounded projection containing correlation and task fields plus an explicit notice when content was omitted from that model call.
 
 ## Prompt Contract
 

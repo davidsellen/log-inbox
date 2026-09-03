@@ -1,20 +1,25 @@
 use crate::{
     models::{
-        LogEventInput, LogQuery, LogQueryResult, MarkReviewedResult, SourceSummary, StoredLogEvent,
+        LogEventInput, LogQuery, LogQueryResult, MarkReviewedResult, SourceSummary,
+        StagedEventGroup, StoredLogEvent,
     },
     redaction::{redact_metadata, redact_text},
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use serde_json::{Map, Value};
 use std::{fs, path::PathBuf};
 use uuid::Uuid;
 
+#[cfg(test)]
+use serde_json::{Map, Value};
+
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 500;
-const MAX_MESSAGE_BYTES: usize = 16 * 1024;
-const MAX_METADATA_BYTES: usize = 64 * 1024;
+const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_METADATA_BYTES: usize = 512 * 1024;
+const MAX_SOURCE_BYTES: usize = 512;
+const MAX_FINGERPRINT_BYTES: usize = 1024;
 
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -64,6 +69,16 @@ impl Store {
                 note TEXT NOT NULL,
                 FOREIGN KEY(event_id) REFERENCES log_events(id)
             );
+
+            CREATE TABLE IF NOT EXISTS proposal_state (
+                event_id TEXT PRIMARY KEY,
+                proposal_id TEXT NOT NULL,
+                staged_at TEXT NOT NULL,
+                FOREIGN KEY(event_id) REFERENCES log_events(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_proposal_state_proposal
+                ON proposal_state(proposal_id);
             "#,
         )?;
         Ok(())
@@ -76,11 +91,9 @@ impl Store {
         let id = format!("evt_{}", Uuid::new_v4().simple());
         let timestamp = input.timestamp.unwrap_or(now);
         let level = normalize_level(input.level.as_deref());
-        let (message, message_truncated) =
-            truncate_string(redact_text(input.message.trim()), MAX_MESSAGE_BYTES);
+        let message = redact_text(input.message.trim());
         let metadata = redact_metadata(input.metadata.unwrap_or_default());
-        let (metadata_json, metadata_truncated) = encode_metadata(metadata)?;
-        let truncated = message_truncated || metadata_truncated;
+        let metadata_json = serde_json::to_string(&metadata)?;
 
         let conn = self.connect()?;
         conn.execute(
@@ -99,7 +112,7 @@ impl Store {
                 message,
                 metadata_json,
                 input.fingerprint,
-                truncated as i64,
+                0,
             ],
         )?;
 
@@ -253,6 +266,58 @@ impl Store {
             .collect()
     }
 
+    pub fn get_unstaged_events(
+        &self,
+        received_before: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<StoredLogEvent>> {
+        let limit = limit.clamp(1, MAX_LIMIT);
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT e.id, e.received_at, e.timestamp, e.source, e.level, e.message,
+                   e.metadata_json, e.fingerprint, e.truncated,
+                   CASE WHEN r.event_id IS NULL THEN 0 ELSE 1 END AS reviewed
+            FROM log_events e
+            LEFT JOIN review_state r ON r.event_id = e.id
+            LEFT JOIN proposal_state p ON p.event_id = e.id
+            WHERE r.event_id IS NULL
+              AND p.event_id IS NULL
+              AND e.received_at <= ?1
+            ORDER BY e.received_at ASC
+            LIMIT ?2
+            "#,
+        )?;
+        stmt.query_map(
+            params![received_before.to_rfc3339(), limit as i64],
+            stored_event_from_row,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+    }
+
+    pub fn mark_staged(&self, event_ids: &[String], proposal_id: &str) -> Result<StagedEventGroup> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        let mut count = 0;
+        for event_id in event_ids {
+            count += tx.execute(
+                r#"
+                INSERT INTO proposal_state (event_id, proposal_id, staged_at)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(event_id) DO NOTHING
+                "#,
+                params![event_id, proposal_id, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(StagedEventGroup {
+            proposal_id: proposal_id.to_owned(),
+            staged_count: count,
+        })
+    }
+
     pub fn mark_reviewed(
         &self,
         event_ids: &[String],
@@ -309,6 +374,27 @@ impl Store {
 fn validate_event(input: &LogEventInput) -> Result<()> {
     anyhow::ensure!(!input.source.trim().is_empty(), "source is required");
     anyhow::ensure!(!input.message.trim().is_empty(), "message is required");
+    anyhow::ensure!(
+        input.source.len() <= MAX_SOURCE_BYTES,
+        "source exceeds {MAX_SOURCE_BYTES} bytes"
+    );
+    anyhow::ensure!(
+        input.message.len() <= MAX_MESSAGE_BYTES,
+        "message exceeds {MAX_MESSAGE_BYTES} bytes; split it into ordered events with a shared task_id or session_id"
+    );
+    if let Some(fingerprint) = &input.fingerprint {
+        anyhow::ensure!(
+            fingerprint.len() <= MAX_FINGERPRINT_BYTES,
+            "fingerprint exceeds {MAX_FINGERPRINT_BYTES} bytes"
+        );
+    }
+    if let Some(metadata) = &input.metadata {
+        let encoded = serde_json::to_vec(metadata)?;
+        anyhow::ensure!(
+            encoded.len() <= MAX_METADATA_BYTES,
+            "metadata exceeds {MAX_METADATA_BYTES} bytes; move large content into ordered message events or reference a local artifact"
+        );
+    }
     Ok(())
 }
 
@@ -328,31 +414,6 @@ fn normalize_level(level: Option<&str>) -> String {
         }
         _ => "unknown".to_owned(),
     }
-}
-
-fn truncate_string(mut value: String, max_bytes: usize) -> (String, bool) {
-    if value.len() <= max_bytes {
-        return (value, false);
-    }
-    while value.len() > max_bytes {
-        value.pop();
-    }
-    (value, true)
-}
-
-fn encode_metadata(metadata: Map<String, Value>) -> Result<(String, bool)> {
-    let json = serde_json::to_string(&metadata)?;
-    if json.len() <= MAX_METADATA_BYTES {
-        return Ok((json, false));
-    }
-
-    let mut replacement = Map::new();
-    replacement.insert("truncated".to_owned(), Value::Bool(true));
-    replacement.insert(
-        "reason".to_owned(),
-        Value::String("metadata exceeded max size".to_owned()),
-    );
-    Ok((serde_json::to_string(&replacement)?, true))
 }
 
 fn stored_event_from_row(row: &Row<'_>) -> rusqlite::Result<StoredLogEvent> {
@@ -426,5 +487,61 @@ mod tests {
             .mark_reviewed(&[inserted.id], "Summarized in daily note", "test")
             .expect("mark reviewed succeeds");
         assert_eq!(reviewed.reviewed_count, 1);
+    }
+
+    #[test]
+    fn preserves_large_accepted_messages_and_tracks_staging() {
+        let store = temp_store();
+        let message = "x".repeat(32 * 1024);
+        let inserted = store
+            .insert_event(LogEventInput {
+                source: "codex/test".to_owned(),
+                level: Some("info".to_owned()),
+                timestamp: None,
+                message: message.clone(),
+                metadata: Some(Map::from_iter([
+                    ("task_id".to_owned(), Value::from("task_123")),
+                    ("sequence".to_owned(), Value::from(1)),
+                ])),
+                fingerprint: None,
+            })
+            .expect("event inserted");
+
+        assert_eq!(inserted.message, message);
+        assert!(!inserted.truncated);
+
+        let now = Utc::now();
+        let unstaged = store
+            .get_unstaged_events(now, 10)
+            .expect("unstaged events load");
+        assert_eq!(unstaged.len(), 1);
+
+        let staged = store
+            .mark_staged(&[inserted.id], "proposal_test")
+            .expect("staging state stored");
+        assert_eq!(staged.staged_count, 1);
+        assert!(
+            store
+                .get_unstaged_events(Utc::now(), 10)
+                .expect("unstaged events reload")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rejects_instead_of_truncating_oversized_messages() {
+        let store = temp_store();
+        let error = store
+            .insert_event(LogEventInput {
+                source: "codex/test".to_owned(),
+                level: None,
+                timestamp: None,
+                message: "x".repeat(MAX_MESSAGE_BYTES + 1),
+                metadata: None,
+                fingerprint: None,
+            })
+            .expect_err("oversized event rejected");
+
+        assert!(error.to_string().contains("split it into ordered events"));
     }
 }

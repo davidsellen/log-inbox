@@ -62,5 +62,7 @@ Return process and storage health.
 - `message` is required.
 - `timestamp` is optional; collector receive time is used when missing.
 - `metadata` must be JSON object data, not preformatted text.
-- oversized messages should be truncated with a `truncated: true` flag.
-
+- Accepted events are persisted completely after redaction.
+- Messages larger than 1 MiB or metadata larger than 512 KiB are rejected instead of silently truncated.
+- Producers should split large activity into ordered events sharing `task_id` or `session_id` metadata.
+- `sequence`, `event_type`, `repo`, `branch`, and `canonical_note` preserve consolidation context.

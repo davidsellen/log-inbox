@@ -57,3 +57,9 @@ pub struct LogQueryResult {
 pub struct MarkReviewedResult {
     pub reviewed_count: usize,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StagedEventGroup {
+    pub proposal_id: String,
+    pub staged_count: usize,
+}

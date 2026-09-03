@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod auto_stage;
 mod llm;
 mod proposal_inbox;
 
@@ -103,6 +104,19 @@ async fn main() -> anyhow::Result<()> {
         llm_config: llm::LlmConfig::from_env(),
         proposal_inbox: proposal_inbox::ProposalInbox::from_env(),
     };
+
+    if let (Some(config), Some(inbox)) = (
+        auto_stage::AutoStageConfig::from_env(),
+        state.proposal_inbox.clone(),
+    ) {
+        tracing::info!("automatic Markdown proposal staging enabled");
+        tokio::spawn(auto_stage::run(
+            config,
+            state.store.clone(),
+            state.llm_config.clone(),
+            inbox,
+        ));
+    }
 
     let app = Router::new()
         .route("/health", get(health))
@@ -258,9 +272,10 @@ async fn call_tool(state: &AppState, params: Value) -> Result<Value, String> {
         }
         "stage_markdown_summary" => {
             let args: llm::SuggestMarkdownSummaryArgs = parse_args(arguments)?;
+            let event_ids = args.event_ids.clone();
             let events = state
                 .store
-                .get_events_by_ids(&args.event_ids)
+                .get_events_by_ids(&event_ids)
                 .map_err(|error| error.to_string())?;
             let proposal =
                 llm::suggest_markdown_summary(state.llm_config.as_ref(), args, events).await?;
@@ -271,6 +286,10 @@ async fn call_tool(state: &AppState, params: Value) -> Result<Value, String> {
                     "proposal inbox is not configured; set LOG_INBOX_PROPOSAL_DIR".to_owned()
                 })?
                 .stage(&proposal)
+                .map_err(|error| error.to_string())?;
+            state
+                .store
+                .mark_staged(&event_ids, &staged.proposal_id)
                 .map_err(|error| error.to_string())?;
             Ok(tool_text(json!(staged)))
         }

@@ -55,6 +55,8 @@ reviewed Markdown summaries
 ### LLM Consolidation
 
 - Runs after logs are grouped and bounded by source/time/correlation.
+- May run automatically after a configurable inactivity period.
 - Produces proposed summaries, canonical note targets, and Markdown patches.
+- Writes immutable pending files into a vault-mounted inbox and records staged evidence IDs.
 - Must cite event IDs, source windows, and external links used for the conclusion.
 - Should be review-first by default; automatic vault writes are only safe for low-risk local notes with strict policies.

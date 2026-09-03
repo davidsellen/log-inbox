@@ -1,7 +1,24 @@
 use log_inbox_core::models::StoredLogEvent;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use std::collections::HashSet;
+use serde_json::{Map, Value, json};
+use std::{borrow::Cow, collections::HashSet};
+
+const MAX_PROMPT_MESSAGE_BYTES: usize = 16 * 1024;
+const MAX_PROMPT_METADATA_BYTES: usize = 8 * 1024;
+const CONTEXT_METADATA_KEYS: &[&str] = &[
+    "task_id",
+    "session_id",
+    "event_type",
+    "sequence",
+    "repo",
+    "branch",
+    "activity",
+    "sender",
+    "status",
+    "artifact_path",
+    "artifact_sha256",
+    "canonical_note",
+];
 
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
@@ -62,6 +79,18 @@ struct ChatChoice {
 #[derive(Debug, Deserialize)]
 struct ChatMessage {
     content: String,
+}
+
+#[derive(Serialize)]
+struct PromptEvent<'a> {
+    id: &'a str,
+    timestamp: &'a chrono::DateTime<chrono::Utc>,
+    source: &'a str,
+    level: &'a str,
+    message: &'a str,
+    message_complete: bool,
+    metadata: Cow<'a, Map<String, Value>>,
+    fingerprint: Option<&'a str>,
 }
 
 pub async fn suggest_markdown_summary(
@@ -127,7 +156,9 @@ fn build_prompt(
     args: &SuggestMarkdownSummaryArgs,
     events: &[StoredLogEvent],
 ) -> Result<String, String> {
-    let event_slice = serde_json::to_string_pretty(events).map_err(|error| error.to_string())?;
+    let prompt_events = events.iter().map(prompt_event).collect::<Vec<_>>();
+    let event_slice =
+        serde_json::to_string_pretty(&prompt_events).map_err(|error| error.to_string())?;
     let vault_context =
         serde_json::to_string_pretty(&args.vault_context).map_err(|error| error.to_string())?;
     let allowed_links =
@@ -160,6 +191,7 @@ Rules:
 - Use only the supplied events and vault context.
 - canonical_links may contain only exact values from Allowed canonical links.
 - Keep markdown concise; no raw log dumps.
+- A false message_complete or metadata _prompt_notice means full evidence remains in SQLite but was bounded for this model call.
 - Include source, time window, and event IDs in a Details line when useful.
 - If uncertain, say so and include open questions.
 "#,
@@ -169,6 +201,53 @@ Rules:
             .unwrap_or("Summarize selected log events for review."),
         mode = args.mode,
     ))
+}
+
+fn prompt_event(event: &StoredLogEvent) -> PromptEvent<'_> {
+    let (message, message_complete) = bounded_prefix(&event.message, MAX_PROMPT_MESSAGE_BYTES);
+    PromptEvent {
+        id: &event.id,
+        timestamp: &event.timestamp,
+        source: &event.source,
+        level: &event.level,
+        message,
+        message_complete,
+        metadata: bounded_metadata(&event.metadata),
+        fingerprint: event.fingerprint.as_deref(),
+    }
+}
+
+fn bounded_prefix(value: &str, max_bytes: usize) -> (&str, bool) {
+    if value.len() <= max_bytes {
+        return (value, true);
+    }
+
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&value[..end], false)
+}
+
+fn bounded_metadata(metadata: &Map<String, Value>) -> Cow<'_, Map<String, Value>> {
+    if serde_json::to_vec(metadata).is_ok_and(|encoded| encoded.len() <= MAX_PROMPT_METADATA_BYTES)
+    {
+        return Cow::Borrowed(metadata);
+    }
+
+    let mut context = Map::new();
+    for key in CONTEXT_METADATA_KEYS {
+        if let Some(value) = metadata.get(*key) {
+            context.insert((*key).to_owned(), value.clone());
+        }
+    }
+    context.insert(
+        "_prompt_notice".to_owned(),
+        Value::String(
+            "metadata bounded for LLM; full redacted metadata remains in SQLite".to_owned(),
+        ),
+    );
+    Cow::Owned(context)
 }
 
 fn parse_proposal(
@@ -359,5 +438,38 @@ mod tests {
 
         assert_eq!(proposal.evidence_event_ids, ["evt_real"]);
         assert!(proposal.canonical_links.is_empty());
+    }
+
+    #[test]
+    fn bounds_only_the_prompt_projection() {
+        let full_message = format!("{}END", "x".repeat(MAX_PROMPT_MESSAGE_BYTES));
+        let event = StoredLogEvent {
+            id: "evt_large".to_owned(),
+            received_at: Utc::now(),
+            timestamp: Utc::now(),
+            source: "codex/test".to_owned(),
+            level: "info".to_owned(),
+            message: full_message.clone(),
+            metadata: Map::from_iter([
+                ("task_id".to_owned(), Value::from("task_123")),
+                (
+                    "large".to_owned(),
+                    Value::from("x".repeat(MAX_PROMPT_METADATA_BYTES)),
+                ),
+            ]),
+            fingerprint: None,
+            truncated: false,
+            reviewed: false,
+        };
+
+        let projected = prompt_event(&event);
+        assert!(!projected.message_complete);
+        assert!(!projected.message.ends_with("END"));
+        assert_eq!(
+            projected.metadata.get("task_id"),
+            Some(&Value::from("task_123"))
+        );
+        assert!(projected.metadata.contains_key("_prompt_notice"));
+        assert_eq!(event.message, full_message);
     }
 }
