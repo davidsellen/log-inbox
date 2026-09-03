@@ -3,7 +3,10 @@ FROM rust:1.98-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY crates ./crates
-RUN cargo build --release --bin log-inbox-collector
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    cargo build --release --bin log-inbox-collector \
+    && cp /app/target/release/log-inbox-collector /tmp/log-inbox-collector
 
 FROM debian:bookworm-slim
 
@@ -17,7 +20,7 @@ RUN groupadd --gid "$APP_GID" app \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=builder /app/target/release/log-inbox-collector /usr/local/bin/log-inbox-collector
+COPY --from=builder /tmp/log-inbox-collector /usr/local/bin/log-inbox-collector
 RUN mkdir -p /data && chown app:app /data
 
 EXPOSE 8787

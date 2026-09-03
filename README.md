@@ -9,7 +9,7 @@ Provide a small local logging system with two separate responsibilities:
 - Producers send logs to an ordinary ingest API.
 - An agent reads curated log slices through MCP tools and writes human summaries to notes only when useful.
 
-MCP is not the ingest protocol. It is the agent-facing read/search/ack interface. In this local setup, the main managed output is a Markdown vault that may be read with Obsidian.
+MCP is not the ingest protocol. It is the agent-facing read/search/ack interface. The managed output is a directory of ordinary Markdown files that can be read by any notes app, editor, static-site generator, or agent.
 
 ## Default Deployment
 
@@ -39,10 +39,10 @@ curl -sS http://127.0.0.1:8787/v1/logs \
   -H "Authorization: Bearer dev-local-key" \
   -H "Content-Type: application/json" \
   -d '{
-    "source": "examplewin/iis",
+    "source": "windows/iis",
     "level": "error",
     "message": "Request failed",
-    "metadata": { "app": "ExampleOne", "status": 500 }
+    "metadata": { "app": "customer-portal", "status": 500 }
   }'
 ```
 
@@ -122,12 +122,28 @@ curl -sS http://127.0.0.1:8788/mcp \
   }'
 ```
 
-To drop proposals into an Obsidian-visible folder, set the host folder in `.env`:
+To drop proposals into a Markdown vault or watched folder, set the host folder in `.env`:
 
 ```env
 LOG_INBOX_PROPOSAL_HOST_DIR=/absolute/path/to/your/vault/00 Inbox/Log Inbox/pending
 LOG_INBOX_PROPOSAL_DIR=/vault-inbox
 ```
+
+Product names and note targets are user-owned configuration. Point `LOG_INBOX_VAULT_CONTEXT_HOST_FILE` at a JSON file anywhere on the host, including a products folder inside the vault:
+
+```json
+{
+  "daily_note_format": "Work log %Y-%m-%d",
+  "products": [
+    {
+      "note": "Customer Portal",
+      "aliases": ["customer-portal", "portal-api", "windows/iis"]
+    }
+  ]
+}
+```
+
+The worker reloads this file for each group and matches aliases against event `source` plus `product`, `repo`, `app`, and `service` metadata. It may also use an explicit `canonical_note` supplied by the producer. With no match, it emits no product link instead of inventing one.
 
 On Linux, set `LOG_INBOX_HOST_UID` and `LOG_INBOX_HOST_GID` to the owner of that vault folder (usually the output of `id -u` and `id -g`). The defaults are `1000:1000`. The MCP service uses the host user namespace so bind-mounted files retain that ownership while the process itself remains unprivileged.
 

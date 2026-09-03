@@ -24,13 +24,13 @@ Ingest one event.
 
 ```json
 {
-  "source": "examplewin/iis",
+  "source": "windows/iis",
   "level": "error",
   "timestamp": "2026-08-31T13:45:00Z",
   "message": "Request failed",
   "metadata": {
-    "app": "ExampleOne",
-    "path": "/exampleweb/export",
+    "app": "customer-portal",
+    "path": "/exports",
     "status": 500
   }
 }

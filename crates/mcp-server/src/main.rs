@@ -17,6 +17,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod auto_stage;
 mod llm;
 mod proposal_inbox;
+mod vault_context;
 
 #[derive(Clone)]
 struct AppState {
@@ -115,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
             state.store.clone(),
             state.llm_config.clone(),
             inbox,
+            vault_context::VaultContextProvider::from_env(),
         ));
     }
 

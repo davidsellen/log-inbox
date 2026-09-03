@@ -24,7 +24,7 @@ Input:
 
 ```json
 {
-  "source": "examplewin/iis",
+  "source": "windows/iis",
   "since": "2026-08-31T00:00:00Z",
   "level": "error",
   "limit": 100
@@ -83,7 +83,7 @@ Input:
 {
   "event_ids": ["evt_123", "evt_124"],
   "vault_context": {
-    "candidate_notes": ["Example CRM", "Example Forms"],
+    "candidate_notes": ["Customer Portal", "Forms"],
     "daily_note": "Daily log Aug 31"
   },
   "mode": "daily-note"
@@ -103,7 +103,7 @@ Output:
 ```json
 {
   "target_note": "Daily log Aug 31",
-  "canonical_links": ["[[Example CRM]]"],
+  "canonical_links": ["[[Customer Portal]]"],
   "markdown": "- Confirmed IIS export failures came from missing route metadata in the CRM host response.",
   "evidence_event_ids": ["evt_123", "evt_124"],
   "requires_review": true

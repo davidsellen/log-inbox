@@ -36,7 +36,8 @@ Docker Compose is the default way to run the system locally.
 
 - `log-inbox-data` stores SQLite/JSONL data.
 - `ollama-data` stores local model files.
-- `LOG_INBOX_PROPOSAL_HOST_DIR` is a host bind mount, normally a `pending/` folder inside the Obsidian vault.
+- `LOG_INBOX_PROPOSAL_HOST_DIR` is a host bind mount, normally a `pending/` folder inside any Markdown vault.
+- `LOG_INBOX_VAULT_CONTEXT_HOST_FILE` is a read-only user configuration file for daily-note formatting and product-note aliases.
 
 ## VM Access
 

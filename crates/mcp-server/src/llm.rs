@@ -1,10 +1,11 @@
 use log_inbox_core::models::StoredLogEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::{borrow::Cow, collections::HashSet};
+use std::{borrow::Cow, collections::HashSet, time::Duration};
 
 const MAX_PROMPT_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_PROMPT_METADATA_BYTES: usize = 8 * 1024;
+const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const CONTEXT_METADATA_KEYS: &[&str] = &[
     "task_id",
     "session_id",
@@ -112,7 +113,10 @@ pub async fn suggest_markdown_summary(
     };
 
     let prompt = build_prompt(&args, &events)?;
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(LLM_REQUEST_TIMEOUT)
+        .build()
+        .map_err(|error| error.to_string())?;
     let mut request = client
         .post(format!("{}/chat/completions", config.base_url))
         .json(&json!({

@@ -1,7 +1,7 @@
-use crate::{llm, proposal_inbox::ProposalInbox};
+use crate::{llm, proposal_inbox::ProposalInbox, vault_context::VaultContextProvider};
 use chrono::{Duration as ChronoDuration, Utc};
 use log_inbox_core::{models::StoredLogEvent, store::Store};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{cmp::Ordering, collections::BTreeMap, env, time::Duration};
 
 #[cfg(test)]
@@ -37,11 +37,14 @@ pub async fn run(
     store: Store,
     llm_config: Option<llm::LlmConfig>,
     inbox: ProposalInbox,
+    vault_context: VaultContextProvider,
 ) {
     let mut ticker = tokio::time::interval(config.interval);
     loop {
         ticker.tick().await;
-        if let Err(error) = stage_ready_groups(&config, &store, llm_config.as_ref(), &inbox).await {
+        if let Err(error) =
+            stage_ready_groups(&config, &store, llm_config.as_ref(), &inbox, &vault_context).await
+        {
             tracing::error!(%error, "automatic proposal staging failed");
         }
     }
@@ -52,6 +55,7 @@ async fn stage_ready_groups(
     store: &Store,
     llm_config: Option<&llm::LlmConfig>,
     inbox: &ProposalInbox,
+    vault_context: &VaultContextProvider,
 ) -> Result<(), String> {
     let now = Utc::now();
     let events = store
@@ -72,28 +76,44 @@ async fn stage_ready_groups(
             .iter()
             .map(|event| event.id.clone())
             .collect::<Vec<_>>();
-        let args = llm::SuggestMarkdownSummaryArgs {
-            event_ids: event_ids.clone(),
-            vault_context: automatic_vault_context(&events),
-            mode: "daily-note".to_owned(),
-            task: Some(
-                "Consolidate this completed activity group into a concise reviewable daily-log proposal."
-                    .to_owned(),
-            ),
-        };
-        let proposal = llm::suggest_markdown_summary(llm_config, args, events).await?;
-        let staged = inbox.stage(&proposal).map_err(|error| error.to_string())?;
-        store
-            .mark_staged(&event_ids, &staged.proposal_id)
-            .map_err(|error| error.to_string())?;
-        tracing::info!(
-            proposal_id = %staged.proposal_id,
-            event_count = event_ids.len(),
-            path = %staged.path.display(),
-            "automatically staged Markdown proposal"
-        );
+        if let Err(error) =
+            stage_group(store, llm_config, inbox, vault_context, events, &event_ids).await
+        {
+            tracing::error!(?event_ids, %error, "automatic event group staging failed");
+        }
     }
 
+    Ok(())
+}
+
+async fn stage_group(
+    store: &Store,
+    llm_config: Option<&llm::LlmConfig>,
+    inbox: &ProposalInbox,
+    vault_context: &VaultContextProvider,
+    events: Vec<StoredLogEvent>,
+    event_ids: &[String],
+) -> Result<(), String> {
+    let args = llm::SuggestMarkdownSummaryArgs {
+        event_ids: event_ids.to_vec(),
+        vault_context: vault_context.for_events(&events)?,
+        mode: "daily-note".to_owned(),
+        task: Some(
+            "Consolidate this completed activity group into a concise reviewable daily-log proposal."
+                .to_owned(),
+        ),
+    };
+    let proposal = llm::suggest_markdown_summary(llm_config, args, events).await?;
+    let staged = inbox.stage(&proposal).map_err(|error| error.to_string())?;
+    store
+        .mark_staged(event_ids, &staged.proposal_id)
+        .map_err(|error| error.to_string())?;
+    tracing::info!(
+        proposal_id = %staged.proposal_id,
+        event_count = event_ids.len(),
+        path = %staged.path.display(),
+        "automatically staged Markdown proposal"
+    );
     Ok(())
 }
 
@@ -134,25 +154,6 @@ fn group_key(event: &StoredLogEvent) -> String {
         return format!("fingerprint:{fingerprint}");
     }
     format!("event:{}", event.id)
-}
-
-fn automatic_vault_context(events: &[StoredLogEvent]) -> Value {
-    let candidate_notes = events
-        .iter()
-        .filter_map(|event| event.metadata.get("canonical_note"))
-        .filter_map(Value::as_str)
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    let note_date = events
-        .iter()
-        .map(|event| event.timestamp)
-        .max()
-        .unwrap_or_else(Utc::now);
-
-    json!({
-        "daily_note": format!("Daily log {}", note_date.format("%b %-d")),
-        "candidate_notes": candidate_notes,
-    })
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {

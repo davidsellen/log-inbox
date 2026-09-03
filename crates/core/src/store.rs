@@ -460,7 +460,7 @@ mod tests {
         let store = temp_store();
         let inserted = store
             .insert_event(LogEventInput {
-                source: "examplewin/iis".to_owned(),
+                source: "windows/iis".to_owned(),
                 level: Some("ERROR".to_owned()),
                 timestamp: None,
                 message: "Request failed with Bearer secret-token".to_owned(),
@@ -474,7 +474,7 @@ mod tests {
 
         let result = store
             .query_logs(LogQuery {
-                source: Some("examplewin/iis".to_owned()),
+                source: Some("windows/iis".to_owned()),
                 since: None,
                 level: Some("error".to_owned()),
                 query: Some("failed".to_owned()),

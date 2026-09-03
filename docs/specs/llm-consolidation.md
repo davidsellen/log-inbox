@@ -34,13 +34,15 @@ The preferred service-orchestrated handoff is an append-only folder of Markdown 
 
 1. Write one uniquely named file per bounded event group to `pending/`.
 2. Write through a temporary file and atomically rename it into view.
-3. Let Obsidian index proposals without editing the daily note.
+3. Let the user's Markdown tools index proposals without editing the daily note.
 4. Have one consolidator review pending proposals, patch canonical notes, and then move handled proposals to `processed/`.
 5. Mark evidence events reviewed only after the canonical patch succeeds.
 
 The MCP service may run an automatic staging worker. It waits for a quiet period, groups unstaged events by `task_id`, `session_id`, or `fingerprint`, writes one proposal per group, and records proposal state without marking the evidence reviewed. Events without a correlation identifier remain isolated to avoid merging unrelated work.
 
-Concurrent producers never share a target file. The consolidator should use an advisory lock plus a content hash check before replacing a canonical note so an Obsidian edit cannot be silently overwritten. A daily-note template or query may show pending proposals by `created_at` without appending links for each proposal.
+Each model request has a finite timeout, and group failures are isolated so one malformed or slow event cannot block later proposals. Failed groups remain unstaged and are eligible for a later retry.
+
+Concurrent producers never share a target file. The consolidator should use an advisory lock plus a content hash check before replacing a canonical note so an edit from any Markdown tool cannot be silently overwritten. A daily-note template or query may show pending proposals by `created_at` without appending links for each proposal.
 
 Storage and model limits are intentionally separate. The store retains every accepted redacted byte; the LLM receives a bounded projection containing correlation and task fields plus an explicit notice when content was omitted from that model call.
 
@@ -62,12 +64,12 @@ Required output:
 ```json
 {
   "target_note": "Daily log Aug 31",
-  "canonical_links": ["[[Example CRM]]"],
+  "canonical_links": ["[[Customer Portal]]"],
   "summary_bullets": [
     "Confirmed the failed export requests were caused by missing CRM route metadata."
   ],
   "details": {
-    "source": "examplewin/iis",
+    "source": "windows/iis",
     "window": "2026-08-31T13:40:00Z/2026-08-31T13:50:00Z",
     "event_ids": ["evt_123", "evt_124"],
     "links": []
