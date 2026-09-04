@@ -9,7 +9,7 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use log_inbox_core::{
-    models::{DailyConsolidationJob, LogQuery},
+    models::{DailyConsolidationJob, LinkSelector, LogQuery, VaultLinkRule},
     settings::Settings,
     store::Store,
 };
@@ -134,6 +134,24 @@ struct DashboardData {
     consolidations: Vec<DailyConsolidationJob>,
 }
 
+#[derive(Debug, Deserialize)]
+struct LinkRuleInput {
+    #[serde(default)]
+    id: Option<String>,
+    selectors: Vec<LinkSelector>,
+    target_note_id: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct LinkingData {
+    catalog: vault_context::VaultCatalog,
+    rules: Vec<VaultLinkRule>,
+    observed: Vec<vault_context::ObservedIdentity>,
+    event_count: usize,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -187,6 +205,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/favicon.ico", get(favicon))
         .route("/api/dashboard", get(dashboard_data))
         .route("/api/preferences", put(save_preferences))
+        .route("/api/linking", get(linking_data))
+        .route("/api/linking/scan", post(linking_data))
+        .route("/api/linking/rules", post(create_link_rule))
+        .route(
+            "/api/linking/rules/{rule_id}",
+            put(update_link_rule).delete(delete_link_rule),
+        )
         .route(
             "/api/proposals/{proposal_id}/apply",
             post(apply_dashboard_proposal),
@@ -194,6 +219,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/proposals/{proposal_id}/discard",
             post(discard_dashboard_proposal),
+        )
+        .route(
+            "/api/proposals/{proposal_id}/regenerate",
+            post(regenerate_dashboard_proposal),
         )
         .route("/api/consolidations/daily", post(consolidate_dashboard_day))
         .route(
@@ -253,11 +282,50 @@ async fn favicon() -> impl IntoResponse {
 
 async fn dashboard_data(State(state): State<AppState>) -> Result<Json<DashboardData>, ApiError> {
     let preferences = DashboardPreferences::load(&state.store)?;
-    let proposals = state
+    let mut proposals = state
         .proposal_inbox
         .as_ref()
         .map_or_else(|| Ok(Vec::new()), proposal_inbox::ProposalInbox::list)
         .map_err(ApiError::internal)?;
+    let rules = state
+        .store
+        .list_link_rules()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let revision = state
+        .vault_context
+        .for_events(&[], &rules)
+        .map_err(ApiError::internal)?["link_context_revision"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    for proposal in &mut proposals {
+        if proposal.link_context_revision == revision {
+            continue;
+        }
+        if proposal.link_candidates.is_empty() {
+            proposal.stale = true;
+            continue;
+        }
+        let events = state
+            .store
+            .get_events_by_ids(&proposal.evidence_event_ids)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let context = state
+            .vault_context
+            .for_events(&events, &rules)
+            .map_err(ApiError::internal)?;
+        let mut current = context["candidate_notes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        current.sort();
+        let mut previous = proposal.link_candidates.clone();
+        previous.sort();
+        proposal.stale = previous.is_empty() || previous != current;
+    }
     let instructions = render_agent_instructions(&preferences);
     let consolidations = state
         .store
@@ -284,6 +352,112 @@ async fn save_preferences(
         "preferences": preferences,
         "instructions": render_agent_instructions(&preferences),
     })))
+}
+
+async fn linking_data(State(state): State<AppState>) -> Result<Json<LinkingData>, ApiError> {
+    let catalog = state.vault_context.catalog().map_err(ApiError::internal)?;
+    let rules = state
+        .store
+        .list_link_rules()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let events = state
+        .store
+        .all_events()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let observed = state
+        .vault_context
+        .observed(&events, &rules)
+        .map_err(ApiError::internal)?;
+    Ok(Json(LinkingData {
+        catalog,
+        rules,
+        observed,
+        event_count: events.len(),
+    }))
+}
+
+async fn create_link_rule(
+    State(state): State<AppState>,
+    Json(input): Json<LinkRuleInput>,
+) -> Result<(StatusCode, Json<VaultLinkRule>), ApiError> {
+    let now = Utc::now();
+    let id = input
+        .id
+        .unwrap_or_else(|| format!("rule_{}", uuid::Uuid::new_v4().simple()));
+    validate_rule_id(&id)?;
+    let rule = VaultLinkRule {
+        id,
+        selectors: input.selectors,
+        target_note_id: input.target_note_id,
+        enabled: input.enabled,
+        created_at: now,
+        updated_at: now,
+    };
+    save_link_rule(&state, &rule)?;
+    Ok((StatusCode::CREATED, Json(rule)))
+}
+
+async fn update_link_rule(
+    State(state): State<AppState>,
+    AxumPath(rule_id): AxumPath<String>,
+    Json(input): Json<LinkRuleInput>,
+) -> Result<Json<VaultLinkRule>, ApiError> {
+    validate_rule_id(&rule_id)?;
+    let existing = state
+        .store
+        .list_link_rules()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .into_iter()
+        .find(|rule| rule.id == rule_id)
+        .ok_or_else(|| ApiError::not_found("mapping not found"))?;
+    let rule = VaultLinkRule {
+        id: rule_id,
+        selectors: input.selectors,
+        target_note_id: input.target_note_id,
+        enabled: input.enabled,
+        created_at: existing.created_at,
+        updated_at: Utc::now(),
+    };
+    save_link_rule(&state, &rule)?;
+    Ok(Json(rule))
+}
+
+async fn delete_link_rule(
+    State(state): State<AppState>,
+    AxumPath(rule_id): AxumPath<String>,
+) -> Result<StatusCode, ApiError> {
+    validate_rule_id(&rule_id)?;
+    if state
+        .store
+        .delete_link_rule(&rule_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("mapping not found"))
+    }
+}
+
+fn save_link_rule(state: &AppState, rule: &VaultLinkRule) -> Result<(), ApiError> {
+    let catalog = state.vault_context.catalog().map_err(ApiError::internal)?;
+    vault_context::validate_rule(rule, &catalog).map_err(ApiError::bad_request)?;
+    state
+        .store
+        .save_link_rule(rule)
+        .map_err(|error| ApiError::internal(error.to_string()))
+}
+
+fn validate_rule_id(id: &str) -> Result<(), ApiError> {
+    if id.len() <= 100
+        && !id.is_empty()
+        && id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request("invalid mapping ID"))
+    }
 }
 
 async fn apply_dashboard_proposal(
@@ -322,6 +496,56 @@ async fn discard_dashboard_proposal(
     })))
 }
 
+async fn regenerate_dashboard_proposal(
+    State(state): State<AppState>,
+    AxumPath(proposal_id): AxumPath<String>,
+) -> Result<(StatusCode, Json<DailyConsolidationJob>), ApiError> {
+    let inbox = state
+        .proposal_inbox
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("proposal inbox is not configured"))?;
+    let proposal = inbox.get(&proposal_id).map_err(ApiError::bad_request)?;
+    let source_job_id = proposal.consolidation_job_id.ok_or_else(|| {
+        ApiError::bad_request("only daily consolidation proposals can be regenerated")
+    })?;
+    let source_job = state
+        .store
+        .get_daily_consolidation_job(&source_job_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("source consolidation job not found"))?;
+    let events = state
+        .store
+        .get_daily_consolidation_events(&source_job_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let event_ids = events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>();
+    let rules = state
+        .store
+        .list_link_rules()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let context = state
+        .vault_context
+        .for_events(&events, &rules)
+        .map_err(ApiError::internal)?;
+    let revision = context
+        .get("link_context_revision")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let job = state
+        .store
+        .enqueue_daily_consolidation(
+            source_job.start,
+            source_job.end,
+            &source_job.target_note,
+            revision,
+            &event_ids,
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
 async fn consolidate_dashboard_day(
     State(state): State<AppState>,
     Json(request): Json<DailyConsolidationRequest>,
@@ -347,9 +571,27 @@ async fn consolidate_dashboard_day(
         .iter()
         .map(|event| event.id.clone())
         .collect::<Vec<_>>();
+    let rules = state
+        .store
+        .list_link_rules()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let context = state
+        .vault_context
+        .for_events(&result.events, &rules)
+        .map_err(ApiError::internal)?;
+    let revision = context
+        .get("link_context_revision")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let mut job = state
         .store
-        .enqueue_daily_consolidation(request.start, request.end, &request.target_note, &event_ids)
+        .enqueue_daily_consolidation(
+            request.start,
+            request.end,
+            &request.target_note,
+            revision,
+            &event_ids,
+        )
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let result_is_missing = job.status == "completed"
         && job
@@ -535,7 +777,11 @@ async fn call_tool(state: &AppState, params: Value) -> Result<Value, String> {
                 .store
                 .get_events_by_ids(&args.event_ids)
                 .map_err(|error| error.to_string())?;
-            enrich_vault_context(&mut args, state.vault_context.for_events(&events)?);
+            let rules = state
+                .store
+                .list_link_rules()
+                .map_err(|error| error.to_string())?;
+            enrich_vault_context(&mut args, state.vault_context.for_events(&events, &rules)?);
             let proposal =
                 llm::suggest_markdown_summary(state.llm_config.as_ref(), args, events).await?;
             Ok(tool_text(json!(proposal)))
@@ -547,7 +793,11 @@ async fn call_tool(state: &AppState, params: Value) -> Result<Value, String> {
                 .store
                 .get_events_by_ids(&event_ids)
                 .map_err(|error| error.to_string())?;
-            enrich_vault_context(&mut args, state.vault_context.for_events(&events)?);
+            let rules = state
+                .store
+                .list_link_rules()
+                .map_err(|error| error.to_string())?;
+            enrich_vault_context(&mut args, state.vault_context.for_events(&events, &rules)?);
             let proposal =
                 llm::suggest_markdown_summary(state.llm_config.as_ref(), args, events).await?;
             let staged = state
@@ -815,6 +1065,10 @@ fn default_before() -> String {
 
 fn default_after() -> String {
     "2m".to_owned()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn tool_definitions() -> Vec<Value> {

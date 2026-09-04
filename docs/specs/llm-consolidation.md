@@ -81,6 +81,8 @@ Required output:
 }
 ```
 
+For whole-day consolidation, the response also contains structured `workstreams`. Each workstream names its allowed canonical link, 1-3 summary bullets, and the evidence event IDs it used. Rust validates those fields and renders the final headings and per-workstream `Details:` lines; model-authored Markdown is only a compatibility fallback.
+
 ## Markdown Rules
 
 Daily-note output should usually be:

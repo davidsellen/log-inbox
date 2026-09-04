@@ -111,7 +111,10 @@ async fn process_job(
         .map(|proposal| proposal.proposal_id)
         .collect::<Vec<_>>();
 
-    let mut context = vault_context.for_events(&events)?;
+    let mut context = vault_context.for_events(
+        &events,
+        &store.list_link_rules().map_err(|error| error.to_string())?,
+    )?;
     let Some(context_object) = context.as_object_mut() else {
         return Err("vault context must be a JSON object".to_owned());
     };

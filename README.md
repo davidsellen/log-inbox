@@ -135,7 +135,7 @@ curl -sS http://127.0.0.1:8788/mcp \
       "arguments": {
         "event_ids": ["evt_123"],
         "vault_context": {
-          "daily_note": "Daily log Sep 3",
+          "daily_note": "Configured daily note",
           "candidate_notes": ["Log Inbox"]
         },
         "task": "Summarize these logs for a daily-note entry."
@@ -175,6 +175,16 @@ LOG_INBOX_PRODUCT_INDEX_FILE=/config/product-navigation.md
 ```
 
 Wiki-link targets such as `[[Customer Portal]]` and `[[Billing#Operations|Billing ops]]` become allowed canonical note candidates. Exact `product`, `repo`, `app`, `service`, or source values can select them. Configured alias mappings are also checked against this navigation when it is present, preventing stale aliases from creating links to removed products.
+
+For the dashboard's complete, user-owned note catalog, mount the vault read-only:
+
+```env
+LOG_INBOX_VAULT_HOST_DIR=/absolute/path/to/vault
+LOG_INBOX_VAULT_DIR=/vault
+LOG_INBOX_VAULT_EXCLUDE_PREFIXES=00 Inbox,01 Work Log,.obsidian
+```
+
+Open the **Linking** tab to compare retained event identifiers with Markdown filenames and YAML aliases. Mappings are stored in SQLite and may match `source`, `repo`, `project`, `product`, `app`, `service`, `module`, `work_item`, or `branch`. A mapping can include a second exact or prefix condition for feature-specific routing. Folder names and product terminology come only from the mounted vault; the service does not prescribe a taxonomy.
 
 On Linux, pre-create the proposal and daily-note host directories, then set `LOG_INBOX_HOST_UID` and `LOG_INBOX_HOST_GID` to their owner (usually the output of `id -u` and `id -g`). The defaults are `1000:1000`. Pre-creation matters because Docker-created bind directories may be owned by `root` or `nobody`. The MCP service uses the host user namespace so files retain the configured ownership while the process itself remains unprivileged.
 

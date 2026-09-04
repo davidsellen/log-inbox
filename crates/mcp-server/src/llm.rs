@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -88,6 +88,7 @@ pub struct SuggestMarkdownSummaryArgs {
 pub struct SummaryProposal {
     pub target_note: String,
     pub canonical_links: Vec<String>,
+    pub link_candidates: Vec<String>,
     pub markdown: String,
     pub evidence_event_ids: Vec<String>,
     pub confidence: String,
@@ -96,6 +97,7 @@ pub struct SummaryProposal {
     pub provider: String,
     pub supersedes_proposal_ids: Vec<String>,
     pub consolidation_job_id: Option<String>,
+    pub link_context_revision: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,7 +209,7 @@ fn build_prompt(
     let allowed_links =
         serde_json::to_string(&allowed_canonical_links(args)).map_err(|error| error.to_string())?;
     let format_rules = if args.mode == "daily-consolidation" {
-        "- Organize distinct workstreams under concise level-three Markdown headings with 1-3 factual bullets each.\n- Merge lifecycle events and omit duplicate, superseded, or trivial transport updates."
+        "- Include a workstreams array. Each item has title, canonical_link, summary_bullets, and evidence_event_ids.\n- Use an empty canonical_link when no allowed link fits.\n- Merge lifecycle events and omit duplicate, superseded, or trivial transport updates."
     } else {
         "- Write 2-4 concise factual bullets covering outcome, important changes or diagnosis, validation, and any remaining follow-up. Do not add a heading or raw log dump."
     };
@@ -227,12 +229,20 @@ Events:
 
 Return JSON with this exact shape:
 {{
-  "target_note": "Daily log Sep 3",
+  "target_note": "Configured daily note",
   "canonical_links": [],
   "markdown": "- Concise conclusion that belongs in a Markdown vault.",
   "evidence_event_ids": ["evt_..."],
   "confidence": "low|medium|high",
   "open_questions": []
+  ,"workstreams": [
+    {{
+      "title": "Concise workstream name",
+      "canonical_link": "",
+      "summary_bullets": ["Outcome that matters."],
+      "evidence_event_ids": ["evt_..."]
+    }}
+  ]
 }}
 
 Rules:
@@ -369,14 +379,25 @@ fn parse_proposal(
         format!("LLM did not return valid JSON: {error}; response content was: {content}")
     })?;
 
+    let workstream_markdown = (args.mode == "daily-consolidation")
+        .then(|| render_workstreams(&value, args, events))
+        .flatten();
+    let canonical_links = workstream_links(&value, args);
     Ok(SummaryProposal {
         target_note: default_target_note(args),
-        canonical_links: validated_canonical_links(&value, args),
-        markdown: with_evidence_details(
-            string_field(&value, "markdown")
-                .unwrap_or_else(|| fallback_markdown(events, "LLM response omitted markdown.")),
-            events,
-        ),
+        link_candidates: allowed_canonical_links(args),
+        canonical_links: if canonical_links.is_empty() {
+            validated_canonical_links(&value, args)
+        } else {
+            canonical_links
+        },
+        markdown: workstream_markdown.unwrap_or_else(|| {
+            with_evidence_details(
+                string_field(&value, "markdown")
+                    .unwrap_or_else(|| fallback_markdown(events, "LLM response omitted markdown.")),
+                events,
+            )
+        }),
         evidence_event_ids: events.iter().map(|event| event.id.clone()).collect(),
         confidence: string_field(&value, "confidence").unwrap_or_else(|| "low".to_owned()),
         open_questions: string_array_field(&value, "open_questions"),
@@ -384,7 +405,82 @@ fn parse_proposal(
         provider: provider.to_owned(),
         supersedes_proposal_ids: Vec::new(),
         consolidation_job_id: None,
+        link_context_revision: link_context_revision(args),
     })
+}
+
+fn workstream_links(value: &Value, args: &SuggestMarkdownSummaryArgs) -> Vec<String> {
+    let allowed = allowed_canonical_links(args)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    value
+        .get("workstreams")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("canonical_link").and_then(Value::as_str))
+        .filter(|link| allowed.contains(*link))
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn render_workstreams(
+    value: &Value,
+    args: &SuggestMarkdownSummaryArgs,
+    events: &[StoredLogEvent],
+) -> Option<String> {
+    let items = value.get("workstreams")?.as_array()?;
+    let allowed_links = allowed_canonical_links(args)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let events_by_id = events
+        .iter()
+        .map(|event| (event.id.as_str(), event))
+        .collect::<HashMap<_, _>>();
+    let rendered = items
+        .iter()
+        .filter_map(|item| {
+            let title = item.get("title").and_then(Value::as_str)?.trim();
+            if title.is_empty() {
+                return None;
+            }
+            let link = item
+                .get("canonical_link")
+                .and_then(Value::as_str)
+                .filter(|link| allowed_links.contains(*link));
+            let bullets = string_array_field(item, "summary_bullets");
+            if bullets.is_empty() {
+                return None;
+            }
+            let selected = string_array_field(item, "evidence_event_ids")
+                .into_iter()
+                .filter_map(|id| events_by_id.get(id.as_str()).copied())
+                .cloned()
+                .collect::<Vec<_>>();
+            let evidence = if selected.is_empty() {
+                events.to_vec()
+            } else {
+                selected
+            };
+            let heading = link.map_or_else(
+                || format!("### {title}"),
+                |link| format!("### {link} — {title}"),
+            );
+            let body = bullets
+                .into_iter()
+                .take(3)
+                .map(|bullet| format!("- {}", bullet.trim().trim_start_matches("- ")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(format!(
+                "{heading}\n\n{}",
+                with_evidence_details(body, &evidence)
+            ))
+        })
+        .collect::<Vec<_>>();
+    (!rendered.is_empty()).then(|| rendered.join("\n\n"))
 }
 
 fn fallback_proposal(
@@ -402,6 +498,7 @@ fn fallback_proposal(
     };
     SummaryProposal {
         target_note: default_target_note(&args),
+        link_candidates: allowed_canonical_links(&args),
         canonical_links,
         markdown,
         evidence_event_ids: events.into_iter().map(|event| event.id).collect(),
@@ -411,6 +508,7 @@ fn fallback_proposal(
         provider: provider.to_owned(),
         supersedes_proposal_ids: Vec::new(),
         consolidation_job_id: None,
+        link_context_revision: link_context_revision(&args),
     }
 }
 
@@ -426,6 +524,14 @@ fn default_target_note(args: &SuggestMarkdownSummaryArgs) -> String {
         .get("daily_note")
         .and_then(Value::as_str)
         .unwrap_or("Daily note")
+        .to_owned()
+}
+
+fn link_context_revision(args: &SuggestMarkdownSummaryArgs) -> String {
+    args.vault_context
+        .get("link_context_revision")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
         .to_owned()
 }
 
@@ -608,7 +714,7 @@ mod tests {
         };
         let args = SuggestMarkdownSummaryArgs {
             event_ids: vec![event.id.clone()],
-            vault_context: json!({ "daily_note": "Daily log Sep 3" }),
+            vault_context: json!({ "daily_note": "Configured daily note" }),
             mode: "daily-note".to_owned(),
             task: None,
         };
@@ -617,7 +723,7 @@ mod tests {
             .await
             .expect("fallback proposal succeeds");
 
-        assert_eq!(proposal.target_note, "Daily log Sep 3");
+        assert_eq!(proposal.target_note, "Configured daily note");
         assert_eq!(proposal.evidence_event_ids, ["evt_test"]);
         assert!(proposal.requires_review);
         assert_eq!(proposal.provider, "not_configured");
@@ -667,6 +773,51 @@ mod tests {
         assert!(proposal.markdown.contains("branch `feature/test`"));
         assert!(proposal.markdown.contains("events `evt_real`"));
         assert!(!proposal.markdown.contains("invented evidence"));
+    }
+
+    #[test]
+    fn renders_daily_workstreams_with_validated_links_and_evidence() {
+        let event = StoredLogEvent {
+            id: "evt_navigation".to_owned(),
+            received_at: Utc::now(),
+            timestamp: Utc::now(),
+            source: "agent/test".to_owned(),
+            level: "info".to_owned(),
+            message: "Completed navigation work".to_owned(),
+            metadata: Map::from_iter([("repo".to_owned(), Value::from("portal-api"))]),
+            fingerprint: None,
+            truncated: false,
+            reviewed: false,
+        };
+        let args = SuggestMarkdownSummaryArgs {
+            event_ids: vec![event.id.clone()],
+            vault_context: json!({
+                "daily_note": "Work log",
+                "candidate_notes": ["[[Record Navigation]]"]
+            }),
+            mode: "daily-consolidation".to_owned(),
+            task: None,
+        };
+        let model_output = json!({
+            "workstreams": [{
+                "title": "Navigation validation",
+                "canonical_link": "[[Record Navigation]]",
+                "summary_bullets": ["Validated the host route.", "Kept the chat open."],
+                "evidence_event_ids": ["evt_navigation"]
+            }],
+            "confidence": "high",
+            "open_questions": []
+        })
+        .to_string();
+
+        let proposal = parse_proposal(&model_output, &args, &[event], "test").unwrap();
+        assert!(
+            proposal
+                .markdown
+                .starts_with("### [[Record Navigation]] — Navigation validation")
+        );
+        assert!(proposal.markdown.contains("repo `portal-api`"));
+        assert_eq!(proposal.canonical_links, ["[[Record Navigation]]"]);
     }
 
     #[test]

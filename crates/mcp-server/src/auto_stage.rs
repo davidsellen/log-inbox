@@ -96,7 +96,10 @@ async fn stage_group(
 ) -> Result<(), String> {
     let args = llm::SuggestMarkdownSummaryArgs {
         event_ids: event_ids.to_vec(),
-        vault_context: vault_context.for_events(&events)?,
+        vault_context: vault_context.for_events(
+            &events,
+            &store.list_link_rules().map_err(|error| error.to_string())?,
+        )?,
         mode: "daily-note".to_owned(),
         task: Some(
             "Consolidate this completed activity group into a concise reviewable daily-log proposal."

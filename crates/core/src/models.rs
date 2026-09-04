@@ -77,3 +77,20 @@ pub struct DailyConsolidationJob {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LinkSelector {
+    pub field: String,
+    pub operator: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VaultLinkRule {
+    pub id: String,
+    pub selectors: Vec<LinkSelector>,
+    pub target_note_id: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}

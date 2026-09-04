@@ -184,9 +184,12 @@ pub struct PendingProposal {
     pub provider: String,
     pub evidence_event_ids: Vec<String>,
     pub canonical_links: Vec<String>,
+    pub link_candidates: Vec<String>,
     pub supersedes_proposal_ids: Vec<String>,
     pub consolidation_job_id: Option<String>,
     pub markdown: String,
+    pub link_context_revision: String,
+    pub stale: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,9 +207,13 @@ struct ProposalFrontmatter {
     #[serde(default)]
     canonical_links: Vec<String>,
     #[serde(default)]
+    link_candidates: Vec<String>,
+    #[serde(default)]
     supersedes_proposal_ids: Vec<String>,
     #[serde(default)]
     consolidation_job_id: Option<String>,
+    #[serde(default)]
+    link_context_revision: String,
 }
 
 struct ParsedProposal {
@@ -232,9 +239,12 @@ fn pending_proposal(path: PathBuf) -> Result<PendingProposal, String> {
         provider: parsed.frontmatter.provider,
         evidence_event_ids: parsed.frontmatter.evidence_event_ids,
         canonical_links: parsed.frontmatter.canonical_links,
+        link_candidates: parsed.frontmatter.link_candidates,
         supersedes_proposal_ids: parsed.frontmatter.supersedes_proposal_ids,
         consolidation_job_id: parsed.frontmatter.consolidation_job_id,
         markdown: parsed.markdown,
+        link_context_revision: parsed.frontmatter.link_context_revision,
+        stale: false,
     })
 }
 
@@ -361,6 +371,12 @@ fn render_proposal(
         output.push_str("canonical_links:\n");
         append_yaml_list(&mut output, &proposal.canonical_links);
     }
+    if proposal.link_candidates.is_empty() {
+        output.push_str("link_candidates: []\n");
+    } else {
+        output.push_str("link_candidates:\n");
+        append_yaml_list(&mut output, &proposal.link_candidates);
+    }
     if proposal.supersedes_proposal_ids.is_empty() {
         output.push_str("supersedes_proposal_ids: []\n");
     } else {
@@ -372,6 +388,9 @@ fn render_proposal(
         output.push_str(&yaml_string(job_id));
         output.push('\n');
     }
+    output.push_str("link_context_revision: ");
+    output.push_str(&yaml_string(&proposal.link_context_revision));
+    output.push('\n');
     output.push_str("---\n\n# Log summary proposal\n\n");
     output.push_str(&proposal.markdown);
     output.push('\n');
@@ -406,8 +425,9 @@ mod tests {
 
     fn proposal() -> SummaryProposal {
         SummaryProposal {
-            target_note: "Daily log Sep 3".to_owned(),
+            target_note: "Configured daily note".to_owned(),
             canonical_links: vec!["[[Log Inbox]]".to_owned()],
+            link_candidates: vec!["[[Log Inbox]]".to_owned()],
             markdown: "- Consolidated a bounded log window.".to_owned(),
             evidence_event_ids: vec!["evt_123".to_owned()],
             confidence: "high".to_owned(),
@@ -416,6 +436,7 @@ mod tests {
             provider: "local".to_owned(),
             supersedes_proposal_ids: vec!["proposal_previous".to_owned()],
             consolidation_job_id: Some("consolidation_test".to_owned()),
+            link_context_revision: "catalog-1".to_owned(),
         }
     }
 
@@ -435,7 +456,7 @@ mod tests {
         assert_ne!(first.path, second.path);
         let listed = inbox.list().expect("proposals list");
         assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0].target_note, "Daily log Sep 3");
+        assert_eq!(listed[0].target_note, "Configured daily note");
         assert_eq!(listed[0].evidence_event_ids, ["evt_123"]);
         assert_eq!(listed[0].supersedes_proposal_ids, ["proposal_previous"]);
         assert_eq!(
@@ -469,14 +490,14 @@ mod tests {
         let staged = inbox.stage(&proposal()).expect("proposal stages");
         let daily_dir = root.join("daily");
         fs::create_dir_all(&daily_dir).expect("daily directory exists");
-        fs::write(daily_dir.join("Daily log Sep 3.md"), "").expect("empty daily note exists");
+        fs::write(daily_dir.join("Configured daily note.md"), "").expect("empty daily note exists");
 
         let applied = inbox
             .apply(&staged.proposal_id, &daily_dir)
             .expect("proposal applies");
         let daily = fs::read_to_string(&applied.daily_path).expect("daily note is readable");
 
-        assert!(daily.starts_with("# Daily log Sep 3\n\n## [[Log Inbox]] activity report"));
+        assert!(daily.starts_with("# Configured daily note\n\n## [[Log Inbox]] activity report"));
         assert!(daily.contains("[[Log Inbox]]"));
         assert!(daily.contains("evt_123"));
         assert_eq!(applied.supersedes_proposal_ids, ["proposal_previous"]);

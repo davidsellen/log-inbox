@@ -23,7 +23,7 @@
     }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--canvas); color: var(--ink); }
-    button, input, textarea { font: inherit; letter-spacing: 0; }
+    button, input, select, textarea { font: inherit; letter-spacing: 0; }
     button { cursor: pointer; }
     .topbar { background: #17201c; color: #fff; border-bottom: 1px solid #0d120f; }
     .topbar-inner { max-width: 1180px; margin: 0 auto; min-height: 58px; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
@@ -63,14 +63,32 @@
     .settings { display: grid; grid-template-columns: minmax(280px, 390px) minmax(0, 1fr); gap: 32px; align-items: start; }
     form { display: grid; gap: 15px; }
     label { display: grid; gap: 6px; color: #34423b; font-size: 13px; font-weight: 650; }
-    input, textarea { width: 100%; border: 1px solid #bfc9c3; border-radius: 5px; background: var(--surface); color: var(--ink); padding: 9px 10px; }
-    input:focus, textarea:focus { outline: 2px solid #9bcdb5; outline-offset: 1px; border-color: var(--accent); }
+    input, select, textarea { width: 100%; border: 1px solid #bfc9c3; border-radius: 5px; background: var(--surface); color: var(--ink); padding: 9px 10px; }
+    input:focus, select:focus, textarea:focus { outline: 2px solid #9bcdb5; outline-offset: 1px; border-color: var(--accent); }
     textarea { min-height: 110px; resize: vertical; }
     .form-actions, .instruction-actions { display: flex; align-items: center; gap: 10px; }
     .status { min-height: 20px; color: var(--accent); font-size: 13px; }
     .status.error { color: var(--danger); }
     .instructions { min-width: 0; }
     .instructions pre { max-height: 620px; overflow: auto; background: #202723; color: #edf3ef; border-color: #202723; }
+    .linking-layout { display: grid; grid-template-columns: minmax(230px, 300px) minmax(0, 1fr); gap: 28px; align-items: start; }
+    .catalog { border-top: 1px solid var(--line); max-height: 680px; overflow: auto; }
+    .catalog-group { padding: 14px 0 7px; font-size: 12px; font-weight: 750; color: var(--muted); text-transform: uppercase; }
+    .catalog-note { padding: 6px 0; font-size: 13px; overflow-wrap: anywhere; }
+    .catalog-note small { display: block; color: var(--muted); margin-top: 2px; }
+    .rule-form { display: grid; grid-template-columns: 120px 100px minmax(130px, 1fr) minmax(180px, 1.3fr) auto; gap: 8px; align-items: end; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+    .condition-row { grid-column: 1 / -1; display: grid; grid-template-columns: 120px 100px minmax(130px, 1fr) auto; gap: 8px; align-items: end; }
+    .mapping-list { border-top: 1px solid var(--line); margin-top: 12px; }
+    .mapping-row { display: grid; grid-template-columns: 85px minmax(130px, .8fr) minmax(180px, 1fr) 190px auto; gap: 10px; align-items: center; min-height: 58px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+    .mapping-value { font-weight: 700; overflow-wrap: anywhere; }
+    .mapping-sample { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .pill { display: inline-block; color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 750; }
+    .pill.resolved { color: var(--accent); }
+    .pill.ambiguous { color: var(--danger); }
+    .saved-rules { margin: 22px 0; }
+    .saved-rule { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+    .saved-rule code { overflow-wrap: anywhere; }
+    .inline-actions { display: flex; gap: 7px; flex-shrink: 0; }
     dialog { width: min(760px, calc(100% - 32px)); max-height: calc(100vh - 48px); border: 1px solid var(--line); border-radius: 7px; padding: 0; color: var(--ink); background: var(--surface); }
     dialog::backdrop { background: rgba(15, 24, 19, .46); }
     .dialog-body { padding: 22px; }
@@ -83,6 +101,9 @@
       .topbar-inner, .shell { padding-left: 16px; padding-right: 16px; }
       .shell { padding-top: 18px; }
       .settings { grid-template-columns: 1fr; }
+      .linking-layout { grid-template-columns: 1fr; }
+      .rule-form, .mapping-row { grid-template-columns: 1fr; }
+      .condition-row { grid-template-columns: 1fr; }
       .proposal-head { grid-template-columns: 1fr; }
       .proposal-head .button { justify-self: start; }
       .section-head { align-items: flex-start; }
@@ -101,6 +122,7 @@
   <main class="shell">
     <nav class="tabs" aria-label="Dashboard views">
       <button class="tab" data-tab="queue" aria-selected="true">Queue</button>
+      <button class="tab" data-tab="linking" aria-selected="false">Linking</button>
       <button class="tab" data-tab="setup" aria-selected="false">Agent setup</button>
     </nav>
 
@@ -117,6 +139,40 @@
         </div>
       </div>
       <div id="queue" class="queue" aria-live="polite"></div>
+    </section>
+
+    <section id="linking-panel" class="panel">
+      <div class="section-head">
+        <div><h1>Vault linking</h1><div id="linking-count" class="count"></div></div>
+        <div class="queue-actions"><span id="linking-status" class="status"></span><button id="scan-vault" class="button" type="button">Scan vault</button></div>
+      </div>
+      <div class="linking-layout">
+        <aside>
+          <h2>Note catalog</h2>
+          <div id="catalog-meta" class="subtle"></div>
+          <div id="catalog" class="catalog"></div>
+        </aside>
+        <div>
+          <h2>Mapping rules</h2>
+          <form id="rule-form" class="rule-form">
+            <label>Field<select id="rule-field"></select></label>
+            <label>Match<select id="rule-operator"><option value="exact">Exact</option><option value="prefix">Prefix</option></select></label>
+            <label>Value<input id="rule-value" required></label>
+            <label>Target note<select id="rule-target" required></select></label>
+            <button class="button primary" type="submit">Save</button>
+            <div id="condition-row" class="condition-row" hidden>
+              <label>Condition field<select id="condition-field"></select></label>
+              <label>Match<select id="condition-operator"><option value="exact">Exact</option><option value="prefix">Prefix</option></select></label>
+              <label>Value<input id="condition-value"></label>
+              <button id="remove-condition" class="button" type="button">Remove condition</button>
+            </div>
+            <button id="add-condition" class="button" type="button">Add condition</button>
+          </form>
+          <div id="saved-rules" class="saved-rules"></div>
+          <div class="section-head"><div><h2>Observed identifiers</h2><div class="subtle">All retained events</div></div><select id="mapping-filter" aria-label="Filter identifiers"><option value="all">All</option><option value="unresolved">Unresolved</option><option value="suggested">Suggested</option><option value="resolved">Resolved</option><option value="ambiguous">Ambiguous</option></select></div>
+          <div id="mapping-list" class="mapping-list" aria-live="polite"></div>
+        </div>
+      </div>
     </section>
 
     <section id="setup-panel" class="panel">
@@ -153,7 +209,7 @@
   </dialog>
 
   <script>
-    const state = { instructions: "", preview: null, proposals: [], consolidations: [], awaitingJobId: null, pollTimer: null, preferencesLoaded: false };
+    const state = { instructions: "", preview: null, proposals: [], consolidations: [], linking: null, awaitingJobId: null, pollTimer: null, preferencesLoaded: false };
     const queue = document.querySelector("#queue");
     const count = document.querySelector("#queue-count");
     const healthText = document.querySelector("#health-text");
@@ -161,6 +217,7 @@
     document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => {
       document.querySelectorAll(".tab").forEach((item) => item.setAttribute("aria-selected", String(item === tab)));
       document.querySelectorAll(".panel").forEach((panel) => panel.classList.toggle("active", panel.id === `${tab.dataset.tab}-panel`));
+      if (tab.dataset.tab === "linking") loadLinking();
     }));
 
     function element(tag, className, text) {
@@ -193,9 +250,16 @@
         meta.append(element("span", "", new Date(proposal.created_at).toLocaleString()));
         meta.append(element("span", "", `${proposal.evidence_event_ids.length} evidence event${proposal.evidence_event_ids.length === 1 ? "" : "s"}`));
         meta.append(element("span", "", proposal.provider));
+        if (proposal.stale) meta.append(element("span", "badge", "links changed"));
         identity.append(meta);
         if (proposal.canonical_links.length) identity.append(element("div", "links", proposal.canonical_links.join("  ")));
         const actions = element("div", "proposal-actions");
+        if (proposal.stale && proposal.consolidation_job_id) {
+          const regenerate = element("button", "button", "Regenerate");
+          regenerate.type = "button";
+          regenerate.addEventListener("click", () => regenerateProposal(proposal, regenerate));
+          actions.append(regenerate);
+        }
         const discard = element("button", "button danger", "Discard");
         discard.type = "button";
         discard.addEventListener("click", () => discardProposal(proposal, discard));
@@ -222,6 +286,143 @@
       state.instructions = instructions;
       state.preferencesLoaded = true;
       document.querySelector("#instructions").textContent = instructions;
+    }
+
+    const selectorFields = ["source", "repo", "project", "product", "app", "service", "module", "work_item", "branch"];
+
+    function fillFieldSelect(select) {
+      select.replaceChildren(...selectorFields.map((field) => {
+        const option = element("option", "", field.replace("_", " "));
+        option.value = field;
+        return option;
+      }));
+    }
+
+    function noteOptions(selected = "") {
+      return (state.linking?.catalog.notes || []).map((note) => {
+        const option = element("option", "", `${note.title} — ${note.path}`);
+        option.value = note.id;
+        option.selected = note.id === selected;
+        return option;
+      });
+    }
+
+    function renderCatalog(catalog) {
+      const root = document.querySelector("#catalog");
+      root.replaceChildren();
+      document.querySelector("#catalog-meta").textContent = catalog.configured ? `${catalog.notes.length} notes · revision ${catalog.revision}` : "Configure a vault directory to discover notes";
+      const groups = new Map();
+      catalog.notes.forEach((note) => {
+        const group = note.group || "Other";
+        if (!groups.has(group)) groups.set(group, []);
+        groups.get(group).push(note);
+      });
+      for (const [group, notes] of groups) {
+        root.append(element("div", "catalog-group", group));
+        notes.forEach((note) => {
+          const row = element("div", "catalog-note", note.title);
+          row.append(element("small", "", [note.path, note.aliases.length ? `Aliases: ${note.aliases.join(", ")}` : ""].filter(Boolean).join(" · ")));
+          root.append(row);
+        });
+      }
+    }
+
+    function ruleLabel(rule) {
+      return rule.selectors.map((selector) => `${selector.field} ${selector.operator} "${selector.value}"`).join(" + ");
+    }
+
+    function renderRules(rules) {
+      const root = document.querySelector("#saved-rules");
+      root.replaceChildren();
+      if (!rules.length) return;
+      root.append(element("h3", "", "Saved rules"));
+      rules.forEach((rule) => {
+        const row = element("div", "saved-rule");
+        const target = state.linking.catalog.notes.find((note) => note.id === rule.target_note_id)?.wikilink || rule.target_note_id;
+        const label = element("code", "", `${ruleLabel(rule)} → ${target}`);
+        const actions = element("div", "inline-actions");
+        const toggle = element("button", "button", rule.enabled ? "Disable" : "Enable");
+        toggle.type = "button";
+        toggle.addEventListener("click", () => updateRule(rule, { ...rule, enabled: !rule.enabled }, toggle));
+        const remove = element("button", "button danger", "Delete");
+        remove.type = "button";
+        remove.addEventListener("click", () => deleteRule(rule, remove));
+        actions.append(toggle, remove);
+        row.append(label, actions);
+        root.append(row);
+      });
+    }
+
+    function renderObserved() {
+      const root = document.querySelector("#mapping-list");
+      root.replaceChildren();
+      const filter = document.querySelector("#mapping-filter").value;
+      const rows = (state.linking?.observed || []).filter((item) => filter === "all" || item.status === filter);
+      if (!rows.length) { root.append(element("div", "empty", "No identifiers in this view")); return; }
+      rows.forEach((item) => {
+        const row = element("div", "mapping-row");
+        row.append(element("span", `pill ${item.status}`, `${item.field} · ${item.event_count}`));
+        row.append(element("div", "mapping-value", item.value));
+        row.append(element("div", "mapping-sample", item.resolved_notes.join(", ") || item.sample_message));
+        const select = document.createElement("select");
+        select.setAttribute("aria-label", `Target note for ${item.value}`);
+        select.append(element("option", "", "Select note"), ...noteOptions(item.suggestions[0]?.note_id));
+        const save = element("button", "button primary", "Map");
+        save.type = "button";
+        save.disabled = !state.linking.catalog.notes.length;
+        save.addEventListener("click", async () => {
+          if (!select.value) return;
+          await createRule({ selectors: [{ field: item.field, operator: "exact", value: item.value }], target_note_id: select.value, enabled: true }, save);
+        });
+        row.append(select, save);
+        root.append(row);
+      });
+    }
+
+    async function loadLinking(useScan = false) {
+      const status = document.querySelector("#linking-status");
+      status.textContent = "Loading";
+      try {
+        const response = await fetch(useScan ? "/api/linking/scan" : "/api/linking", { method: useScan ? "POST" : "GET" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Linking request failed");
+        state.linking = data;
+        document.querySelector("#linking-count").textContent = `${data.event_count} events · ${data.observed.filter((item) => item.status === "unresolved").length} unresolved identifiers`;
+        document.querySelector("#rule-target").replaceChildren(...noteOptions());
+        renderCatalog(data.catalog);
+        renderRules(data.rules);
+        renderObserved();
+        status.textContent = "Current";
+      } catch (error) {
+        status.className = "status error";
+        status.textContent = error.message;
+      }
+    }
+
+    async function createRule(rule, button) {
+      button.disabled = true;
+      try {
+        const response = await fetch("/api/linking/rules", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rule) });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Mapping save failed");
+        await loadLinking();
+      } catch (error) { document.querySelector("#linking-status").textContent = error.message; }
+      finally { button.disabled = false; }
+    }
+
+    async function updateRule(rule, updated, button) {
+      button.disabled = true;
+      const response = await fetch(`/api/linking/rules/${encodeURIComponent(rule.id)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updated) });
+      if (!response.ok) document.querySelector("#linking-status").textContent = (await response.json()).error || "Mapping update failed";
+      await loadLinking();
+    }
+
+    async function deleteRule(rule, button) {
+      if (!confirm(`Delete mapping ${ruleLabel(rule)}?`)) return;
+      button.disabled = true;
+      const response = await fetch(`/api/linking/rules/${encodeURIComponent(rule.id)}`, { method: "DELETE" });
+      if (!response.ok) document.querySelector("#linking-status").textContent = (await response.json()).error || "Mapping delete failed";
+      await loadLinking();
     }
 
     function selectedDay() {
@@ -298,6 +499,22 @@
         button.disabled = false;
         button.textContent = original;
         return false;
+      }
+    }
+
+    async function regenerateProposal(proposal, button) {
+      button.disabled = true;
+      button.textContent = "Queuing";
+      try {
+        const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.proposal_id)}/regenerate`, { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Regeneration failed");
+        state.awaitingJobId = data.id;
+        await load();
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = "Regenerate";
+        alert(error.message);
       }
     }
 
@@ -415,9 +632,31 @@
       }
     });
 
+    fillFieldSelect(document.querySelector("#rule-field"));
+    fillFieldSelect(document.querySelector("#condition-field"));
+    document.querySelector("#scan-vault").addEventListener("click", () => loadLinking(true));
+    document.querySelector("#mapping-filter").addEventListener("change", renderObserved);
+    document.querySelector("#add-condition").addEventListener("click", () => {
+      document.querySelector("#condition-row").hidden = false;
+      document.querySelector("#add-condition").hidden = true;
+    });
+    document.querySelector("#remove-condition").addEventListener("click", () => {
+      document.querySelector("#condition-row").hidden = true;
+      document.querySelector("#condition-value").value = "";
+      document.querySelector("#add-condition").hidden = false;
+    });
+    document.querySelector("#rule-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const selectors = [{ field: document.querySelector("#rule-field").value, operator: document.querySelector("#rule-operator").value, value: document.querySelector("#rule-value").value.trim() }];
+      const conditionValue = document.querySelector("#condition-value").value.trim();
+      if (!document.querySelector("#condition-row").hidden && conditionValue) selectors.push({ field: document.querySelector("#condition-field").value, operator: document.querySelector("#condition-operator").value, value: conditionValue });
+      await createRule({ selectors, target_note_id: document.querySelector("#rule-target").value, enabled: true }, event.submitter);
+      event.currentTarget.reset();
+    });
     document.querySelector("#refresh").addEventListener("click", load);
     document.querySelector("#consolidate-date").valueAsDate = new Date();
     document.querySelector("#consolidate-date").addEventListener("change", renderConsolidationState);
+    if (location.hash === "#linking") document.querySelector('[data-tab="linking"]').click();
     load();
   </script>
 </body>

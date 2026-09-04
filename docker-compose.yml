@@ -57,6 +57,8 @@ services:
       LOG_INBOX_DAILY_NOTES_DIR: "${LOG_INBOX_DAILY_NOTES_DIR:-/vault-daily}"
       LOG_INBOX_VAULT_CONTEXT_FILE: "${LOG_INBOX_VAULT_CONTEXT_FILE:-/config/vault-context.json}"
       LOG_INBOX_PRODUCT_INDEX_FILE: "${LOG_INBOX_PRODUCT_INDEX_FILE:-/config/product-navigation.md}"
+      LOG_INBOX_VAULT_DIR: "${LOG_INBOX_VAULT_DIR:-/vault}"
+      LOG_INBOX_VAULT_EXCLUDE_PREFIXES: "${LOG_INBOX_VAULT_EXCLUDE_PREFIXES:-00 Inbox,01 Work Log,.obsidian}"
       LOG_INBOX_AUTO_STAGE_INTERVAL_SECONDS: "${LOG_INBOX_AUTO_STAGE_INTERVAL_SECONDS:-30}"
       LOG_INBOX_AUTO_STAGE_QUIET_SECONDS: "${LOG_INBOX_AUTO_STAGE_QUIET_SECONDS:-30}"
       LOG_INBOX_AUTO_STAGE_BATCH_SIZE: "${LOG_INBOX_AUTO_STAGE_BATCH_SIZE:-100}"
@@ -68,6 +70,7 @@ services:
       - "${LOG_INBOX_DAILY_NOTES_HOST_DIR:-./data/daily-notes}:${LOG_INBOX_DAILY_NOTES_DIR:-/vault-daily}"
       - "${LOG_INBOX_VAULT_CONTEXT_HOST_FILE:-./config/vault-context.json}:${LOG_INBOX_VAULT_CONTEXT_FILE:-/config/vault-context.json}:ro"
       - "${LOG_INBOX_PRODUCT_INDEX_HOST_FILE:-./config/product-navigation.md}:${LOG_INBOX_PRODUCT_INDEX_FILE:-/config/product-navigation.md}:ro"
+      - "${LOG_INBOX_VAULT_HOST_DIR:-./data/vault}:${LOG_INBOX_VAULT_DIR:-/vault}:ro"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     userns_mode: host

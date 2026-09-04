@@ -32,15 +32,26 @@ The MCP service exposes a small local interface for reviewing Markdown proposals
 - Fixed evidence, redaction, canonical-link, and output-schema rules take precedence over user prompt text.
 - Never accept, return, persist, or copy the ingest API key. Generated instructions reference `LOG_INBOX_API_KEY` at execution time.
 
+## Vault Linking
+
+- Scan the configured Markdown vault read-only and derive note groups, aliases, tags, and references without assuming folder or product names.
+- Compare all retained event identifiers with the catalog, including scalar and array metadata.
+- Persist user-approved exact or prefix rules in SQLite; optional conditions make a rule specific to a branch, work item, module, or other supported field.
+- Treat model output as a suggestion only. The resolver accepts only notes present in the current catalog.
+
 ## HTTP API
 
 - `GET /api/dashboard` returns preferences, generated instructions, and pending proposals.
 - `PUT /api/preferences` validates and persists non-secret preferences.
+- `GET /api/linking` returns the current catalog, observed identifiers, suggestions, and rules.
+- `POST /api/linking/scan` refreshes the read-only catalog view.
+- `POST`, `PUT`, and `DELETE /api/linking/rules` manage persisted mappings.
 - `POST /api/consolidations/daily` idempotently queues a durable daily consolidation job.
 - `GET /api/consolidations/{job_id}` returns authoritative durable job state.
 - `POST /api/consolidations/{job_id}/cancel` requests cancellation of pending or running work.
 - `POST /api/proposals/{proposal_id}/apply` applies and consumes a proposal.
 - `POST /api/proposals/{proposal_id}/discard` rejects and consumes a proposal.
+- `POST /api/proposals/{proposal_id}/regenerate` queues a durable replacement for a stale daily consolidation proposal.
 
 ## Acceptance Criteria
 

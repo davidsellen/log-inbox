@@ -1,7 +1,7 @@
 use crate::{
     models::{
         DailyConsolidationJob, LogEventInput, LogQuery, LogQueryResult, MarkReviewedResult,
-        SourceSummary, StagedEventGroup, StoredLogEvent,
+        SourceSummary, StagedEventGroup, StoredLogEvent, VaultLinkRule,
     },
     redaction::{redact_metadata, redact_text},
 };
@@ -111,6 +111,18 @@ impl Store {
                 FOREIGN KEY(job_id) REFERENCES daily_consolidation_jobs(id),
                 FOREIGN KEY(event_id) REFERENCES log_events(id)
             );
+
+            CREATE TABLE IF NOT EXISTS vault_link_rules (
+                id TEXT PRIMARY KEY,
+                selectors_json TEXT NOT NULL,
+                target_note_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_vault_link_rules_target
+                ON vault_link_rules(target_note_id);
             "#,
         )?;
         Ok(())
@@ -447,19 +459,96 @@ impl Store {
         Ok(())
     }
 
+    pub fn list_link_rules(&self) -> Result<Vec<VaultLinkRule>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, selectors_json, target_note_id, enabled, created_at, updated_at FROM vault_link_rules ORDER BY updated_at DESC",
+        )?;
+        stmt.query_map([], |row| {
+            let selectors_json: String = row.get(1)?;
+            let selectors = serde_json::from_str(&selectors_json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    selectors_json.len(),
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            Ok(VaultLinkRule {
+                id: row.get(0)?,
+                selectors,
+                target_note_id: row.get(2)?,
+                enabled: row.get::<_, i64>(3)? != 0,
+                created_at: parse_utc(row.get::<_, String>(4)?),
+                updated_at: parse_utc(row.get::<_, String>(5)?),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+    }
+
+    pub fn save_link_rule(&self, rule: &VaultLinkRule) -> Result<()> {
+        let selectors = serde_json::to_string(&rule.selectors)?;
+        let conn = self.connect()?;
+        conn.execute(
+            r#"
+            INSERT INTO vault_link_rules
+                (id, selectors_json, target_note_id, enabled, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(id) DO UPDATE SET
+                selectors_json = excluded.selectors_json,
+                target_note_id = excluded.target_note_id,
+                enabled = excluded.enabled,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                rule.id,
+                selectors,
+                rule.target_note_id,
+                rule.enabled as i64,
+                rule.created_at.to_rfc3339(),
+                rule.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_link_rule(&self, id: &str) -> Result<bool> {
+        let conn = self.connect()?;
+        Ok(conn.execute("DELETE FROM vault_link_rules WHERE id = ?1", params![id])? > 0)
+    }
+
+    pub fn all_events(&self) -> Result<Vec<StoredLogEvent>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT e.id, e.received_at, e.timestamp, e.source, e.level, e.message,
+                   e.metadata_json, e.fingerprint, e.truncated,
+                   CASE WHEN r.event_id IS NULL THEN 0 ELSE 1 END AS reviewed
+            FROM log_events e
+            LEFT JOIN review_state r ON r.event_id = e.id
+            ORDER BY e.timestamp DESC, e.received_at DESC
+            "#,
+        )?;
+        stmt.query_map([], stored_event_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     pub fn enqueue_daily_consolidation(
         &self,
         start: DateTime<Utc>,
         end: DateTime<Utc>,
         target_note: &str,
+        context_revision: &str,
         event_ids: &[String],
     ) -> Result<DailyConsolidationJob> {
         let last_event_id = event_ids.last().map(String::as_str).unwrap_or_default();
         let snapshot_key = format!(
-            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
             start.to_rfc3339(),
             end.to_rfc3339(),
             target_note,
+            context_revision,
             event_ids.len(),
             last_event_id
         );
@@ -823,6 +912,36 @@ mod tests {
     }
 
     #[test]
+    fn persists_updates_and_deletes_generic_link_rules() {
+        let store = temp_store();
+        let now = Utc::now();
+        let mut rule = VaultLinkRule {
+            id: "rule_test".to_owned(),
+            selectors: vec![crate::models::LinkSelector {
+                field: "repo".to_owned(),
+                operator: "exact".to_owned(),
+                value: "portal-api".to_owned(),
+            }],
+            target_note_id: "Knowledge/Customer Portal".to_owned(),
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+        store.save_link_rule(&rule).expect("rule saved");
+        assert_eq!(
+            store.list_link_rules().expect("rules load"),
+            vec![rule.clone()]
+        );
+
+        rule.enabled = false;
+        rule.updated_at = now + Duration::seconds(1);
+        store.save_link_rule(&rule).expect("rule updated");
+        assert!(!store.list_link_rules().unwrap()[0].enabled);
+        assert!(store.delete_link_rule(&rule.id).expect("rule deleted"));
+        assert!(store.list_link_rules().unwrap().is_empty());
+    }
+
+    #[test]
     fn preserves_large_accepted_messages_and_tracks_staging() {
         let store = temp_store();
         let message = "x".repeat(32 * 1024);
@@ -956,7 +1075,8 @@ mod tests {
             .enqueue_daily_consolidation(
                 start,
                 start + Duration::days(1),
-                "Daily log Sep 3",
+                "Configured daily note",
+                "context-1",
                 &event_ids,
             )
             .expect("job queues");
@@ -964,12 +1084,23 @@ mod tests {
             .enqueue_daily_consolidation(
                 start,
                 start + Duration::days(1),
-                "Daily log Sep 3",
+                "Configured daily note",
+                "context-1",
                 &event_ids,
             )
             .expect("duplicate resolves");
 
         assert_eq!(duplicate.id, first.id);
+        let changed_context = store
+            .enqueue_daily_consolidation(
+                start,
+                start + Duration::days(1),
+                "Configured daily note",
+                "context-2",
+                &event_ids,
+            )
+            .expect("changed context queues a replacement");
+        assert_ne!(changed_context.id, first.id);
         let running = store
             .claim_next_daily_consolidation()
             .expect("job claims")

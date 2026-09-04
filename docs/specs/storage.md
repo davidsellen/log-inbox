@@ -40,3 +40,7 @@ The first version should keep logs for `LOG_INBOX_RETENTION_DAYS`, defaulting to
 `proposal_state` records each event included in a staged proposal. This is separate from `review_state`: staging prevents duplicate automatic proposals, while review means a human or agent has applied or otherwise handled the proposal.
 
 Accepted redacted content is stored completely. Ingestion rejects values above the API limits rather than accepting partial evidence. LLM prompt projections have smaller independent limits and never overwrite stored content.
+
+## Vault Link Rules
+
+`vault_link_rules` stores user-owned selectors and canonical note IDs. Selectors are encoded as structured JSON so one rule can combine multiple fields while note names and folder conventions remain outside the application schema.
