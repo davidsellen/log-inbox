@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Path as AxumPath, State},
-    http::{Request, StatusCode},
+    http::{Request, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post, put},
@@ -184,6 +184,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/", get(dashboard_page))
+        .route("/favicon.ico", get(favicon))
         .route("/api/dashboard", get(dashboard_data))
         .route("/api/preferences", put(save_preferences))
         .route(
@@ -238,6 +239,16 @@ async fn health() -> Json<Value> {
 
 async fn dashboard_page() -> Html<&'static str> {
     Html(include_str!("../assets/dashboard.html"))
+}
+
+async fn favicon() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "image/x-icon"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        include_bytes!("../assets/favicon.ico").as_slice(),
+    )
 }
 
 async fn dashboard_data(State(state): State<AppState>) -> Result<Json<DashboardData>, ApiError> {
