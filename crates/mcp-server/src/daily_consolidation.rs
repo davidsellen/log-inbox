@@ -1,9 +1,33 @@
 use crate::{llm, proposal_inbox::ProposalInbox, vault_context::VaultContextProvider};
 use log_inbox_core::{models::DailyConsolidationJob, store::Store};
 use serde_json::Value;
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Duration,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+pub const DEFAULT_DAILY_CONSOLIDATION_PROMPT: &str = r#"Create a concise daily engineering report from the complete selected day.
+
+For each distinct workstream:
+- Use a concise level-three Markdown heading. Include the most specific allowed canonical link when one clearly applies.
+- Merge events sharing a task_id or session_id into one story. Treat the latest terminal event as authoritative over earlier start or progress events.
+- Write 1-3 factual bullets covering the final outcome, important decision or diagnosis, validation, and any blocker or follow-up.
+
+Keep unrelated repositories or tasks separate. Prefer outcomes over chronology. Omit duplicate lifecycle updates, superseded claims, transport details, and empty start messages. Do not invent conclusions that are absent from the evidence."#;
+
+pub fn migrate_prompt_preference(store: &Store) -> anyhow::Result<()> {
+    let preferences = store.get_preferences()?;
+    if preferences.contains_key("daily_consolidation_prompt") {
+        return Ok(());
+    }
+
+    store.set_preferences(&BTreeMap::from([(
+        "daily_consolidation_prompt".to_owned(),
+        configured_daily_prompt(&preferences),
+    )]))?;
+    Ok(())
+}
 
 pub async fn run(
     store: Store,
@@ -96,14 +120,7 @@ async fn process_job(
         Value::String(job.target_note.clone()),
     );
     let preferences = store.get_preferences().map_err(|error| error.to_string())?;
-    let mut task = "Consolidate the complete selected day into a readable daily report. Merge start, progress, and completion events for the same workstream; remove duplicates and trivial transport messages; organize distinct workstreams under concise level-three Markdown headings with 1-3 factual bullets each; retain decisions, outcomes, validation, blockers, and useful canonical links.".to_owned();
-    if let Some(instructions) = preferences
-        .get("consolidation_instructions")
-        .filter(|value| !value.trim().is_empty())
-    {
-        task.push_str("\n\nUser preferences for this report:\n");
-        task.push_str(instructions.trim());
-    }
+    let task = configured_daily_prompt(&preferences);
     let args = llm::SuggestMarkdownSummaryArgs {
         event_ids: event_ids.clone(),
         vault_context: context,
@@ -161,4 +178,60 @@ async fn process_job(
         "daily consolidation completed"
     );
     Ok(())
+}
+
+pub fn configured_daily_prompt(preferences: &BTreeMap<String, String>) -> String {
+    if let Some(prompt) = preferences
+        .get("daily_consolidation_prompt")
+        .filter(|value| !value.trim().is_empty())
+    {
+        return prompt.trim().to_owned();
+    }
+
+    let mut prompt = DEFAULT_DAILY_CONSOLIDATION_PROMPT.to_owned();
+    if let Some(legacy) = preferences
+        .get("consolidation_instructions")
+        .filter(|value| !value.trim().is_empty())
+    {
+        prompt.push_str("\n\nAdditional preferences:\n");
+        prompt.push_str(legacy.trim());
+    }
+    prompt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uses_saved_prompt_before_legacy_or_default_values() {
+        let preferences = BTreeMap::from([
+            (
+                "daily_consolidation_prompt".to_owned(),
+                " Current prompt ".to_owned(),
+            ),
+            (
+                "consolidation_instructions".to_owned(),
+                "Legacy prompt".to_owned(),
+            ),
+        ]);
+
+        assert_eq!(configured_daily_prompt(&preferences), "Current prompt");
+    }
+
+    #[test]
+    fn migrates_legacy_prompt_and_defaults_when_empty() {
+        let legacy = BTreeMap::from([(
+            "consolidation_instructions".to_owned(),
+            "Legacy prompt".to_owned(),
+        )]);
+        assert!(configured_daily_prompt(&legacy).starts_with(DEFAULT_DAILY_CONSOLIDATION_PROMPT));
+        assert!(
+            configured_daily_prompt(&legacy).ends_with("Additional preferences:\nLegacy prompt")
+        );
+        assert_eq!(
+            configured_daily_prompt(&BTreeMap::new()),
+            DEFAULT_DAILY_CONSOLIDATION_PROMPT
+        );
+    }
 }

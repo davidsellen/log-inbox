@@ -115,8 +115,8 @@ struct DashboardPreferences {
     source_prefix: String,
     default_host: String,
     extra_instructions: String,
-    #[serde(default)]
-    consolidation_instructions: String,
+    #[serde(default, alias = "consolidation_instructions")]
+    daily_consolidation_prompt: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
 
     let settings = Settings::from_env();
     let store = Store::open(settings.database_path())?;
+    daily_consolidation::migrate_prompt_preference(&store)?;
     store.recover_daily_consolidations()?;
     let vault_context = vault_context::VaultContextProvider::from_env();
     let state = AppState {
@@ -635,11 +636,7 @@ impl DashboardPreferences {
             source_prefix: preference(&values, "source_prefix", "codex"),
             default_host: preference(&values, "default_host", "windows"),
             extra_instructions: preference(&values, "extra_instructions", ""),
-            consolidation_instructions: preference(
-                &values,
-                "consolidation_instructions",
-                "Group entries by product or workstream and keep the report concise.",
-            ),
+            daily_consolidation_prompt: daily_consolidation::configured_daily_prompt(&values),
         })
     }
 
@@ -656,8 +653,8 @@ impl DashboardPreferences {
             ("default host", &self.default_host, 100),
             ("extra instructions", &self.extra_instructions, 4000),
             (
-                "consolidation instructions",
-                &self.consolidation_instructions,
+                "daily consolidation prompt",
+                &self.daily_consolidation_prompt,
                 4000,
             ),
         ] {
@@ -686,8 +683,8 @@ impl DashboardPreferences {
                 self.extra_instructions.clone(),
             ),
             (
-                "consolidation_instructions".to_owned(),
-                self.consolidation_instructions.clone(),
+                "daily_consolidation_prompt".to_owned(),
+                self.daily_consolidation_prompt.clone(),
             ),
         ])
     }

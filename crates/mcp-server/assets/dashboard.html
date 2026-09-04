@@ -128,7 +128,7 @@
           <label>Default host<input id="default-host" name="default_host"></label>
           <label>API key for copy<input id="api-key" type="password" autocomplete="off" placeholder="Not saved"></label>
           <label>Additional instructions<textarea id="extra-instructions" name="extra_instructions"></textarea></label>
-          <label>Daily consolidation instructions<textarea id="consolidation-instructions" name="consolidation_instructions"></textarea></label>
+          <label>Daily consolidation prompt<textarea id="daily-consolidation-prompt" name="daily_consolidation_prompt"></textarea></label>
           <div class="form-actions"><button class="button primary" type="submit">Save preferences</button><span id="save-status" class="status"></span></div>
         </form>
         <div class="instructions">
@@ -218,7 +218,7 @@
       document.querySelector("#source-prefix").value = preferences.source_prefix;
       document.querySelector("#default-host").value = preferences.default_host;
       document.querySelector("#extra-instructions").value = preferences.extra_instructions;
-      document.querySelector("#consolidation-instructions").value = preferences.consolidation_instructions;
+      document.querySelector("#daily-consolidation-prompt").value = preferences.daily_consolidation_prompt;
       state.instructions = instructions;
       state.preferencesLoaded = true;
       document.querySelector("#instructions").textContent = instructions;
@@ -389,7 +389,7 @@
         source_prefix: document.querySelector("#source-prefix").value.trim(),
         default_host: document.querySelector("#default-host").value.trim(),
         extra_instructions: document.querySelector("#extra-instructions").value.trim(),
-        consolidation_instructions: document.querySelector("#consolidation-instructions").value.trim()
+        daily_consolidation_prompt: document.querySelector("#daily-consolidation-prompt").value.trim()
       };
       try {
         const response = await fetch("/api/preferences", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(preferences) });

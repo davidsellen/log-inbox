@@ -3,13 +3,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
     borrow::Cow,
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
+    sync::Arc,
     time::Duration,
 };
+use tokio::sync::Semaphore;
 
 const MAX_PROMPT_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_PROMPT_METADATA_BYTES: usize = 8 * 1024;
-const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS: u64 = 300;
 const CONTEXT_METADATA_KEYS: &[&str] = &[
     "task_id",
     "session_id",
@@ -44,6 +46,8 @@ pub struct LlmConfig {
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
+    request_timeout: Duration,
+    request_gate: Arc<Semaphore>,
 }
 
 impl LlmConfig {
@@ -53,11 +57,18 @@ impl LlmConfig {
         let api_key = std::env::var("LOG_INBOX_LLM_API_KEY")
             .ok()
             .filter(|key| !key.trim().is_empty());
+        let request_timeout = std::env::var("LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS)
+            .clamp(5, 1800);
 
         Some(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             api_key,
             model,
+            request_timeout: Duration::from_secs(request_timeout),
+            request_gate: Arc::new(Semaphore::new(1)),
         })
     }
 }
@@ -133,8 +144,13 @@ pub async fn suggest_markdown_summary(
     };
 
     let prompt = build_prompt(&args, &events)?;
+    let _request_permit = config
+        .request_gate
+        .acquire()
+        .await
+        .map_err(|_| "LLM request queue closed".to_owned())?;
     let client = reqwest::Client::builder()
-        .timeout(LLM_REQUEST_TIMEOUT)
+        .timeout(config.request_timeout)
         .build()
         .map_err(|error| error.to_string())?;
     let mut request = client
@@ -180,7 +196,10 @@ fn build_prompt(
     args: &SuggestMarkdownSummaryArgs,
     events: &[StoredLogEvent],
 ) -> Result<String, String> {
-    let prompt_events = events.iter().map(prompt_event).collect::<Vec<_>>();
+    let prompt_events = events_for_prompt(&args.mode, events)
+        .into_iter()
+        .map(prompt_event)
+        .collect::<Vec<_>>();
     let event_slice =
         serde_json::to_string_pretty(&prompt_events).map_err(|error| error.to_string())?;
     let vault_context =
@@ -232,6 +251,65 @@ Rules:
         mode = args.mode,
         format_rules = format_rules,
     ))
+}
+
+fn events_for_prompt<'a>(mode: &str, events: &'a [StoredLogEvent]) -> Vec<&'a StoredLogEvent> {
+    if mode != "daily-consolidation" {
+        return events.iter().collect();
+    }
+
+    let mut groups = BTreeMap::<String, Vec<&StoredLogEvent>>::new();
+    for event in events {
+        let key = ["task_id", "session_id"]
+            .into_iter()
+            .find_map(|name| event.metadata.get(name).and_then(Value::as_str))
+            .map(|value| value.to_owned())
+            .unwrap_or_else(|| event.id.clone());
+        groups.entry(key).or_default().push(event);
+    }
+
+    let mut selected = groups
+        .into_values()
+        .filter_map(|group| {
+            group
+                .iter()
+                .copied()
+                .filter(|event| is_terminal_event(event))
+                .max_by_key(|event| event_order_key(event))
+                .or_else(|| group.into_iter().max_by_key(|event| event_order_key(event)))
+        })
+        .collect::<Vec<_>>();
+    selected.sort_by_key(|event| (event.timestamp, event.received_at));
+    selected
+}
+
+fn is_terminal_event(event: &StoredLogEvent) -> bool {
+    event
+        .metadata
+        .get("event_type")
+        .and_then(Value::as_str)
+        .is_some_and(|value| matches!(value, "complete" | "blocked" | "failed"))
+        || event
+            .metadata
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|value| {
+                matches!(
+                    value,
+                    "succeeded" | "complete" | "completed" | "blocked" | "failed"
+                )
+            })
+}
+
+fn event_order_key(event: &StoredLogEvent) -> (i64, chrono::DateTime<chrono::Utc>) {
+    (
+        event
+            .metadata
+            .get("sequence")
+            .and_then(Value::as_i64)
+            .unwrap_or(i64::MIN),
+        event.timestamp,
+    )
 }
 
 fn prompt_event(event: &StoredLogEvent) -> PromptEvent<'_> {
@@ -622,5 +700,39 @@ mod tests {
         );
         assert!(projected.metadata.contains_key("_prompt_notice"));
         assert_eq!(event.message, full_message);
+    }
+
+    #[test]
+    fn daily_prompt_prefers_one_terminal_event_per_task() {
+        let make_event = |id: &str, task: &str, sequence: i64, event_type: &str| StoredLogEvent {
+            id: id.to_owned(),
+            received_at: Utc::now(),
+            timestamp: Utc::now(),
+            source: "codex/test".to_owned(),
+            level: "info".to_owned(),
+            message: id.to_owned(),
+            metadata: Map::from_iter([
+                ("task_id".to_owned(), Value::from(task)),
+                ("sequence".to_owned(), Value::from(sequence)),
+                ("event_type".to_owned(), Value::from(event_type)),
+            ]),
+            fingerprint: None,
+            truncated: false,
+            reviewed: false,
+        };
+        let events = vec![
+            make_event("start", "task-1", 1, "start"),
+            make_event("complete", "task-1", 3, "complete"),
+            make_event("late-progress", "task-1", 4, "progress"),
+            make_event("other", "task-2", 1, "start"),
+        ];
+
+        let selected = events_for_prompt("daily-consolidation", &events)
+            .into_iter()
+            .map(|event| event.id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(selected, BTreeSet::from(["complete", "other"]));
+        assert_eq!(events_for_prompt("daily-note", &events).len(), 4);
     }
 }

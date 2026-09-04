@@ -39,6 +39,7 @@ Docker Compose is the default way to run the system locally.
 - `ollama-data` stores local model files.
 - `LOG_INBOX_PROPOSAL_HOST_DIR` is a host bind mount, normally a `pending/` folder inside any Markdown vault.
 - `LOG_INBOX_VAULT_CONTEXT_HOST_FILE` is a read-only user configuration file for daily-note formatting and product-note aliases.
+- `LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS` bounds active model HTTP work and defaults to 300 seconds; time waiting behind another model request is excluded.
 
 ## VM Access
 

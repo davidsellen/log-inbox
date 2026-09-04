@@ -96,7 +96,9 @@ When the stack is hosted behind a VM address, use that address with port `8788`,
 
 ### Local LLM Consolidation
 
-The Compose stack runs Ollama locally and pulls the text-only `granite3.3:2b` model on first start. Ollama is reachable only by other Compose services at `http://ollama:11434`; prompts and log summaries are not sent to a hosted model API. Model downloads are retained in the `ollama-data` volume.
+The Compose stack runs Ollama locally and pulls the text-only `granite3.3:2b` model on first start. Ollama is reachable only by other Compose services at `http://ollama:11434`; prompts and log summaries are not sent to a hosted model API. Model downloads are retained in the `ollama-data` volume. The dashboard stores the editable daily-consolidation prompt in SQLite; fixed evidence, redaction, canonical-link, and output-schema guardrails remain part of the application.
+
+Local inference can be slow on CPU. Active model requests default to a 300-second timeout, configurable with `LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS`; requests waiting behind another model call do not consume that timeout.
 
 `suggest_markdown_summary` calls Ollama through its OpenAI-compatible chat-completions endpoint. The tool returns a proposed Markdown summary with `requires_review: true`; it does not write to the vault directly.
 
