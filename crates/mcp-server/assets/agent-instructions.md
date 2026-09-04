@@ -7,10 +7,12 @@
 - Reuse one stable `task_id` and `session_id`; increment integer `sequence` for every event.
 - Start with `event_type=start` and `status=running`. Finish with `event_type=complete|blocked|failed` and the matching status.
 - Use agent `{{AGENT_NAME}}`, source prefix `{{SOURCE_PREFIX}}`, and default host `{{DEFAULT_HOST}}` when the machine does not provide a better hostname.
-- Put structured facts in metadata: `agent`, `host`, `repo`, `branch`, known base/target branches, confirmed `product`, `modules`, bounded `changed_paths`, commit, tests, work item, and pull request.
+- Put structured facts in metadata: `agent`, `host`, `repo`, `branch`, known base/target branches, confirmed `product`, `modules`, bounded `changed_paths`, commit, tests, work item, pull request, and canonical note candidates.
 - Derive changed paths from working-tree, staged, and committed changes since the captured starting commit. Convert paths into short logical module names.
 - Confirm product names against product navigation when available. Do not guess for a multi-product repository; omit product and preserve repo/module facts when uncertain.
 - Send progress events only for durable diagnoses, decisions, deployments, validation results, or blockers. Do not report every command or file.
+- Make the terminal event's message and metadata sufficient for later daily consolidation: state the outcome, important decision or diagnosis, validation, blocker or follow-up, and durable links without dumping raw logs.
+- Do not read, create, or append an Obsidian daily note for work logging. Send the daily-note-ready material to Log Inbox; its consolidation workflow owns Markdown generation and review.
 - Never send secrets, source contents, full diffs, personal data, or large command output. Reporting failure must not block the primary task.
 
 PowerShell request shape:
@@ -36,5 +38,5 @@ $body = @{
 
 Invoke-RestMethod -Method Post -Uri "{{INGEST_URL}}/v1/logs" `
     -Headers @{ Authorization = "Bearer {{API_KEY}}" } `
-    -ContentType "application/json" -Body $body
+    -ContentType "application/json" -Body $body -TimeoutSec 5
 ```

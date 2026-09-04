@@ -26,6 +26,7 @@ The MCP service exposes a small local interface for reviewing Markdown proposals
 
 - Persist non-secret preferences in SQLite as key/value rows.
 - Generate copy-ready `AGENTS.md` activity-reporting instructions from the saved agent preferences.
+- Tell agents to submit daily-note-ready terminal events through ingestion rather than directly writing Markdown notes.
 - Allow a user-defined daily-consolidation instruction to shape organization, tone, and detail.
 - Fixed evidence, redaction, canonical-link, and output-schema rules take precedence over user prompt text.
 - Keep the ingest API key only in browser memory and insert it only into copied instructions.

@@ -94,10 +94,12 @@ Add this adapted section to the agent's global or repository `AGENTS.md`. Keep t
 - Before the start event, inspect the repository basename, current branch, and relevant working-tree paths. Derive short module names from the paths involved.
 - Reuse one stable `task_id` and `session_id`; increment integer `sequence` for each event.
 - Use `event_type=start` and `status=running` initially. Finish with `event_type=complete|blocked|failed` and the matching status.
-- Write a concise human message stating the intent or outcome. Put structured facts in metadata: `agent`, `host`, `repo`, `branch`, known base/target branches, confirmed `product`, `modules`, bounded `changed_paths`, commit, tests, work item, and pull request.
+- Write a concise human message stating the intent or outcome. Put structured facts in metadata: `agent`, `host`, `repo`, `branch`, known base/target branches, confirmed `product`, `modules`, bounded `changed_paths`, commit, tests, work item, pull request, and canonical note candidates.
 - Confirm product names against the configured product navigation when available. Do not guess a product for a multi-product repository; omit it and preserve repo/module facts when uncertain.
+- Make the terminal event daily-note-ready: include the outcome, important decision or diagnosis, validation, blocker or follow-up, and durable links without dumping raw logs.
+- Do not read, create, or append an Obsidian daily note for work logging. Send the material to Log Inbox; its consolidation workflow owns Markdown generation and review.
 - Never send secrets, tokens, source contents, full diffs, personal data, or large command output. Reporting failure must not corrupt or replace the primary task result.
 - POST JSON to `$LOG_INBOX_URL/v1/logs` using `Authorization: Bearer $LOG_INBOX_API_KEY`.
 ```
 
-The agent can issue the POST with `curl` on Unix-like shells or `Invoke-RestMethod` in PowerShell. Generate JSON with the platform's JSON serializer when values come from Git commands; avoid hand-built quoting.
+The agent can issue the POST with `curl` on Unix-like shells or `Invoke-RestMethod` in PowerShell. Generate JSON with the platform's JSON serializer when values come from Git commands; avoid hand-built quoting. Bound reporting requests to a few seconds so an unavailable inbox cannot stall the primary task.

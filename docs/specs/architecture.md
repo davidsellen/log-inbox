@@ -60,9 +60,9 @@ reviewed Markdown summaries
 
 ### Agent
 
-- Pull logs on demand.
-- Correlate log windows with the active task.
-- Update product notes or daily notes only with durable conclusions.
+- Send structured lifecycle events, including a daily-note-ready terminal outcome, through ingestion.
+- Preserve host, repository, branch, module, validation, and durable-link context as metadata.
+- Do not write work-log Markdown directly; leave proposal generation, consolidation, review, and application to Log Inbox.
 
 ### LLM Consolidation
 
