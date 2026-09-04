@@ -126,7 +126,6 @@
           <label>Agent name<input id="agent-name" name="agent_name" required></label>
           <label>Source prefix<input id="source-prefix" name="source_prefix" required></label>
           <label>Default host<input id="default-host" name="default_host"></label>
-          <label>API key for copy<input id="api-key" type="password" autocomplete="off" placeholder="Not saved"></label>
           <label>Additional instructions<textarea id="extra-instructions" name="extra_instructions"></textarea></label>
           <label>Daily consolidation prompt<textarea id="daily-consolidation-prompt" name="daily_consolidation_prompt"></textarea></label>
           <div class="form-actions"><button class="button primary" type="submit">Save preferences</button><span id="save-status" class="status"></span></div>
@@ -404,11 +403,9 @@
     });
 
     document.querySelector("#copy").addEventListener("click", async () => {
-      const key = document.querySelector("#api-key").value.trim() || "<LOG_INBOX_API_KEY>";
-      const content = state.instructions.replaceAll("{{API_KEY}}", key);
       const status = document.querySelector("#copy-status");
       try {
-        await navigator.clipboard.writeText(content);
+        await navigator.clipboard.writeText(state.instructions);
         status.className = "status";
         status.textContent = "Copied";
       } catch (error) {

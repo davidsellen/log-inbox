@@ -30,7 +30,7 @@ The MCP service exposes a small local interface for reviewing Markdown proposals
 - Store the complete user-editable daily-consolidation prompt in SQLite and use it to shape organization, tone, and detail.
 - Migrate the legacy `consolidation_instructions` preference by appending it to the stronger default when no `daily_consolidation_prompt` has been saved.
 - Fixed evidence, redaction, canonical-link, and output-schema rules take precedence over user prompt text.
-- Keep the ingest API key only in browser memory and insert it only into copied instructions.
+- Never accept, return, persist, or copy the ingest API key. Generated instructions reference `LOG_INBOX_API_KEY` at execution time.
 
 ## HTTP API
 
@@ -48,6 +48,6 @@ The MCP service exposes a small local interface for reviewing Markdown proposals
 - A failed LLM call does not remove existing proposals or alter a daily note.
 - Refreshing or repeating a request cannot create duplicate work for the same event snapshot.
 - Cancellation state is durable, and cancelling a running job aborts its in-flight model future before staging.
-- An API key is never returned by the server or written to SQLite.
+- An API key is never accepted by the dashboard, returned by the server, copied into generated instructions, or written to SQLite.
 - Desktop and mobile layouts have no horizontal overflow.
 - All dynamic proposal content is inserted as text, not executable HTML.
