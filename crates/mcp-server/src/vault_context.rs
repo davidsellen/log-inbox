@@ -37,6 +37,8 @@ pub struct VaultCatalog {
     pub root: Option<String>,
     pub revision: String,
     pub notes: Vec<VaultNote>,
+    #[serde(default)]
+    pub tree_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +142,7 @@ impl VaultContextProvider {
         &self,
         name: &str,
         files: &[(String, String)],
+        tree_paths: Vec<String>,
     ) -> Result<VaultCatalog, String> {
         let mut notes = files
             .iter()
@@ -165,6 +168,7 @@ impl VaultContextProvider {
             root: Some(name.to_owned()),
             revision: catalog_revision(&notes),
             notes,
+            tree_paths,
         })
     }
 
@@ -178,6 +182,14 @@ impl VaultContextProvider {
         let mut files = Vec::new();
         collect_markdown(root, root, &self.excluded_prefixes, &mut files)?;
         files.sort();
+        let mut tree_files = Vec::new();
+        collect_markdown(root, root, &[], &mut tree_files)?;
+        tree_files.sort();
+        let tree_paths = tree_files
+            .iter()
+            .filter_map(|path| path.strip_prefix(root).ok())
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect();
         let mut notes = files
             .into_iter()
             .map(|path| read_note(root, &path))
@@ -188,6 +200,7 @@ impl VaultContextProvider {
             root: Some(root.display().to_string()),
             revision: catalog_revision(&notes),
             notes,
+            tree_paths,
         })
     }
 
@@ -356,6 +369,7 @@ impl VaultContextProvider {
                 root: None,
                 revision: "unconfigured".to_owned(),
                 notes: Vec::new(),
+                tree_paths: Vec::new(),
             });
         };
         let contents = fs::read_to_string(path)
@@ -377,6 +391,7 @@ impl VaultContextProvider {
             configured: true,
             root: path.parent().map(|value| value.display().to_string()),
             revision: catalog_revision(&notes),
+            tree_paths: notes.iter().map(|note| note.path.clone()).collect(),
             notes,
         })
     }
@@ -753,11 +768,16 @@ mod tests {
                     ),
                     ("Private/Secret.md".to_owned(), "# Secret".to_owned()),
                 ],
+                vec![
+                    "Projects/Customer Portal.md".to_owned(),
+                    "Private/Secret.md".to_owned(),
+                ],
             )
             .expect("browser catalog builds");
 
         assert_eq!(catalog.root.as_deref(), Some("My vault"));
         assert_eq!(catalog.notes.len(), 1);
+        assert_eq!(catalog.tree_paths.len(), 2);
         assert_eq!(catalog.notes[0].aliases, ["portal-api"]);
         assert_eq!(catalog.notes[0].wikilink, "[[Customer Portal]]");
     }

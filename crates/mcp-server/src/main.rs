@@ -39,6 +39,7 @@ struct AppState {
     llm_config: Option<llm::LlmConfig>,
     proposal_inbox: Option<proposal_inbox::ProposalInbox>,
     daily_notes_dir: Option<PathBuf>,
+    daily_notes_display_path: Option<String>,
     vault_context: vault_context::VaultContextProvider,
     apply_lock: Arc<Mutex<()>>,
 }
@@ -196,6 +197,8 @@ struct BrowserVaultFile {
 struct BrowserVaultSyncInput {
     name: String,
     files: Vec<BrowserVaultFile>,
+    #[serde(default)]
+    tree_paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,6 +241,9 @@ async fn main() -> anyhow::Result<()> {
         daily_notes_dir: env::var_os("LOG_INBOX_DAILY_NOTES_DIR")
             .filter(|path| !path.is_empty())
             .map(PathBuf::from),
+        daily_notes_display_path: env::var("LOG_INBOX_DAILY_NOTES_DISPLAY_PATH")
+            .ok()
+            .filter(|path| !path.trim().is_empty()),
         vault_context,
         apply_lock: Arc::new(Mutex::new(())),
     };
@@ -475,6 +481,7 @@ async fn vault_connection(State(state): State<AppState>) -> Result<Json<Value>, 
         "name": catalog.root,
         "revision": catalog.revision,
         "note_count": catalog.notes.len(),
+        "daily_notes_path": state.daily_notes_display_path.as_deref().or_else(|| state.daily_notes_dir.as_deref().and_then(|path| path.to_str())),
     })))
 }
 
@@ -490,6 +497,11 @@ async fn sync_browser_vault(
     if input.files.len() > 500 {
         return Err(ApiError::bad_request(
             "vault scan is limited to 500 Markdown files",
+        ));
+    }
+    if input.tree_paths.len() > 2_000 {
+        return Err(ApiError::bad_request(
+            "vault tree is limited to 2000 Markdown paths",
         ));
     }
     let mut files = Vec::with_capacity(input.files.len());
@@ -520,9 +532,35 @@ async fn sync_browser_vault(
         }
         files.push((normalized_path, file.contents));
     }
+    let mut tree_paths = Vec::with_capacity(input.tree_paths.len());
+    let mut seen_tree_paths = HashSet::new();
+    for value in input.tree_paths {
+        let path = PathBuf::from(value.trim());
+        if path.as_os_str().is_empty()
+            || path.is_absolute()
+            || path.extension().and_then(|value| value.to_str()) != Some("md")
+            || path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(ApiError::bad_request(
+                "vault tree paths must be relative Markdown paths",
+            ));
+        }
+        let normalized_path = path.to_string_lossy().replace('\\', "/");
+        if !seen_tree_paths.insert(normalized_path.to_ascii_lowercase()) {
+            return Err(ApiError::conflict(format!(
+                "vault tree contains a duplicate or case-colliding path: {normalized_path}"
+            )));
+        }
+        tree_paths.push(normalized_path);
+    }
+    if tree_paths.is_empty() {
+        tree_paths.extend(files.iter().map(|(path, _)| path.clone()));
+    }
     let catalog = state
         .vault_context
-        .catalog_from_browser_files(input.name.trim(), &files)
+        .catalog_from_browser_files(input.name.trim(), &files, tree_paths)
         .map_err(ApiError::bad_request)?;
     state
         .store
