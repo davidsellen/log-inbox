@@ -195,10 +195,30 @@ struct BrowserVaultFile {
 
 #[derive(Debug, Deserialize)]
 struct BrowserVaultSyncInput {
+    #[serde(default)]
+    vault_id: String,
     name: String,
     files: Vec<BrowserVaultFile>,
     #[serde(default)]
     tree_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KnowledgeDestination {
+    role: String,
+    base_path: String,
+    path_template: String,
+    write_mode: String,
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnowledgeDestinationInput {
+    base_path: String,
+    path_template: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    catalog_revision: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -227,10 +247,18 @@ async fn main() -> anyhow::Result<()> {
     store.recover_daily_consolidations()?;
     let vault_context = vault_context::VaultContextProvider::from_env();
     if let Some(saved) = store.get_preferences()?.get("browser_vault_catalog") {
-        match serde_json::from_str(saved) {
-            Ok(catalog) => vault_context
-                .set_browser_catalog(Some(catalog))
-                .map_err(anyhow::Error::msg)?,
+        match serde_json::from_str::<vault_context::VaultCatalog>(saved) {
+            Ok(mut catalog) => {
+                if catalog.vault_id.is_empty() {
+                    catalog.vault_id = format!(
+                        "browser-legacy:{}",
+                        catalog.root.as_deref().unwrap_or("vault")
+                    );
+                }
+                vault_context
+                    .set_browser_catalog(Some(catalog))
+                    .map_err(anyhow::Error::msg)?;
+            }
             Err(error) => tracing::warn!(%error, "ignoring invalid saved browser vault catalog"),
         }
     }
@@ -278,6 +306,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/logs/manual/options", get(manual_log_options))
         .route("/api/logs/manual", post(create_manual_log))
         .route("/api/vault/connection", get(vault_connection))
+        .route("/api/knowledge", get(knowledge_data))
+        .route(
+            "/api/knowledge/destinations/{role}",
+            put(save_knowledge_destination),
+        )
         .route(
             "/api/vault/browser/catalog",
             put(sync_browser_vault).delete(disconnect_browser_vault),
@@ -478,6 +511,7 @@ async fn vault_connection(State(state): State<AppState>) -> Result<Json<Value>, 
     let catalog = state.vault_context.catalog().map_err(ApiError::internal)?;
     Ok(Json(json!({
         "mode": if browser.is_some() { "browser" } else if catalog.configured { "mounted" } else { "unconfigured" },
+        "vault_id": catalog.vault_id,
         "name": catalog.root,
         "revision": catalog.revision,
         "note_count": catalog.notes.len(),
@@ -485,10 +519,259 @@ async fn vault_connection(State(state): State<AppState>) -> Result<Json<Value>, 
     })))
 }
 
+const KNOWLEDGE_ROLES: &[&str] = &[
+    "daily_activity",
+    "product_knowledge",
+    "engineering_knowledge",
+    "decision_records",
+    "feature_recaps",
+];
+
+fn destination_preference_key(vault_id: &str) -> String {
+    format!("knowledge_destinations_v1:{vault_id}")
+}
+
+fn destination_write_mode(role: &str) -> Option<&'static str> {
+    match role {
+        "daily_activity" => Some("managed_daily_note"),
+        "product_knowledge" | "engineering_knowledge" => Some("reference_root"),
+        "decision_records" => Some("adjacent_to_canonical"),
+        "feature_recaps" => Some("managed_section"),
+        _ => None,
+    }
+}
+
+fn normalized_destination_path(value: &str) -> Result<String, ApiError> {
+    let normalized = value.trim().trim_matches('/').replace('\\', "/");
+    if normalized.is_empty() {
+        return Ok(String::new());
+    }
+    let path = PathBuf::from(&normalized);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(ApiError::bad_request(
+            "destination paths must remain relative to the vault",
+        ));
+    }
+    let lower = normalized.to_ascii_lowercase();
+    if lower.starts_with('.')
+        || lower == "00 inbox"
+        || lower.starts_with("00 inbox/")
+        || lower.contains("/log inbox/pending")
+        || lower == "log inbox/pending"
+    {
+        return Err(ApiError::bad_request(
+            "system and proposal-inbox folders cannot be knowledge destinations",
+        ));
+    }
+    Ok(normalized)
+}
+
+fn validate_path_template(role: &str, value: &str) -> Result<String, ApiError> {
+    let template = value.trim().replace('\\', "/");
+    if matches!(
+        role,
+        "product_knowledge" | "engineering_knowledge" | "feature_recaps"
+    ) && !template.is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "this destination role does not use a path template",
+        ));
+    }
+    if role == "daily_activity" && !template.to_ascii_lowercase().ends_with(".md") {
+        return Err(ApiError::bad_request(
+            "daily activity templates must resolve to a Markdown filename",
+        ));
+    }
+    if template.len() > 300 || template.starts_with('/') || template.contains("..") {
+        return Err(ApiError::bad_request("invalid destination path template"));
+    }
+    let mut remainder = template.clone();
+    for token in [
+        "{year}",
+        "{month}",
+        "{month_name}",
+        "{day}",
+        "{date}",
+        "{slug}",
+    ] {
+        remainder = remainder.replace(token, "");
+    }
+    if remainder.contains('{') || remainder.contains('}') {
+        return Err(ApiError::bad_request(
+            "destination template contains an unsupported token",
+        ));
+    }
+    Ok(template)
+}
+
+fn vault_folders(catalog: &vault_context::VaultCatalog) -> Vec<String> {
+    let mut folders = BTreeSet::new();
+    folders.insert(String::new());
+    for path in &catalog.tree_paths {
+        let mut current = String::new();
+        for part in path
+            .split('/')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            current = if current.is_empty() {
+                part.to_owned()
+            } else {
+                format!("{current}/{part}")
+            };
+            folders.insert(current.clone());
+        }
+    }
+    folders.into_iter().collect()
+}
+
+fn folder_label(path: &str) -> String {
+    path.rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .trim_start_matches(|character: char| {
+            character.is_ascii_digit() || character == ' ' || character == '-' || character == '_'
+        })
+        .to_ascii_lowercase()
+}
+
+fn suggested_folder(folders: &[String], terms: &[&str]) -> Option<String> {
+    folders
+        .iter()
+        .filter(|path| !path.is_empty())
+        .find(|path| terms.iter().any(|term| folder_label(path).contains(term)))
+        .cloned()
+}
+
+async fn knowledge_data(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let catalog = state.vault_context.catalog().map_err(ApiError::internal)?;
+    let preferences = state
+        .store
+        .get_preferences()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let destinations = preferences
+        .get(&destination_preference_key(&catalog.vault_id))
+        .and_then(|value| serde_json::from_str::<Vec<KnowledgeDestination>>(value).ok())
+        .unwrap_or_default();
+    let folders = vault_folders(&catalog);
+    let daily = suggested_folder(&folders, &["work log", "daily"]);
+    let products = suggested_folder(&folders, &["products", "product"]);
+    let engineering = suggested_folder(&folders, &["engineering"]);
+    let suggestions = vec![
+        KnowledgeDestination {
+            role: "daily_activity".to_owned(),
+            base_path: daily.unwrap_or_default(),
+            path_template: "{year}/{month_name}/Daily log {month_name} {day}.md".to_owned(),
+            write_mode: "managed_daily_note".to_owned(),
+            enabled: true,
+        },
+        KnowledgeDestination {
+            role: "product_knowledge".to_owned(),
+            base_path: products.unwrap_or_default(),
+            path_template: String::new(),
+            write_mode: "reference_root".to_owned(),
+            enabled: true,
+        },
+        KnowledgeDestination {
+            role: "engineering_knowledge".to_owned(),
+            base_path: engineering.unwrap_or_default(),
+            path_template: String::new(),
+            write_mode: "reference_root".to_owned(),
+            enabled: true,
+        },
+        KnowledgeDestination {
+            role: "decision_records".to_owned(),
+            base_path: String::new(),
+            path_template: "Decisions/{date} {slug}.md".to_owned(),
+            write_mode: "adjacent_to_canonical".to_owned(),
+            enabled: false,
+        },
+        KnowledgeDestination {
+            role: "feature_recaps".to_owned(),
+            base_path: String::new(),
+            path_template: String::new(),
+            write_mode: "managed_section".to_owned(),
+            enabled: false,
+        },
+    ];
+    let protected_paths = folders
+        .iter()
+        .filter(|path| {
+            let lower = path.to_ascii_lowercase();
+            lower == "00 inbox" || lower.starts_with("00 inbox/") || lower.ends_with("/pending")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "vault": { "id": catalog.vault_id, "name": catalog.root, "revision": catalog.revision, "total_markdown_files": catalog.tree_paths.len(), "linkable_notes": catalog.notes.len() },
+        "destinations": destinations,
+        "suggestions": suggestions,
+        "folders": folders,
+        "protected_paths": protected_paths,
+    })))
+}
+
+async fn save_knowledge_destination(
+    State(state): State<AppState>,
+    AxumPath(role): AxumPath<String>,
+    Json(input): Json<KnowledgeDestinationInput>,
+) -> Result<Json<KnowledgeDestination>, ApiError> {
+    if !KNOWLEDGE_ROLES.contains(&role.as_str()) {
+        return Err(ApiError::bad_request("unknown knowledge destination role"));
+    }
+    let catalog = state.vault_context.catalog().map_err(ApiError::internal)?;
+    if input.catalog_revision != catalog.revision {
+        return Err(ApiError::conflict(
+            "the vault changed; rescan and choose the destination again",
+        ));
+    }
+    let destination = KnowledgeDestination {
+        role: role.clone(),
+        base_path: normalized_destination_path(&input.base_path)?,
+        path_template: validate_path_template(&role, &input.path_template)?,
+        write_mode: destination_write_mode(&role).unwrap().to_owned(),
+        enabled: input.enabled,
+    };
+    let key = destination_preference_key(&catalog.vault_id);
+    let preferences = state
+        .store
+        .get_preferences()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut destinations = preferences
+        .get(&key)
+        .and_then(|value| serde_json::from_str::<Vec<KnowledgeDestination>>(value).ok())
+        .unwrap_or_default();
+    destinations.retain(|existing| existing.role != role);
+    destinations.push(destination.clone());
+    state
+        .store
+        .set_preferences(&BTreeMap::from([(
+            key,
+            serde_json::to_string(&destinations)
+                .map_err(|error| ApiError::internal(error.to_string()))?,
+        )]))
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(destination))
+}
+
 async fn sync_browser_vault(
     State(state): State<AppState>,
     Json(input): Json<BrowserVaultSyncInput>,
 ) -> Result<Json<vault_context::VaultCatalog>, ApiError> {
+    if input.vault_id.len() > 200 {
+        return Err(ApiError::bad_request(
+            "vault ID must contain no more than 200 bytes",
+        ));
+    }
     if input.name.trim().is_empty() || input.name.len() > 200 {
         return Err(ApiError::bad_request(
             "vault name must contain 1 to 200 bytes",
@@ -558,9 +841,14 @@ async fn sync_browser_vault(
     if tree_paths.is_empty() {
         tree_paths.extend(files.iter().map(|(path, _)| path.clone()));
     }
+    let vault_id = if input.vault_id.trim().is_empty() {
+        format!("browser-legacy:{}", input.name.trim())
+    } else {
+        input.vault_id.trim().to_owned()
+    };
     let catalog = state
         .vault_context
-        .catalog_from_browser_files(input.name.trim(), &files, tree_paths)
+        .catalog_from_browser_files(&vault_id, input.name.trim(), &files, tree_paths)
         .map_err(ApiError::bad_request)?;
     state
         .store
@@ -1737,4 +2025,28 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
     ]
+}
+
+#[cfg(test)]
+mod knowledge_destination_tests {
+    use super::*;
+
+    #[test]
+    fn treats_numbered_and_unnumbered_folder_names_as_user_owned() {
+        assert_eq!(folder_label("01 Work Log"), "work log");
+        assert_eq!(folder_label("Daily Notes"), "daily notes");
+        assert_eq!(folder_label("03 Products"), "products");
+        assert_eq!(folder_label("Knowledge/Product Areas"), "product areas");
+    }
+
+    #[test]
+    fn blocks_operational_paths_and_unknown_template_tokens() {
+        assert!(normalized_destination_path("00 Inbox/Log Inbox/pending").is_err());
+        assert!(normalized_destination_path("../outside").is_err());
+        assert!(normalized_destination_path("Knowledge/Engineering").is_ok());
+        assert!(
+            validate_path_template("daily_activity", "{year}/{month_name}/Daily {day}.md").is_ok()
+        );
+        assert!(validate_path_template("daily_activity", "{quarter}/Daily.md").is_err());
+    }
 }

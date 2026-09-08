@@ -33,6 +33,8 @@ pub struct VaultContextProvider {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultCatalog {
+    #[serde(default)]
+    pub vault_id: String,
     pub configured: bool,
     pub root: Option<String>,
     pub revision: String,
@@ -140,6 +142,7 @@ impl VaultContextProvider {
 
     pub fn catalog_from_browser_files(
         &self,
+        vault_id: &str,
         name: &str,
         files: &[(String, String)],
         tree_paths: Vec<String>,
@@ -164,6 +167,7 @@ impl VaultContextProvider {
         notes.sort_by(|left, right| left.path.cmp(&right.path));
         finish_catalog_links(&mut notes);
         Ok(VaultCatalog {
+            vault_id: vault_id.to_owned(),
             configured: true,
             root: Some(name.to_owned()),
             revision: catalog_revision(&notes),
@@ -196,6 +200,7 @@ impl VaultContextProvider {
             .collect::<Result<Vec<_>, _>>()?;
         finish_catalog_links(&mut notes);
         Ok(VaultCatalog {
+            vault_id: format!("mounted:{}", root.display()),
             configured: true,
             root: Some(root.display().to_string()),
             revision: catalog_revision(&notes),
@@ -365,6 +370,7 @@ impl VaultContextProvider {
     fn legacy_catalog(&self) -> Result<VaultCatalog, String> {
         let Some(path) = &self.product_index_path else {
             return Ok(VaultCatalog {
+                vault_id: "unconfigured".to_owned(),
                 configured: false,
                 root: None,
                 revision: "unconfigured".to_owned(),
@@ -388,6 +394,7 @@ impl VaultContextProvider {
             })
             .collect::<Vec<_>>();
         Ok(VaultCatalog {
+            vault_id: format!("legacy:{}", path.display()),
             configured: true,
             root: path.parent().map(|value| value.display().to_string()),
             revision: catalog_revision(&notes),
@@ -760,6 +767,7 @@ mod tests {
         };
         let catalog = provider
             .catalog_from_browser_files(
+                "browser-test",
                 "My vault",
                 &[
                     (
@@ -776,6 +784,7 @@ mod tests {
             .expect("browser catalog builds");
 
         assert_eq!(catalog.root.as_deref(), Some("My vault"));
+        assert_eq!(catalog.vault_id, "browser-test");
         assert_eq!(catalog.notes.len(), 1);
         assert_eq!(catalog.tree_paths.len(), 2);
         assert_eq!(catalog.notes[0].aliases, ["portal-api"]);
