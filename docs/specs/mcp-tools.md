@@ -4,6 +4,8 @@ The MCP server is the agent-facing interface. It reads from the durable log stor
 
 The same service exposes a small browser dashboard. `GET /api/dashboard` returns pending proposals, durable consolidation jobs, saved non-secret preferences, and generated agent instructions. `PUT /api/preferences` saves those preferences. `POST /api/consolidations/daily` idempotently queues a frozen whole-day event snapshot, and `POST /api/consolidations/{job_id}/cancel` cancels queued or running work. `POST /api/proposals/{proposal_id}/apply` uses the same apply operation documented below, while `/discard` acknowledges rejected evidence without modifying a daily note.
 
+`PUT /api/proposals/{proposal_id}` accepts `markdown` and `expected_revision`, atomically updates only the proposal body, and returns `409 Conflict` when the proposal changed after it was opened. Evidence IDs, canonical links, target note, and consolidation identity remain server-owned.
+
 ## Tools
 
 ### list_sources

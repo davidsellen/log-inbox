@@ -81,7 +81,7 @@ Required output:
 }
 ```
 
-For whole-day consolidation, the response also contains structured `workstreams`. Each workstream names its allowed canonical link, 1-3 summary bullets, and the evidence event IDs it used. Rust validates those fields and renders the final headings and per-workstream `Details:` lines; model-authored Markdown is only a compatibility fallback.
+For whole-day consolidation, Rust groups evidence by task or session and resolves canonical links for each group before calling the model. The response contains exactly one structured `workstreams` item per supplied group ID with a title and 1-3 summary bullets. Rust validates complete group coverage and renders headings, server-owned links, and bounded per-workstream `Details:` lines. Invalid model structure falls back to the authoritative terminal message for every group; free-form model Markdown is never used for daily consolidation.
 
 ## Markdown Rules
 

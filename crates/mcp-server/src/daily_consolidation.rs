@@ -115,12 +115,35 @@ async fn process_job(
         &events,
         &store.list_link_rules().map_err(|error| error.to_string())?,
     )?;
+    let rules = store.list_link_rules().map_err(|error| error.to_string())?;
+    let mut grouped = BTreeMap::<String, Vec<_>>::new();
+    for event in &events {
+        grouped
+            .entry(llm::event_group_key(event))
+            .or_default()
+            .push(event.clone());
+    }
+    let mut workstream_links = serde_json::Map::new();
+    for (group_id, group_events) in grouped {
+        let group_context = vault_context.for_events(&group_events, &rules)?;
+        workstream_links.insert(
+            group_id,
+            group_context
+                .get("candidate_notes")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new())),
+        );
+    }
     let Some(context_object) = context.as_object_mut() else {
         return Err("vault context must be a JSON object".to_owned());
     };
     context_object.insert(
         "daily_note".to_owned(),
         Value::String(job.target_note.clone()),
+    );
+    context_object.insert(
+        "workstream_links".to_owned(),
+        Value::Object(workstream_links),
     );
     let preferences = store.get_preferences().map_err(|error| error.to_string())?;
     let task = configured_daily_prompt(&preferences);

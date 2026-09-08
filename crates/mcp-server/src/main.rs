@@ -108,6 +108,12 @@ struct ApplyMarkdownProposalArgs {
     proposal_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct UpdateProposalRequest {
+    markdown: String,
+    expected_revision: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DashboardPreferences {
     ingest_url: String,
@@ -213,6 +219,10 @@ async fn main() -> anyhow::Result<()> {
             put(update_link_rule).delete(delete_link_rule),
         )
         .route(
+            "/api/proposals/{proposal_id}",
+            put(update_dashboard_proposal),
+        )
+        .route(
             "/api/proposals/{proposal_id}/apply",
             post(apply_dashboard_proposal),
         )
@@ -299,6 +309,12 @@ async fn dashboard_data(State(state): State<AppState>) -> Result<Json<DashboardD
         .unwrap_or_default()
         .to_owned();
     for proposal in &mut proposals {
+        let events = state
+            .store
+            .get_events_by_ids(&proposal.evidence_event_ids)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        proposal.evidence_start = events.iter().map(|event| event.timestamp).min();
+        proposal.evidence_end = events.iter().map(|event| event.timestamp).max();
         if proposal.link_context_revision == revision {
             continue;
         }
@@ -306,10 +322,6 @@ async fn dashboard_data(State(state): State<AppState>) -> Result<Json<DashboardD
             proposal.stale = true;
             continue;
         }
-        let events = state
-            .store
-            .get_events_by_ids(&proposal.evidence_event_ids)
-            .map_err(|error| ApiError::internal(error.to_string()))?;
         let context = state
             .vault_context
             .for_events(&events, &rules)
@@ -441,6 +453,19 @@ async fn delete_link_rule(
 fn save_link_rule(state: &AppState, rule: &VaultLinkRule) -> Result<(), ApiError> {
     let catalog = state.vault_context.catalog().map_err(ApiError::internal)?;
     vault_context::validate_rule(rule, &catalog).map_err(ApiError::bad_request)?;
+    let duplicate = state
+        .store
+        .list_link_rules()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .into_iter()
+        .any(|existing| {
+            existing.id != rule.id
+                && existing.selectors == rule.selectors
+                && existing.target_note_id == rule.target_note_id
+        });
+    if duplicate {
+        return Err(ApiError::conflict("an identical mapping already exists"));
+    }
     state
         .store
         .save_link_rule(rule)
@@ -466,6 +491,23 @@ async fn apply_dashboard_proposal(
 ) -> Result<Json<Value>, ApiError> {
     let applied = apply_proposal(&state, &proposal_id).map_err(ApiError::bad_request)?;
     Ok(Json(json!(applied)))
+}
+
+async fn update_dashboard_proposal(
+    State(state): State<AppState>,
+    AxumPath(proposal_id): AxumPath<String>,
+    Json(request): Json<UpdateProposalRequest>,
+) -> Result<Json<proposal_inbox::PendingProposal>, ApiError> {
+    let inbox = state.proposal_inbox.as_ref().ok_or_else(|| {
+        ApiError::bad_request("proposal inbox is not configured; set LOG_INBOX_PROPOSAL_DIR")
+    })?;
+    match inbox.update_markdown(&proposal_id, &request.markdown, &request.expected_revision) {
+        Ok(proposal) => Ok(Json(proposal)),
+        Err(error) if error == "proposal changed since it was opened" => {
+            Err(ApiError::conflict(error))
+        }
+        Err(error) => Err(ApiError::bad_request(error)),
+    }
 }
 
 async fn discard_dashboard_proposal(

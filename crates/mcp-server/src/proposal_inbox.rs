@@ -49,6 +49,49 @@ impl ProposalInbox {
         })
     }
 
+    pub fn update_markdown(
+        &self,
+        proposal_id: &str,
+        markdown: &str,
+        expected_revision: &str,
+    ) -> Result<PendingProposal, String> {
+        const MAX_MARKDOWN_BYTES: usize = 64 * 1024;
+        validate_proposal_id(proposal_id)?;
+        let markdown = markdown.trim();
+        if markdown.is_empty() {
+            return Err("proposal Markdown cannot be empty".to_owned());
+        }
+        if markdown.len() > MAX_MARKDOWN_BYTES {
+            return Err(format!(
+                "proposal Markdown exceeds {MAX_MARKDOWN_BYTES} bytes"
+            ));
+        }
+
+        let proposal_path = self.find_proposal(proposal_id)?;
+        let contents = fs::read_to_string(&proposal_path)
+            .map_err(|error| format!("reading proposal {}: {error}", proposal_path.display()))?;
+        let parsed = parse_proposal(&contents)?;
+        if content_revision(&parsed.markdown) != expected_revision {
+            return Err("proposal changed since it was opened".to_owned());
+        }
+        let (_, frontmatter_end) = contents
+            .split_once("\n---\n")
+            .ok_or_else(|| "proposal frontmatter is not terminated".to_owned())?;
+        let frontmatter_len = contents.len() - frontmatter_end.len();
+        let updated = format!(
+            "{}# Log summary proposal\n\n{}\n",
+            &contents[..frontmatter_len],
+            markdown
+        );
+        let temporary_path = temporary_path(&self.pending_dir, proposal_id);
+        let write_result = write_then_rename(&temporary_path, &proposal_path, updated.as_bytes());
+        if write_result.is_err() {
+            let _ = fs::remove_file(&temporary_path);
+        }
+        write_result.map_err(|error| format!("updating proposal: {error}"))?;
+        pending_proposal(proposal_path)
+    }
+
     pub fn apply(
         &self,
         proposal_id: &str,
@@ -67,7 +110,19 @@ impl ProposalInbox {
         fs::create_dir_all(daily_notes_dir)
             .map_err(|error| format!("creating daily notes directory: {error}"))?;
         let daily_path = daily_notes_dir.join(format!("{}.md", proposal.frontmatter.target_note));
-        let marker = format!("<!-- log-inbox:{} -->", proposal_id);
+        let marker = proposal
+            .frontmatter
+            .consolidation_job_id
+            .as_deref()
+            .map_or_else(
+                || format!("<!-- log-inbox:{} -->", proposal_id),
+                |job_id| {
+                    format!(
+                        "<!-- log-inbox:consolidation:{} proposal:{} -->",
+                        job_id, proposal_id
+                    )
+                },
+            );
         let current = match fs::read_to_string(&daily_path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
@@ -80,7 +135,15 @@ impl ProposalInbox {
         };
 
         if !current.contains(&marker) {
-            let updated = render_daily_note(&current, &proposal, &marker);
+            let replacement_prefix = proposal
+                .frontmatter
+                .consolidation_job_id
+                .as_deref()
+                .map(|job_id| format!("<!-- log-inbox:consolidation:{job_id} proposal:"));
+            let updated = replacement_prefix
+                .as_deref()
+                .and_then(|prefix| replace_generated_section(&current, &proposal, &marker, prefix))
+                .unwrap_or_else(|| render_daily_note(&current, &proposal, &marker));
             let temporary_path = daily_notes_dir.join(format!(".{}.tmp", proposal_id));
             let write_result = write_then_rename(&temporary_path, &daily_path, updated.as_bytes());
             if write_result.is_err() {
@@ -183,11 +246,14 @@ pub struct PendingProposal {
     pub confidence: String,
     pub provider: String,
     pub evidence_event_ids: Vec<String>,
+    pub evidence_start: Option<DateTime<Utc>>,
+    pub evidence_end: Option<DateTime<Utc>>,
     pub canonical_links: Vec<String>,
     pub link_candidates: Vec<String>,
     pub supersedes_proposal_ids: Vec<String>,
     pub consolidation_job_id: Option<String>,
     pub markdown: String,
+    pub revision: String,
     pub link_context_revision: String,
     pub stale: bool,
 }
@@ -238,14 +304,26 @@ fn pending_proposal(path: PathBuf) -> Result<PendingProposal, String> {
         confidence: parsed.frontmatter.confidence,
         provider: parsed.frontmatter.provider,
         evidence_event_ids: parsed.frontmatter.evidence_event_ids,
+        evidence_start: None,
+        evidence_end: None,
         canonical_links: parsed.frontmatter.canonical_links,
         link_candidates: parsed.frontmatter.link_candidates,
         supersedes_proposal_ids: parsed.frontmatter.supersedes_proposal_ids,
         consolidation_job_id: parsed.frontmatter.consolidation_job_id,
+        revision: content_revision(&parsed.markdown),
         markdown: parsed.markdown,
         link_context_revision: parsed.frontmatter.link_context_revision,
         stale: false,
     })
+}
+
+fn content_revision(markdown: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in markdown.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn parse_proposal(contents: &str) -> Result<ParsedProposal, String> {
@@ -283,12 +361,13 @@ fn render_daily_note(current: &str, proposal: &ParsedProposal, marker: &str) -> 
         output.push_str("Activity report\n\n");
     }
     output.push_str(proposal.markdown.trim());
-    if proposal
-        .markdown
-        .lines()
-        .any(|line| line.trim_start().starts_with("Details:"))
-    {
-        if proposal.frontmatter.canonical_links.len() > 1 {
+    if proposal.markdown.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("Details:") || line.starts_with("References:")
+    }) {
+        if proposal.frontmatter.canonical_links.len() > 1
+            && proposal.frontmatter.consolidation_job_id.is_none()
+        {
             output.push_str("\n\nRelated: ");
             output.push_str(&proposal.frontmatter.canonical_links.join(" · "));
         }
@@ -308,6 +387,43 @@ fn render_daily_note(current: &str, proposal: &ParsedProposal, marker: &str) -> 
     output.push_str(marker);
     output.push('\n');
     output
+}
+
+fn replace_generated_section(
+    current: &str,
+    proposal: &ParsedProposal,
+    marker: &str,
+    marker_prefix: &str,
+) -> Option<String> {
+    let marker_start = current.find(marker_prefix)?;
+    let marker_end = current[marker_start..]
+        .find("-->")
+        .map(|offset| marker_start + offset + 3)?;
+    let section_start = current[..marker_start]
+        .match_indices("## ")
+        .filter(|(offset, _)| *offset == 0 || current.as_bytes().get(offset - 1) == Some(&b'\n'))
+        .filter_map(|(offset, _)| {
+            let line_end = current[offset..marker_start]
+                .find('\n')
+                .map_or(marker_start, |end| offset + end);
+            let heading = current[offset..line_end].trim();
+            (heading == "## Activity report" || heading.ends_with(" activity report"))
+                .then_some(offset)
+        })
+        .last()?;
+    let old_end = current[marker_end..]
+        .find('\n')
+        .map_or(current.len(), |offset| marker_end + offset + 1);
+    let section = render_daily_note("", proposal, marker);
+    let section = section
+        .strip_prefix(&format!("# {}\n\n", proposal.frontmatter.target_note))
+        .unwrap_or(&section);
+    Some(format!(
+        "{}{}{}",
+        &current[..section_start],
+        section,
+        &current[old_end..]
+    ))
 }
 
 fn validate_proposal_id(proposal_id: &str) -> Result<(), String> {
@@ -481,6 +597,40 @@ mod tests {
     }
 
     #[test]
+    fn updates_only_markdown_with_optimistic_concurrency() {
+        let directory =
+            std::env::temp_dir().join(format!("log-inbox-edit-test-{}", Uuid::new_v4().simple()));
+        let inbox = ProposalInbox {
+            pending_dir: directory.clone(),
+        };
+        let staged = inbox.stage(&proposal()).expect("proposal stages");
+        let original = inbox.get(&staged.proposal_id).expect("proposal loads");
+
+        let updated = inbox
+            .update_markdown(
+                &staged.proposal_id,
+                "### Edited\n\n- Human-reviewed summary.",
+                &original.revision,
+            )
+            .expect("proposal updates");
+
+        assert_eq!(updated.target_note, original.target_note);
+        assert_eq!(updated.evidence_event_ids, original.evidence_event_ids);
+        assert_eq!(updated.canonical_links, original.canonical_links);
+        assert_eq!(updated.consolidation_job_id, original.consolidation_job_id);
+        assert!(updated.markdown.contains("Human-reviewed summary"));
+        assert_ne!(updated.revision, original.revision);
+        assert_eq!(
+            inbox
+                .update_markdown(&staged.proposal_id, "- Stale edit", &original.revision)
+                .unwrap_err(),
+            "proposal changed since it was opened"
+        );
+
+        fs::remove_dir_all(directory).expect("test directory is removable");
+    }
+
+    #[test]
     fn applies_a_proposal_to_an_empty_daily_note_and_discards_it_after_acknowledgement() {
         let root =
             std::env::temp_dir().join(format!("log-inbox-apply-test-{}", Uuid::new_v4().simple()));
@@ -506,6 +656,45 @@ mod tests {
             .discard(&staged.proposal_id)
             .expect("consolidated proposal is discarded");
         assert!(!staged.path.exists());
+
+        fs::remove_dir_all(root).expect("test directory is removable");
+    }
+
+    #[test]
+    fn replaces_an_existing_section_for_the_same_consolidation_job() {
+        let root = std::env::temp_dir().join(format!(
+            "log-inbox-replace-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let inbox = ProposalInbox {
+            pending_dir: root.join("pending"),
+        };
+        let daily_dir = root.join("daily");
+
+        let mut first = proposal();
+        first.markdown = "- Old generated summary.".to_owned();
+        let first_staged = inbox.stage(&first).expect("first proposal stages");
+        inbox
+            .apply(&first_staged.proposal_id, &daily_dir)
+            .expect("first proposal applies");
+
+        let mut replacement = proposal();
+        replacement.markdown = "- Corrected generated summary.".to_owned();
+        let replacement_staged = inbox.stage(&replacement).expect("replacement stages");
+        let applied = inbox
+            .apply(&replacement_staged.proposal_id, &daily_dir)
+            .expect("replacement applies");
+        let daily = fs::read_to_string(applied.daily_path).expect("daily note is readable");
+
+        assert!(!daily.contains("Old generated summary"));
+        assert!(daily.contains("Corrected generated summary"));
+        assert_eq!(daily.matches("## [[Log Inbox]] activity report").count(), 1);
+        assert_eq!(
+            daily
+                .matches("log-inbox:consolidation:consolidation_test")
+                .count(),
+            1
+        );
 
         fs::remove_dir_all(root).expect("test directory is removable");
     }

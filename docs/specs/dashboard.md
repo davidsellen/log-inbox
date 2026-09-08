@@ -7,6 +7,7 @@ The MCP service exposes a small local interface for reviewing Markdown proposals
 - List every Markdown proposal currently present in the configured pending folder.
 - Show the proposed summary, target note, confidence, timestamp, evidence count, provider, and canonical links.
 - Expand a proposal to read the exact Markdown that will be applied.
+- Edit proposal Markdown in the preview, save it with optimistic concurrency, or revert unsaved changes before applying.
 - Applying a proposal appends it to its daily note, marks its evidence reviewed, and removes the pending file.
 - Discarding a proposal marks its evidence reviewed with a discarded outcome, removes the pending file, and leaves the original logs in SQLite.
 
@@ -50,6 +51,7 @@ The MCP service exposes a small local interface for reviewing Markdown proposals
 - `GET /api/consolidations/{job_id}` returns authoritative durable job state.
 - `POST /api/consolidations/{job_id}/cancel` requests cancellation of pending or running work.
 - `POST /api/proposals/{proposal_id}/apply` applies and consumes a proposal.
+- `PUT /api/proposals/{proposal_id}` atomically updates only the editable Markdown body using an expected content revision.
 - `POST /api/proposals/{proposal_id}/discard` rejects and consumes a proposal.
 - `POST /api/proposals/{proposal_id}/regenerate` queues a durable replacement for a stale daily consolidation proposal.
 

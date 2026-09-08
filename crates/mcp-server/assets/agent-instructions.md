@@ -8,7 +8,7 @@
 - Reuse one stable `task_id` and `session_id`; increment integer `sequence` for every event.
 - Start with `event_type=start` and `status=running`. Finish with `event_type=complete|blocked|failed` and the matching status.
 - Use agent `{{AGENT_NAME}}`, source prefix `{{SOURCE_PREFIX}}`, and default host `{{DEFAULT_HOST}}` when the machine does not provide a better hostname.
-- Put structured facts in metadata: `agent`, `host`, `repo`, `branch`, known base/target branches, confirmed `product`, `modules`, bounded `changed_paths`, commit, tests, work item, pull request, and canonical note candidates.
+- Put structured facts in metadata: `agent`, `host`, `repo`, `branch`, known base/target branches, confirmed `product`, `modules`, commit hash and concise `commit_message` when available, tests, work item, pull request, and canonical note candidates. Include `changed_paths` only when they materially help a later diagnosis.
 - Derive changed paths from working-tree, staged, and committed changes since the captured starting commit. Convert paths into short logical module names.
 - Confirm product names against product navigation when available. Do not guess for a multi-product repository; omit product and preserve repo/module facts when uncertain.
 - Send progress events only for durable diagnoses, decisions, deployments, validation results, or blockers. Do not report every command or file.

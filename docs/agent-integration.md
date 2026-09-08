@@ -25,8 +25,9 @@ Send `progress` only for durable milestones, decisions, deployments, or blockers
 | `branch` | Current branch; add `base_branch` and `target_branch` when known. |
 | `product` | Confirmed canonical product name. Omit when uncertain. |
 | `modules` | Short logical module names derived from changed paths. |
-| `changed_paths` | Bounded list of important paths, not a patch or full file contents. |
+| `changed_paths` | Optional bounded list of paths when they materially help a later diagnosis. |
 | `commit` | Resulting commit hash when one was created. |
+| `commit_message` | Concise human-readable commit subject when one was created. |
 | `tests` or `validation` | Commands or checks and their outcome. |
 | `work_item` or `pull_request` | Durable external identifiers or named URLs. |
 
@@ -94,7 +95,7 @@ Add this adapted section to the agent's global or repository `AGENTS.md`. Keep t
 - Before the start event, inspect the repository basename, current branch, and relevant working-tree paths. Derive short module names from the paths involved.
 - Reuse one stable `task_id` and `session_id`; increment integer `sequence` for each event.
 - Use `event_type=start` and `status=running` initially. Finish with `event_type=complete|blocked|failed` and the matching status.
-- Write a concise human message stating the intent or outcome. Put structured facts in metadata: `agent`, `host`, `repo`, `branch`, known base/target branches, confirmed `product`, `modules`, bounded `changed_paths`, commit, tests, work item, pull request, and canonical note candidates.
+- Write a concise human message stating the intent or outcome. Put structured facts in metadata: `agent`, `host`, `repo`, `branch`, known base/target branches, confirmed `product`, `modules`, commit hash and concise `commit_message` when available, tests, work item, pull request, and canonical note candidates. Include `changed_paths` only when they materially help a later diagnosis.
 - Confirm product names against the configured product navigation when available. Do not guess a product for a multi-product repository; omit it and preserve repo/module facts when uncertain.
 - Make the terminal event daily-note-ready: include the outcome, important decision or diagnosis, validation, blocker or follow-up, and durable links without dumping raw logs.
 - Do not read, create, or append an Obsidian daily note for work logging. Send the material to Log Inbox; its consolidation workflow owns Markdown generation and review.

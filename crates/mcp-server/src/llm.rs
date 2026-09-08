@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -26,6 +26,7 @@ const CONTEXT_METADATA_KEYS: &[&str] = &[
     "base_branch",
     "target_branch",
     "commit",
+    "commit_message",
     "work_item",
     "pull_request",
     "modules",
@@ -117,6 +118,7 @@ struct ChatMessage {
 
 #[derive(Serialize)]
 struct PromptEvent<'a> {
+    group_id: String,
     id: &'a str,
     timestamp: &'a chrono::DateTime<chrono::Utc>,
     source: &'a str,
@@ -209,7 +211,7 @@ fn build_prompt(
     let allowed_links =
         serde_json::to_string(&allowed_canonical_links(args)).map_err(|error| error.to_string())?;
     let format_rules = if args.mode == "daily-consolidation" {
-        "- Include a workstreams array. Each item has title, canonical_link, summary_bullets, and evidence_event_ids.\n- Use an empty canonical_link when no allowed link fits.\n- Merge lifecycle events and omit duplicate, superseded, or trivial transport updates."
+        "- Include exactly one workstreams item for every supplied group_id. Each item has group_id, title, and summary_bullets.\n- Copy group_id exactly. Do not choose links or write Markdown.\n- Merge lifecycle updates represented by each group and omit trivial transport details."
     } else {
         "- Write 2-4 concise factual bullets covering outcome, important changes or diagnosis, validation, and any remaining follow-up. Do not add a heading or raw log dump."
     };
@@ -231,16 +233,15 @@ Return JSON with this exact shape:
 {{
   "target_note": "Configured daily note",
   "canonical_links": [],
-  "markdown": "- Concise conclusion that belongs in a Markdown vault.",
+  "markdown": "",
   "evidence_event_ids": ["evt_..."],
   "confidence": "low|medium|high",
   "open_questions": []
   ,"workstreams": [
     {{
+      "group_id": "task-or-session-id",
       "title": "Concise workstream name",
-      "canonical_link": "",
-      "summary_bullets": ["Outcome that matters."],
-      "evidence_event_ids": ["evt_..."]
+      "summary_bullets": ["Outcome that matters."]
     }}
   ]
 }}
@@ -270,11 +271,7 @@ fn events_for_prompt<'a>(mode: &str, events: &'a [StoredLogEvent]) -> Vec<&'a St
 
     let mut groups = BTreeMap::<String, Vec<&StoredLogEvent>>::new();
     for event in events {
-        let key = ["task_id", "session_id"]
-            .into_iter()
-            .find_map(|name| event.metadata.get(name).and_then(Value::as_str))
-            .map(|value| value.to_owned())
-            .unwrap_or_else(|| event.id.clone());
+        let key = technical_event_group_key(event);
         groups.entry(key).or_default().push(event);
     }
 
@@ -291,6 +288,71 @@ fn events_for_prompt<'a>(mode: &str, events: &'a [StoredLogEvent]) -> Vec<&'a St
         .collect::<Vec<_>>();
     selected.sort_by_key(|event| (event.timestamp, event.received_at));
     selected
+}
+
+pub(crate) fn event_group_key(event: &StoredLogEvent) -> String {
+    let repo = event
+        .metadata
+        .get("repo")
+        .and_then(Value::as_str)
+        .map(normalized_group_value)
+        .unwrap_or_default();
+    if let Some(work_item) = event.metadata.get("work_item").and_then(Value::as_str) {
+        return format!(
+            "repo:{repo}|work-item:{}",
+            normalized_reference_value(work_item)
+        );
+    }
+    if let Some(pull_request) = event.metadata.get("pull_request").and_then(Value::as_str) {
+        return format!(
+            "repo:{repo}|pull-request:{}",
+            normalized_reference_value(pull_request)
+        );
+    }
+    if let Some(project) = event.metadata.get("project").and_then(Value::as_str) {
+        return format!("project:{}", normalized_group_value(project));
+    }
+    if !repo.is_empty() {
+        return format!("repo:{repo}");
+    }
+    technical_event_group_key(event)
+}
+
+fn technical_event_group_key(event: &StoredLogEvent) -> String {
+    ["task_id", "session_id"]
+        .into_iter()
+        .find_map(|name| event.metadata.get(name).and_then(Value::as_str))
+        .unwrap_or(&event.id)
+        .to_owned()
+}
+
+fn normalized_group_value(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn normalized_reference_value(value: &str) -> String {
+    value
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .next_back()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| normalized_group_value(value))
+}
+
+fn event_groups(events: &[StoredLogEvent]) -> BTreeMap<String, Vec<StoredLogEvent>> {
+    let mut groups = BTreeMap::new();
+    for event in events {
+        groups
+            .entry(event_group_key(event))
+            .or_insert_with(Vec::new)
+            .push(event.clone());
+    }
+    groups
 }
 
 fn is_terminal_event(event: &StoredLogEvent) -> bool {
@@ -325,6 +387,7 @@ fn event_order_key(event: &StoredLogEvent) -> (i64, chrono::DateTime<chrono::Utc
 fn prompt_event(event: &StoredLogEvent) -> PromptEvent<'_> {
     let (message, message_complete) = bounded_prefix(&event.message, MAX_PROMPT_MESSAGE_BYTES);
     PromptEvent {
+        group_id: event_group_key(event),
         id: &event.id,
         timestamp: &event.timestamp,
         source: &event.source,
@@ -382,7 +445,11 @@ fn parse_proposal(
     let workstream_markdown = (args.mode == "daily-consolidation")
         .then(|| render_workstreams(&value, args, events))
         .flatten();
-    let canonical_links = workstream_links(&value, args);
+    let canonical_links = if args.mode == "daily-consolidation" {
+        configured_workstream_links(args)
+    } else {
+        workstream_links(&value, args)
+    };
     Ok(SummaryProposal {
         target_note: default_target_note(args),
         link_candidates: allowed_canonical_links(args),
@@ -391,13 +458,15 @@ fn parse_proposal(
         } else {
             canonical_links
         },
-        markdown: workstream_markdown.unwrap_or_else(|| {
+        markdown: if args.mode == "daily-consolidation" {
+            workstream_markdown.unwrap_or_else(|| render_deterministic_workstreams(args, events))
+        } else {
             with_evidence_details(
                 string_field(&value, "markdown")
                     .unwrap_or_else(|| fallback_markdown(events, "LLM response omitted markdown.")),
                 events,
             )
-        }),
+        },
         evidence_event_ids: events.iter().map(|event| event.id.clone()).collect(),
         confidence: string_field(&value, "confidence").unwrap_or_else(|| "low".to_owned()),
         open_questions: string_array_field(&value, "open_questions"),
@@ -432,42 +501,33 @@ fn render_workstreams(
     events: &[StoredLogEvent],
 ) -> Option<String> {
     let items = value.get("workstreams")?.as_array()?;
-    let allowed_links = allowed_canonical_links(args)
-        .into_iter()
-        .collect::<HashSet<_>>();
-    let events_by_id = events
-        .iter()
-        .map(|event| (event.id.as_str(), event))
-        .collect::<HashMap<_, _>>();
+    let groups = event_groups(events);
+    if items.len() != groups.len() {
+        return None;
+    }
+    let mut seen = HashSet::new();
     let rendered = items
         .iter()
         .filter_map(|item| {
+            let group_id = item.get("group_id").and_then(Value::as_str)?;
+            let evidence = groups.get(group_id)?;
+            if !seen.insert(group_id) {
+                return None;
+            }
             let title = item.get("title").and_then(Value::as_str)?.trim();
-            if title.is_empty() {
+            if title.is_empty() || title.to_ascii_lowercase().contains("concise workstream") {
                 return None;
             }
-            let link = item
-                .get("canonical_link")
-                .and_then(Value::as_str)
-                .filter(|link| allowed_links.contains(*link));
             let bullets = string_array_field(item, "summary_bullets");
-            if bullets.is_empty() {
+            if bullets.is_empty()
+                || bullets.iter().any(|bullet| {
+                    bullet.to_ascii_lowercase().contains("outcome that matters")
+                        || bullet.to_ascii_lowercase().contains("concise conclusion")
+                })
+            {
                 return None;
             }
-            let selected = string_array_field(item, "evidence_event_ids")
-                .into_iter()
-                .filter_map(|id| events_by_id.get(id.as_str()).copied())
-                .cloned()
-                .collect::<Vec<_>>();
-            let evidence = if selected.is_empty() {
-                events.to_vec()
-            } else {
-                selected
-            };
-            let heading = link.map_or_else(
-                || format!("### {title}"),
-                |link| format!("### {link} — {title}"),
-            );
+            let heading = workstream_heading(title, &links_for_group(args, group_id));
             let body = bullets
                 .into_iter()
                 .take(3)
@@ -476,11 +536,103 @@ fn render_workstreams(
                 .join("\n");
             Some(format!(
                 "{heading}\n\n{}",
-                with_evidence_details(body, &evidence)
+                with_daily_details(body, evidence)
             ))
         })
         .collect::<Vec<_>>();
-    (!rendered.is_empty()).then(|| rendered.join("\n\n"))
+    (rendered.len() == groups.len() && seen.len() == groups.len()).then(|| rendered.join("\n\n"))
+}
+
+fn configured_workstream_links(args: &SuggestMarkdownSummaryArgs) -> Vec<String> {
+    args.vault_context
+        .get("workstream_links")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|groups| groups.values())
+        .flat_map(|links| links.as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn links_for_group(args: &SuggestMarkdownSummaryArgs, group_id: &str) -> Vec<String> {
+    args.vault_context
+        .get("workstream_links")
+        .and_then(Value::as_object)
+        .and_then(|groups| groups.get(group_id))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn workstream_heading(title: &str, links: &[String]) -> String {
+    if links.is_empty() {
+        format!("### {title}")
+    } else {
+        format!("### {} — {title}", links.join(" · "))
+    }
+}
+
+fn render_deterministic_workstreams(
+    args: &SuggestMarkdownSummaryArgs,
+    events: &[StoredLogEvent],
+) -> String {
+    event_groups(events)
+        .into_iter()
+        .map(|(group_id, evidence)| {
+            let authoritative = evidence
+                .iter()
+                .filter(|event| is_terminal_event(event))
+                .max_by_key(|event| event_order_key(event))
+                .or_else(|| evidence.iter().max_by_key(|event| event_order_key(event)))
+                .expect("event group is non-empty");
+            let title = deterministic_title(authoritative);
+            let mut seen_messages = HashSet::new();
+            let bullets = events_for_prompt("daily-consolidation", &evidence)
+                .into_iter()
+                .map(|event| event.message.trim().to_owned())
+                .filter(|message| !message.is_empty() && seen_messages.insert(message.clone()))
+                .take(5)
+                .map(|message| format!("- {message}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "{}\n\n{}",
+                workstream_heading(&title, &links_for_group(args, &group_id)),
+                with_daily_details(bullets, &evidence)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn deterministic_title(event: &StoredLogEvent) -> String {
+    for key in ["work_item", "project"] {
+        if let Some(value) = event.metadata.get(key).and_then(Value::as_str) {
+            return value.to_owned();
+        }
+    }
+    for key in ["modules", "module"] {
+        if let Some(value) = event.metadata.get(key) {
+            if let Some(first) = value
+                .as_str()
+                .or_else(|| value.as_array()?.first()?.as_str())
+            {
+                return first.to_owned();
+            }
+        }
+    }
+    event
+        .metadata
+        .get("repo")
+        .and_then(Value::as_str)
+        .unwrap_or(&event.source)
+        .to_owned()
 }
 
 fn fallback_proposal(
@@ -489,12 +641,20 @@ fn fallback_proposal(
     provider: &str,
     reason: &str,
 ) -> SummaryProposal {
-    let markdown = with_evidence_details(fallback_markdown(&events, reason), &events);
-    let allowed_links = allowed_canonical_links(&args);
-    let canonical_links = if allowed_links.len() == 1 {
-        allowed_links
+    let markdown = if args.mode == "daily-consolidation" {
+        render_deterministic_workstreams(&args, &events)
     } else {
-        Vec::new()
+        with_evidence_details(fallback_markdown(&events, reason), &events)
+    };
+    let canonical_links = if args.mode == "daily-consolidation" {
+        configured_workstream_links(&args)
+    } else {
+        let allowed_links = allowed_canonical_links(&args);
+        if allowed_links.len() == 1 {
+            allowed_links
+        } else {
+            Vec::new()
+        }
     };
     SummaryProposal {
         target_note: default_target_note(&args),
@@ -643,6 +803,39 @@ fn with_evidence_details(markdown: String, events: &[StoredLogEvent]) -> String 
     format!("{}\n\nDetails: {}", narrative.trim(), details.join(" · "))
 }
 
+fn with_daily_details(markdown: String, events: &[StoredLogEvent]) -> String {
+    let mut details = Vec::new();
+    for (label, key) in [
+        ("work item", "work_item"),
+        ("pull request", "pull_request"),
+        ("commit summary", "commit_message"),
+    ] {
+        push_detail(&mut details, label, metadata_field(events, key));
+    }
+    let commits = metadata_field(events, "commit").map(|values| {
+        values
+            .into_iter()
+            .map(|value| value.chars().take(8).collect())
+            .collect()
+    });
+    push_detail(&mut details, "commits", commits);
+    push_detail(
+        &mut details,
+        "tests",
+        metadata_field_limited(events, "tests", 4),
+    );
+    push_detail(
+        &mut details,
+        "validation",
+        metadata_field_limited(events, "validation", 4),
+    );
+    if details.is_empty() {
+        markdown.trim().to_owned()
+    } else {
+        format!("{}\n\nReferences: {}", markdown.trim(), details.join(" · "))
+    }
+}
+
 fn event_field<F>(events: &[StoredLogEvent], field: F) -> Option<Vec<String>>
 where
     F: Fn(&StoredLogEvent) -> Option<&String>,
@@ -656,6 +849,14 @@ where
 }
 
 fn metadata_field(events: &[StoredLogEvent], key: &str) -> Option<Vec<String>> {
+    metadata_field_limited(events, key, 12)
+}
+
+fn metadata_field_limited(
+    events: &[StoredLogEvent],
+    key: &str,
+    limit: usize,
+) -> Option<Vec<String>> {
     let mut values = BTreeSet::new();
     for event in events {
         match event.metadata.get(key) {
@@ -673,7 +874,7 @@ fn metadata_field(events: &[StoredLogEvent], key: &str) -> Option<Vec<String>> {
             _ => {}
         }
     }
-    (!values.is_empty()).then(|| values.into_iter().take(12).collect())
+    (!values.is_empty()).then(|| values.into_iter().take(limit).collect())
 }
 
 fn push_detail(details: &mut Vec<String>, label: &str, values: Option<Vec<String>>) {
@@ -793,17 +994,19 @@ mod tests {
             event_ids: vec![event.id.clone()],
             vault_context: json!({
                 "daily_note": "Work log",
-                "candidate_notes": ["[[Record Navigation]]"]
+                "candidate_notes": ["[[Record Navigation]]"],
+                "workstream_links": {
+                    "repo:portalapi": ["[[Record Navigation]]"]
+                }
             }),
             mode: "daily-consolidation".to_owned(),
             task: None,
         };
         let model_output = json!({
             "workstreams": [{
+                "group_id": "repo:portalapi",
                 "title": "Navigation validation",
-                "canonical_link": "[[Record Navigation]]",
-                "summary_bullets": ["Validated the host route.", "Kept the chat open."],
-                "evidence_event_ids": ["evt_navigation"]
+                "summary_bullets": ["Validated the host route.", "Kept the chat open."]
             }],
             "confidence": "high",
             "open_questions": []
@@ -816,7 +1019,7 @@ mod tests {
                 .markdown
                 .starts_with("### [[Record Navigation]] — Navigation validation")
         );
-        assert!(proposal.markdown.contains("repo `portal-api`"));
+        assert!(!proposal.markdown.contains("source `agent/test`"));
         assert_eq!(proposal.canonical_links, ["[[Record Navigation]]"]);
     }
 
@@ -885,5 +1088,91 @@ mod tests {
 
         assert_eq!(selected, BTreeSet::from(["complete", "other"]));
         assert_eq!(events_for_prompt("daily-note", &events).len(), 4);
+    }
+
+    #[test]
+    fn malformed_daily_output_falls_back_to_one_entry_per_task() {
+        let make_event = |id: &str, task: &str, message: &str, repo: &str| StoredLogEvent {
+            id: id.to_owned(),
+            received_at: Utc::now(),
+            timestamp: Utc::now(),
+            source: "codex/test".to_owned(),
+            level: "info".to_owned(),
+            message: message.to_owned(),
+            metadata: Map::from_iter([
+                ("task_id".to_owned(), Value::from(task)),
+                ("event_type".to_owned(), Value::from("complete")),
+                ("repo".to_owned(), Value::from(repo)),
+            ]),
+            fingerprint: None,
+            truncated: false,
+            reviewed: false,
+        };
+        let events = vec![
+            make_event("one", "task-one", "Completed Forms work.", "SweetOne"),
+            make_event("two", "task-two", "Validated SCIM locally.", "SweetNext"),
+        ];
+        let args = SuggestMarkdownSummaryArgs {
+            event_ids: events.iter().map(|event| event.id.clone()).collect(),
+            vault_context: json!({
+                "daily_note": "Daily log Sep 7",
+                "candidate_notes": ["[[Sweet CRM]]", "[[Sweet Next]]"],
+                "workstream_links": {
+                    "repo:sweetone": ["[[Sweet CRM]]"],
+                    "repo:sweetnext": ["[[Sweet Next]]"]
+                }
+            }),
+            mode: "daily-consolidation".to_owned(),
+            task: None,
+        };
+        let malformed = json!({
+            "markdown": "- Concise conclusion that belongs in a Markdown vault.",
+            "confidence": "high"
+        })
+        .to_string();
+
+        let proposal = parse_proposal(&malformed, &args, &events, "test").unwrap();
+
+        assert!(proposal.markdown.contains("### [[Sweet CRM]] — SweetOne"));
+        assert!(proposal.markdown.contains("- Completed Forms work."));
+        assert!(proposal.markdown.contains("### [[Sweet Next]] — SweetNext"));
+        assert!(proposal.markdown.contains("- Validated SCIM locally."));
+        assert!(!proposal.markdown.contains("Concise conclusion"));
+    }
+
+    #[test]
+    fn daily_groups_prefer_repository_and_work_item_or_pull_request() {
+        let event_with = |repo: &str, field: &str, value: &str| StoredLogEvent {
+            id: format!("evt-{repo}-{field}"),
+            received_at: Utc::now(),
+            timestamp: Utc::now(),
+            source: "codex/test".to_owned(),
+            level: "info".to_owned(),
+            message: "done".to_owned(),
+            metadata: Map::from_iter([
+                ("repo".to_owned(), Value::from(repo)),
+                (field.to_owned(), Value::from(value)),
+            ]),
+            fingerprint: None,
+            truncated: false,
+            reviewed: false,
+        };
+
+        assert_eq!(
+            event_group_key(&event_with("SweetOne", "work_item", "ADO 57950")),
+            "repo:sweetone|work-item:57950"
+        );
+        assert_eq!(
+            event_group_key(&event_with(
+                "SweetOne",
+                "pull_request",
+                "https://dev.azure.com/org/project/pullrequest/9374"
+            )),
+            "repo:sweetone|pull-request:9374"
+        );
+        assert_ne!(
+            event_group_key(&event_with("SweetOne", "work_item", "ADO 57950")),
+            event_group_key(&event_with("SweetNext", "work_item", "ADO 57950"))
+        );
     }
 }

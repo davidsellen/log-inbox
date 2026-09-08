@@ -97,6 +97,7 @@
     .dialog-head h2 { margin: 0; }
     .dialog-actions { justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
     .dialog-body pre { max-height: 55vh; overflow: auto; }
+    #preview-markdown { min-height: 48vh; font: 13px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
     @media (max-width: 760px) {
       .topbar-inner, .shell { padding-left: 16px; padding-right: 16px; }
       .shell { padding-top: 18px; }
@@ -131,7 +132,7 @@
         <div><h1>Pending proposals</h1><div id="queue-count" class="count"></div></div>
         <div class="queue-actions">
           <span id="consolidate-status" class="status"></span>
-          <input id="consolidate-date" type="date" aria-label="Day to consolidate">
+          <input id="consolidate-date" type="date" aria-label="Day to filter and consolidate">
           <button id="consolidate" class="button primary" type="button">Consolidate day</button>
           <button id="cancel-consolidation" class="button danger" type="button" hidden>Cancel</button>
           <button id="preview-result" class="button" type="button" hidden>Preview result</button>
@@ -199,10 +200,13 @@
   <dialog id="preview-dialog">
     <div class="dialog-body">
       <div class="dialog-head"><div><h2>Daily consolidation preview</h2><div id="preview-meta" class="subtle"></div></div><button id="preview-close" class="button" type="button">Close</button></div>
-      <pre id="preview-markdown"></pre>
+      <textarea id="preview-markdown" aria-label="Editable proposal Markdown" spellcheck="true"></textarea>
       <div class="dialog-actions">
+        <span id="preview-edit-status" class="status"></span>
         <button id="preview-discard" class="button danger" type="button">Discard</button>
         <button id="preview-keep" class="button" type="button">Keep in queue</button>
+        <button id="preview-revert" class="button" type="button">Revert</button>
+        <button id="preview-save" class="button" type="button">Save draft</button>
         <button id="preview-apply" class="button primary" type="button">Apply to daily note</button>
       </div>
     </div>
@@ -227,11 +231,22 @@
       return node;
     }
 
+    function proposalsForSelectedDay(proposals) {
+      const { start, end } = selectedDay();
+      return proposals.filter((proposal) => {
+        if (!proposal.evidence_start || !proposal.evidence_end) return false;
+        const evidenceStart = new Date(proposal.evidence_start);
+        const evidenceEnd = new Date(proposal.evidence_end);
+        return evidenceStart >= start && evidenceEnd < end;
+      });
+    }
+
     function renderProposals(proposals) {
+      proposals = proposalsForSelectedDay(proposals);
       queue.replaceChildren();
-      count.textContent = `${proposals.length} awaiting review`;
+      count.textContent = `${proposals.length} awaiting review for selected day`;
       if (!proposals.length) {
-        queue.append(element("div", "empty", "No pending proposals"));
+        queue.append(element("div", "empty", "No pending proposals for selected day"));
         return;
       }
       proposals.forEach((proposal) => {
@@ -539,8 +554,41 @@
     function openPreview(proposal) {
       state.preview = proposal;
       document.querySelector("#preview-meta").textContent = `${proposal.target_note} · ${proposal.evidence_event_ids.length} evidence events · ${proposal.confidence} confidence`;
-      document.querySelector("#preview-markdown").textContent = proposal.markdown;
+      document.querySelector("#preview-markdown").value = proposal.markdown;
+      document.querySelector("#preview-edit-status").textContent = "";
       document.querySelector("#preview-dialog").showModal();
+    }
+
+    async function savePreview() {
+      if (!state.preview) return false;
+      const editor = document.querySelector("#preview-markdown");
+      const status = document.querySelector("#preview-edit-status");
+      if (editor.value === state.preview.markdown) return true;
+      status.className = "status";
+      status.textContent = "Saving";
+      try {
+        const response = await fetch(`/api/proposals/${encodeURIComponent(state.preview.proposal_id)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ markdown: editor.value, expected_revision: state.preview.revision })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Save failed");
+        state.preview = {
+          ...state.preview,
+          ...data,
+          evidence_start: state.preview.evidence_start,
+          evidence_end: state.preview.evidence_end
+        };
+        state.proposals = state.proposals.map((proposal) => proposal.proposal_id === data.proposal_id ? state.preview : proposal);
+        renderProposals(state.proposals);
+        status.textContent = "Saved";
+        return true;
+      } catch (error) {
+        status.className = "status error";
+        status.textContent = error.message;
+        return false;
+      }
     }
 
     document.querySelector("#consolidate").addEventListener("click", async () => {
@@ -588,8 +636,18 @@
 
     document.querySelector("#preview-close").addEventListener("click", () => document.querySelector("#preview-dialog").close());
     document.querySelector("#preview-keep").addEventListener("click", () => document.querySelector("#preview-dialog").close());
+    document.querySelector("#preview-markdown").addEventListener("input", (event) => {
+      const dirty = state.preview && event.currentTarget.value !== state.preview.markdown;
+      document.querySelector("#preview-edit-status").textContent = dirty ? "Unsaved changes" : "";
+    });
+    document.querySelector("#preview-revert").addEventListener("click", () => {
+      if (!state.preview) return;
+      document.querySelector("#preview-markdown").value = state.preview.markdown;
+      document.querySelector("#preview-edit-status").textContent = "Reverted";
+    });
+    document.querySelector("#preview-save").addEventListener("click", savePreview);
     document.querySelector("#preview-apply").addEventListener("click", async (event) => {
-      if (state.preview && await applyProposal(state.preview, event.currentTarget)) document.querySelector("#preview-dialog").close();
+      if (state.preview && await savePreview() && await applyProposal(state.preview, event.currentTarget)) document.querySelector("#preview-dialog").close();
     });
     document.querySelector("#preview-discard").addEventListener("click", async (event) => {
       if (state.preview && await discardProposal(state.preview, event.currentTarget, false)) document.querySelector("#preview-dialog").close();
@@ -654,8 +712,16 @@
       event.currentTarget.reset();
     });
     document.querySelector("#refresh").addEventListener("click", load);
-    document.querySelector("#consolidate-date").valueAsDate = new Date();
-    document.querySelector("#consolidate-date").addEventListener("change", renderConsolidationState);
+    const today = new Date();
+    document.querySelector("#consolidate-date").value = [
+      today.getFullYear(),
+      String(today.getMonth() + 1).padStart(2, "0"),
+      String(today.getDate()).padStart(2, "0")
+    ].join("-");
+    document.querySelector("#consolidate-date").addEventListener("change", () => {
+      renderProposals(state.proposals);
+      renderConsolidationState();
+    });
     if (location.hash === "#linking") document.querySelector('[data-tab="linking"]').click();
     load();
   </script>

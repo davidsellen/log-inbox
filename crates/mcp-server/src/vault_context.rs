@@ -164,7 +164,10 @@ impl VaultContextProvider {
 
         for event in events {
             let one_event = std::slice::from_ref(event);
-            for value in field_values(one_event, "canonical_note") {
+            for value in field_values(one_event, "canonical_note")
+                .into_iter()
+                .chain(field_values(one_event, "canonical_note_candidates"))
+            {
                 if let Some(note) = find_note(&catalog.notes, &value) {
                     candidates.insert(note.wikilink.clone());
                 } else if !catalog.configured {
@@ -658,6 +661,35 @@ mod tests {
         assert_eq!(
             provider.for_events(&events, &[]).unwrap()["candidate_notes"],
             json!(["[[Customer Portal]]"])
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolves_plural_canonical_note_candidates() {
+        let root = std::env::temp_dir().join(format!(
+            "vault-candidates-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("Products.md"), "# Products\n").unwrap();
+        let provider = VaultContextProvider {
+            config_path: None,
+            product_index_path: None,
+            vault_dir: Some(root.clone()),
+            excluded_prefixes: Vec::new(),
+        };
+        let events = vec![event(Map::from_iter([(
+            "canonical_note_candidates".to_owned(),
+            json!(["Products"]),
+        )]))];
+
+        assert_eq!(
+            provider.for_events(&events, &[]).unwrap()["candidate_notes"],
+            json!(["[[Products]]"])
         );
         fs::remove_dir_all(root).unwrap();
     }
