@@ -1,7 +1,7 @@
 use crate::{
     models::{
-        DailyConsolidationJob, LogEventInput, LogQuery, LogQueryResult, MarkReviewedResult,
-        SourceSummary, StagedEventGroup, StoredLogEvent, VaultLinkRule,
+        DailyConsolidationJob, IgnoredLinkIdentity, LogEventInput, LogQuery, LogQueryResult,
+        MarkReviewedResult, SourceSummary, StagedEventGroup, StoredLogEvent, VaultLinkRule,
     },
     redaction::{redact_metadata, redact_text},
 };
@@ -123,6 +123,15 @@ impl Store {
 
             CREATE INDEX IF NOT EXISTS idx_vault_link_rules_target
                 ON vault_link_rules(target_note_id);
+
+            CREATE TABLE IF NOT EXISTS ignored_link_identities (
+                id TEXT PRIMARY KEY,
+                field TEXT NOT NULL,
+                value TEXT NOT NULL,
+                normalized_value TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(field, normalized_value)
+            );
             "#,
         )?;
         Ok(())
@@ -515,6 +524,76 @@ impl Store {
     pub fn delete_link_rule(&self, id: &str) -> Result<bool> {
         let conn = self.connect()?;
         Ok(conn.execute("DELETE FROM vault_link_rules WHERE id = ?1", params![id])? > 0)
+    }
+
+    pub fn list_ignored_link_identities(&self) -> Result<Vec<IgnoredLinkIdentity>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, field, value, normalized_value, created_at FROM ignored_link_identities ORDER BY created_at DESC",
+        )?;
+        stmt.query_map([], |row| {
+            Ok(IgnoredLinkIdentity {
+                id: row.get(0)?,
+                field: row.get(1)?,
+                value: row.get(2)?,
+                normalized_value: row.get(3)?,
+                created_at: parse_utc(row.get::<_, String>(4)?),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+    }
+
+    pub fn ignore_link_identity(
+        &self,
+        field: &str,
+        value: &str,
+        normalized_value: &str,
+    ) -> Result<IgnoredLinkIdentity> {
+        let conn = self.connect()?;
+        let id = format!("ignored_{}", Uuid::new_v4().simple());
+        let created_at = Utc::now();
+        conn.execute(
+            r#"
+            INSERT INTO ignored_link_identities (id, field, value, normalized_value, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(field, normalized_value) DO NOTHING
+            "#,
+            params![id, field, value, normalized_value, created_at.to_rfc3339()],
+        )?;
+        conn.query_row(
+            "SELECT id, field, value, normalized_value, created_at FROM ignored_link_identities WHERE field = ?1 AND normalized_value = ?2",
+            params![field, normalized_value],
+            |row| {
+                Ok(IgnoredLinkIdentity {
+                    id: row.get(0)?,
+                    field: row.get(1)?,
+                    value: row.get(2)?,
+                    normalized_value: row.get(3)?,
+                    created_at: parse_utc(row.get::<_, String>(4)?),
+                })
+            },
+        ).map_err(Into::into)
+    }
+
+    pub fn restore_ignored_link_identity(&self, id: &str) -> Result<bool> {
+        let conn = self.connect()?;
+        Ok(conn.execute(
+            "DELETE FROM ignored_link_identities WHERE id = ?1",
+            params![id],
+        )? > 0)
+    }
+
+    pub fn restore_matching_ignored_identity(
+        &self,
+        field: &str,
+        normalized_value: &str,
+    ) -> Result<bool> {
+        let conn = self.connect()?;
+        Ok(conn.execute(
+            "DELETE FROM ignored_link_identities WHERE field = ?1 AND normalized_value = ?2",
+            params![field, normalized_value],
+        )? > 0)
     }
 
     pub fn all_events(&self) -> Result<Vec<StoredLogEvent>> {
@@ -939,6 +1018,35 @@ mod tests {
         assert!(!store.list_link_rules().unwrap()[0].enabled);
         assert!(store.delete_link_rule(&rule.id).expect("rule deleted"));
         assert!(store.list_link_rules().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ignores_identities_idempotently_and_restores_them() {
+        let store = temp_store();
+        let ignored = store
+            .ignore_link_identity("repo", "SweetOne", "sweetone")
+            .expect("identity ignored");
+        let duplicate = store
+            .ignore_link_identity("repo", "sweet-one", "sweetone")
+            .expect("duplicate ignore returns existing row");
+
+        assert_eq!(ignored.id, duplicate.id);
+        assert_eq!(store.list_ignored_link_identities().unwrap().len(), 1);
+        assert!(
+            store
+                .restore_matching_ignored_identity("repo", "sweetone")
+                .expect("identity restored")
+        );
+        assert!(store.list_ignored_link_identities().unwrap().is_empty());
+
+        let ignored = store
+            .ignore_link_identity("source", "codex/fedora", "codexfedora")
+            .expect("identity ignored again");
+        assert!(
+            store
+                .restore_ignored_link_identity(&ignored.id)
+                .expect("identity restored by ID")
+        );
     }
 
     #[test]

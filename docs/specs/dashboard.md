@@ -47,6 +47,7 @@ The MCP service exposes a small local interface for reviewing Markdown proposals
 - `GET /api/linking` returns the current catalog, observed identifiers, suggestions, and rules.
 - `POST /api/linking/scan` refreshes the read-only catalog view.
 - `POST`, `PUT`, and `DELETE /api/linking/rules` manage persisted mappings.
+- `PUT /api/linking/ignored` hides an unresolved identifier; `DELETE /api/linking/ignored/{id}` restores it. Ignoring is reversible and never deletes events or vault notes.
 - `POST /api/consolidations/daily` idempotently queues a durable daily consolidation job.
 - `GET /api/consolidations/{job_id}` returns authoritative durable job state.
 - `POST /api/consolidations/{job_id}/cancel` requests cancellation of pending or running work.

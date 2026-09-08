@@ -9,7 +9,7 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use log_inbox_core::{
-    models::{DailyConsolidationJob, LinkSelector, LogQuery, VaultLinkRule},
+    models::{DailyConsolidationJob, IgnoredLinkIdentity, LinkSelector, LogQuery, VaultLinkRule},
     settings::Settings,
     store::Store,
 };
@@ -150,11 +150,18 @@ struct LinkRuleInput {
     enabled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct IgnoreIdentityInput {
+    field: String,
+    value: String,
+}
+
 #[derive(Debug, Serialize)]
 struct LinkingData {
     catalog: vault_context::VaultCatalog,
     rules: Vec<VaultLinkRule>,
     observed: Vec<vault_context::ObservedIdentity>,
+    ignored: Vec<IgnoredLinkIdentity>,
     event_count: usize,
 }
 
@@ -214,6 +221,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/linking", get(linking_data))
         .route("/api/linking/scan", post(linking_data))
         .route("/api/linking/rules", post(create_link_rule))
+        .route("/api/linking/ignored", put(ignore_link_identity))
+        .route(
+            "/api/linking/ignored/{ignored_id}",
+            axum::routing::delete(restore_ignored_identity),
+        )
         .route(
             "/api/linking/rules/{rule_id}",
             put(update_link_rule).delete(delete_link_rule),
@@ -380,12 +392,75 @@ async fn linking_data(State(state): State<AppState>) -> Result<Json<LinkingData>
         .vault_context
         .observed(&events, &rules)
         .map_err(ApiError::internal)?;
+    let ignored = state
+        .store
+        .list_ignored_link_identities()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(LinkingData {
         catalog,
         rules,
         observed,
+        ignored,
         event_count: events.len(),
     }))
+}
+
+async fn ignore_link_identity(
+    State(state): State<AppState>,
+    Json(input): Json<IgnoreIdentityInput>,
+) -> Result<Json<IgnoredLinkIdentity>, ApiError> {
+    let field = input.field.trim();
+    let value = input.value.trim();
+    if value.is_empty() {
+        return Err(ApiError::bad_request("identifier value is required"));
+    }
+    if !vault_context::supports_selector_field(field) {
+        return Err(ApiError::bad_request("unsupported identifier type"));
+    }
+    let rules = state
+        .store
+        .list_link_rules()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let events = state
+        .store
+        .all_events()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let observed = state
+        .vault_context
+        .observed(&events, &rules)
+        .map_err(ApiError::internal)?;
+    let normalized = vault_context::normalized_identity(value);
+    let candidate = observed
+        .iter()
+        .find(|item| {
+            item.field == field && vault_context::normalized_identity(&item.value) == normalized
+        })
+        .ok_or_else(|| ApiError::not_found("identifier not found"))?;
+    if candidate.status != "unresolved" {
+        return Err(ApiError::conflict(
+            "only unresolved identifiers can be ignored",
+        ));
+    }
+    state
+        .store
+        .ignore_link_identity(field, &candidate.value, &normalized)
+        .map(Json)
+        .map_err(|error| ApiError::internal(error.to_string()))
+}
+
+async fn restore_ignored_identity(
+    State(state): State<AppState>,
+    AxumPath(ignored_id): AxumPath<String>,
+) -> Result<StatusCode, ApiError> {
+    if state
+        .store
+        .restore_ignored_link_identity(&ignored_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("ignored identifier not found"))
+    }
 }
 
 async fn create_link_rule(
@@ -469,7 +544,28 @@ fn save_link_rule(state: &AppState, rule: &VaultLinkRule) -> Result<(), ApiError
     state
         .store
         .save_link_rule(rule)
-        .map_err(|error| ApiError::internal(error.to_string()))
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let ignored = state
+        .store
+        .list_ignored_link_identities()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    for selector in &rule.selectors {
+        let selector_value = vault_context::normalized_identity(&selector.value);
+        for identity in ignored.iter().filter(|identity| {
+            identity.field == selector.field
+                && if selector.operator == "prefix" {
+                    identity.normalized_value.starts_with(&selector_value)
+                } else {
+                    identity.normalized_value == selector_value
+                }
+        }) {
+            state
+                .store
+                .restore_ignored_link_identity(&identity.id)
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_rule_id(id: &str) -> Result<(), ApiError> {

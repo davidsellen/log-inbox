@@ -57,6 +57,7 @@ pub struct ObservedIdentity {
     pub event_count: usize,
     pub status: String,
     pub resolved_notes: Vec<String>,
+    pub resolution_kind: Option<String>,
     pub suggestions: Vec<LinkSuggestion>,
     pub sample_message: String,
 }
@@ -256,9 +257,11 @@ impl VaultContextProvider {
                     })
                     .map(|note| note.wikilink.clone())
                     .collect::<BTreeSet<_>>();
+                let mut resolution_kind = (!resolved.is_empty()).then(|| "rule".to_owned());
                 let exact = exact_note_matches(&catalog.notes, &value);
                 if resolved.is_empty() && exact.len() == 1 {
                     resolved.insert(exact[0].wikilink.clone());
+                    resolution_kind = Some("automatic".to_owned());
                 }
                 let suggestions = exact
                     .into_iter()
@@ -279,6 +282,7 @@ impl VaultContextProvider {
                     event_count,
                     status: status.to_owned(),
                     resolved_notes: resolved.into_iter().collect(),
+                    resolution_kind,
                     suggestions,
                     sample_message: sample_message.chars().take(180).collect(),
                 }
@@ -550,12 +554,16 @@ fn wikilink(value: &str) -> String {
         format!("[[{value}]]")
     }
 }
-fn normalized_identity(value: &str) -> String {
+pub(crate) fn normalized_identity(value: &str) -> String {
     value
         .chars()
         .filter(|character| character.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+pub(crate) fn supports_selector_field(field: &str) -> bool {
+    all_event_fields().any(|candidate| candidate == field)
 }
 fn default_daily_note_format() -> String {
     "Daily log %b %-d".to_owned()

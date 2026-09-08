@@ -94,3 +94,12 @@ pub struct VaultLinkRule {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IgnoredLinkIdentity {
+    pub id: String,
+    pub field: String,
+    pub value: String,
+    pub normalized_value: String,
+    pub created_at: DateTime<Utc>,
+}

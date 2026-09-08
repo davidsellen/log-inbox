@@ -71,24 +71,39 @@
     .status.error { color: var(--danger); }
     .instructions { min-width: 0; }
     .instructions pre { max-height: 620px; overflow: auto; background: #202723; color: #edf3ef; border-color: #202723; }
-    .linking-layout { display: grid; grid-template-columns: minmax(230px, 300px) minmax(0, 1fr); gap: 28px; align-items: start; }
-    .catalog { border-top: 1px solid var(--line); max-height: 680px; overflow: auto; }
-    .catalog-group { padding: 14px 0 7px; font-size: 12px; font-weight: 750; color: var(--muted); text-transform: uppercase; }
-    .catalog-note { padding: 6px 0; font-size: 13px; overflow-wrap: anywhere; }
-    .catalog-note small { display: block; color: var(--muted); margin-top: 2px; }
-    .rule-form { display: grid; grid-template-columns: 120px 100px minmax(130px, 1fr) minmax(180px, 1.3fr) auto; gap: 8px; align-items: end; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
-    .condition-row { grid-column: 1 / -1; display: grid; grid-template-columns: 120px 100px minmax(130px, 1fr) auto; gap: 8px; align-items: end; }
-    .mapping-list { border-top: 1px solid var(--line); margin-top: 12px; }
-    .mapping-row { display: grid; grid-template-columns: 85px minmax(130px, .8fr) minmax(180px, 1fr) 190px auto; gap: 10px; align-items: center; min-height: 58px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+    .link-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .link-tools input { width: min(340px, 55vw); }
+    .link-tabs { display: flex; gap: 20px; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
+    .link-tab { border: 0; border-bottom: 3px solid transparent; background: transparent; padding: 10px 2px; color: var(--muted); font-weight: 700; }
+    .link-tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+    .link-view[hidden] { display: none; }
+    .link-view-head { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 10px; }
+    .identity-list { display: grid; gap: 10px; }
+    .identity-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 15px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 7px; }
+    .identity-title { font-weight: 750; overflow-wrap: anywhere; }
+    .identity-meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .identity-card details { margin-top: 8px; }
+    .identity-card p { color: var(--muted); font-size: 13px; margin: 7px 0 0; }
     .mapping-value { font-weight: 700; overflow-wrap: anywhere; }
     .mapping-sample { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .pill { display: inline-block; color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 750; }
     .pill.resolved { color: var(--accent); }
     .pill.ambiguous { color: var(--danger); }
-    .saved-rules { margin: 22px 0; }
-    .saved-rule { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+    .mapping-group { background: var(--surface); border: 1px solid var(--line); border-radius: 7px; margin-bottom: 12px; padding: 15px 16px; }
+    .mapping-group h3 { margin: 0 0 7px; }
+    .saved-rule { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 13px; }
     .saved-rule code { overflow-wrap: anywhere; }
     .inline-actions { display: flex; gap: 7px; flex-shrink: 0; }
+    .check { display: flex; grid-template-columns: none; flex-direction: row; align-items: center; gap: 7px; font-weight: 600; }
+    .check input { width: auto; }
+    .note-results { display: grid; gap: 6px; max-height: 280px; overflow: auto; margin-top: 10px; }
+    .note-result { text-align: left; border: 1px solid var(--line); background: var(--surface); border-radius: 5px; padding: 9px 10px; }
+    .note-result.selected { border-color: var(--accent); background: var(--active); }
+    .note-result small { display: block; color: var(--muted); margin-top: 2px; }
+    .mapping-preview { margin: 12px 0; padding: 11px; background: var(--active); border-radius: 5px; font-size: 13px; }
+    .advanced-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding-top: 10px; }
+    .toast { position: fixed; right: 22px; bottom: 22px; display: flex; align-items: center; gap: 12px; background: #17201c; color: white; padding: 12px 14px; border-radius: 7px; box-shadow: 0 8px 28px rgba(0,0,0,.2); z-index: 3; }
+    .toast button { color: #8de1b7; border: 0; background: transparent; font-weight: 750; }
     dialog { width: min(760px, calc(100% - 32px)); max-height: calc(100vh - 48px); border: 1px solid var(--line); border-radius: 7px; padding: 0; color: var(--ink); background: var(--surface); }
     dialog::backdrop { background: rgba(15, 24, 19, .46); }
     .dialog-body { padding: 22px; }
@@ -102,9 +117,7 @@
       .topbar-inner, .shell { padding-left: 16px; padding-right: 16px; }
       .shell { padding-top: 18px; }
       .settings { grid-template-columns: 1fr; }
-      .linking-layout { grid-template-columns: 1fr; }
-      .rule-form, .mapping-row { grid-template-columns: 1fr; }
-      .condition-row { grid-template-columns: 1fr; }
+      .identity-card, .advanced-grid { grid-template-columns: 1fr; }
       .proposal-head { grid-template-columns: 1fr; }
       .proposal-head .button { justify-self: start; }
       .section-head { align-items: flex-start; }
@@ -144,36 +157,13 @@
 
     <section id="linking-panel" class="panel">
       <div class="section-head">
-        <div><h1>Vault linking</h1><div id="linking-count" class="count"></div></div>
-        <div class="queue-actions"><span id="linking-status" class="status"></span><button id="scan-vault" class="button" type="button">Scan vault</button></div>
+        <div><h1>Vault links</h1><div id="linking-count" class="count">Connect log names to the notes you already use.</div></div>
+        <div class="link-tools"><input id="link-search" type="search" placeholder="Search names, types, or notes" aria-label="Search vault links"><span id="linking-status" class="status"></span><button id="browse-vault" class="button" type="button">Browse notes</button><button id="scan-vault" class="button" type="button">Scan vault</button></div>
       </div>
-      <div class="linking-layout">
-        <aside>
-          <h2>Note catalog</h2>
-          <div id="catalog-meta" class="subtle"></div>
-          <div id="catalog" class="catalog"></div>
-        </aside>
-        <div>
-          <h2>Mapping rules</h2>
-          <form id="rule-form" class="rule-form">
-            <label>Field<select id="rule-field"></select></label>
-            <label>Match<select id="rule-operator"><option value="exact">Exact</option><option value="prefix">Prefix</option></select></label>
-            <label>Value<input id="rule-value" required></label>
-            <label>Target note<select id="rule-target" required></select></label>
-            <button class="button primary" type="submit">Save</button>
-            <div id="condition-row" class="condition-row" hidden>
-              <label>Condition field<select id="condition-field"></select></label>
-              <label>Match<select id="condition-operator"><option value="exact">Exact</option><option value="prefix">Prefix</option></select></label>
-              <label>Value<input id="condition-value"></label>
-              <button id="remove-condition" class="button" type="button">Remove condition</button>
-            </div>
-            <button id="add-condition" class="button" type="button">Add condition</button>
-          </form>
-          <div id="saved-rules" class="saved-rules"></div>
-          <div class="section-head"><div><h2>Observed identifiers</h2><div class="subtle">All retained events</div></div><select id="mapping-filter" aria-label="Filter identifiers"><option value="all">All</option><option value="unresolved">Unresolved</option><option value="suggested">Suggested</option><option value="resolved">Resolved</option><option value="ambiguous">Ambiguous</option></select></div>
-          <div id="mapping-list" class="mapping-list" aria-live="polite"></div>
-        </div>
-      </div>
+      <nav class="link-tabs" aria-label="Vault link views"><button class="link-tab" data-link-view="attention" aria-selected="true">Needs attention <span id="attention-count"></span></button><button class="link-tab" data-link-view="mappings" aria-selected="false">Mappings <span id="rules-count"></span></button><button class="link-tab" data-link-view="ignored" aria-selected="false">Ignored <span id="ignored-count"></span></button></nav>
+      <section id="link-attention" class="link-view"><div class="link-view-head"><div><h2>Names that need a home</h2><div class="subtle">Link useful names; ignore noise. Nothing here changes your logs.</div></div><label class="check"><input id="show-technical" type="checkbox"> Show technical names</label></div><div id="attention-list" class="identity-list" aria-live="polite"></div></section>
+      <section id="link-mappings" class="link-view" hidden><div id="saved-rules"></div><details><summary>Automatic matches</summary><div id="automatic-list" class="identity-list"></div></details></section>
+      <section id="link-ignored" class="link-view" hidden><div class="link-view-head"><div><h2>Ignored names</h2><div class="subtle">Hidden from Needs attention. Restore one whenever it becomes useful.</div></div></div><div id="ignored-list" class="identity-list"></div></section>
     </section>
 
     <section id="setup-panel" class="panel">
@@ -212,8 +202,20 @@
     </div>
   </dialog>
 
+  <dialog id="link-dialog">
+    <form id="link-form" class="dialog-body">
+      <div class="dialog-head"><div><h2 id="link-dialog-title">Choose a note</h2><div id="link-dialog-meta" class="subtle"></div></div><button id="link-close" class="button" type="button">Close</button></div>
+      <input id="note-search" type="search" placeholder="Search note titles, aliases, or paths" aria-label="Search vault notes">
+      <div id="note-results" class="note-results"></div>
+      <div id="mapping-preview" class="mapping-preview" hidden></div>
+      <details id="mapping-advanced"><summary>Advanced mapping</summary><div class="advanced-grid"><label>Match<select id="dialog-operator"><option value="exact">This exact name</option><option value="prefix">Names beginning with this</option></select></label><label>Condition type<select id="dialog-condition-field"><option value="">No condition</option></select></label><label>Condition value<input id="dialog-condition-value" placeholder="Optional"></label><label>Condition match<select id="dialog-condition-operator"><option value="exact">Exact</option><option value="prefix">Begins with</option></select></label></div></details>
+      <div class="dialog-actions"><span id="link-dialog-status" class="status"></span><button id="link-save" class="button primary" type="submit">Save link</button></div>
+    </form>
+  </dialog>
+  <div id="link-toast" class="toast" role="status" hidden><span id="toast-text"></span><button id="toast-undo" type="button">Undo</button></div>
+
   <script>
-    const state = { instructions: "", preview: null, proposals: [], consolidations: [], linking: null, awaitingJobId: null, pollTimer: null, preferencesLoaded: false };
+    const state = { instructions: "", preview: null, proposals: [], consolidations: [], linking: null, linkDraft: null, selectedNoteId: null, toastTimer: null, awaitingJobId: null, pollTimer: null, preferencesLoaded: false };
     const queue = document.querySelector("#queue");
     const count = document.querySelector("#queue-count");
     const healthText = document.querySelector("#health-text");
@@ -304,95 +306,82 @@
     }
 
     const selectorFields = ["source", "repo", "project", "product", "app", "service", "module", "work_item", "branch"];
-
-    function fillFieldSelect(select) {
-      select.replaceChildren(...selectorFields.map((field) => {
-        const option = element("option", "", field.replace("_", " "));
-        option.value = field;
-        return option;
-      }));
-    }
-
-    function noteOptions(selected = "") {
-      return (state.linking?.catalog.notes || []).map((note) => {
-        const option = element("option", "", `${note.title} — ${note.path}`);
-        option.value = note.id;
-        option.selected = note.id === selected;
-        return option;
-      });
-    }
-
-    function renderCatalog(catalog) {
-      const root = document.querySelector("#catalog");
-      root.replaceChildren();
-      document.querySelector("#catalog-meta").textContent = catalog.configured ? `${catalog.notes.length} notes · revision ${catalog.revision}` : "Configure a vault directory to discover notes";
-      const groups = new Map();
-      catalog.notes.forEach((note) => {
-        const group = note.group || "Other";
-        if (!groups.has(group)) groups.set(group, []);
-        groups.get(group).push(note);
-      });
-      for (const [group, notes] of groups) {
-        root.append(element("div", "catalog-group", group));
-        notes.forEach((note) => {
-          const row = element("div", "catalog-note", note.title);
-          row.append(element("small", "", [note.path, note.aliases.length ? `Aliases: ${note.aliases.join(", ")}` : ""].filter(Boolean).join(" · ")));
-          root.append(row);
-        });
-      }
-    }
+    const highSignalFields = new Set(["repo", "project", "product", "app", "service", "work_item"]);
+    const fieldNames = { source: "Source", repo: "Repository", project: "Project", product: "Product", app: "Application", service: "Service", module: "Module", work_item: "Work item", branch: "Branch" };
+    const normalize = (value) => String(value || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+    const matchesSearch = (...values) => {
+      const query = document.querySelector("#link-search").value.trim().toLowerCase();
+      return !query || values.some((value) => String(value || "").toLowerCase().includes(query));
+    };
 
     function ruleLabel(rule) {
-      return rule.selectors.map((selector) => `${selector.field} ${selector.operator} "${selector.value}"`).join(" + ");
+      return rule.selectors.map((selector) => `${fieldNames[selector.field] || selector.field}: ${selector.value}${selector.operator === "prefix" ? "…" : ""}`).join(" · ");
     }
 
     function renderRules(rules) {
       const root = document.querySelector("#saved-rules");
       root.replaceChildren();
-      if (!rules.length) return;
-      root.append(element("h3", "", "Saved rules"));
-      rules.forEach((rule) => {
-        const row = element("div", "saved-rule");
-        const target = state.linking.catalog.notes.find((note) => note.id === rule.target_note_id)?.wikilink || rule.target_note_id;
-        const label = element("code", "", `${ruleLabel(rule)} → ${target}`);
-        const actions = element("div", "inline-actions");
-        const toggle = element("button", "button", rule.enabled ? "Disable" : "Enable");
-        toggle.type = "button";
-        toggle.addEventListener("click", () => updateRule(rule, { ...rule, enabled: !rule.enabled }, toggle));
-        const remove = element("button", "button danger", "Delete");
-        remove.type = "button";
-        remove.addEventListener("click", () => deleteRule(rule, remove));
-        actions.append(toggle, remove);
-        row.append(label, actions);
-        root.append(row);
+      const filtered = rules.filter((rule) => matchesSearch(ruleLabel(rule), rule.target_note_id));
+      if (!filtered.length) { root.append(element("div", "empty", rules.length ? "No mappings match your search" : "No saved mappings yet")); return; }
+      const groups = new Map();
+      filtered.forEach((rule) => { const key = rule.target_note_id; if (!groups.has(key)) groups.set(key, []); groups.get(key).push(rule); });
+      for (const [targetId, groupRules] of groups) {
+        const note = state.linking.catalog.notes.find((item) => item.id === targetId);
+        const group = element("section", "mapping-group");
+        group.append(element("h3", "", note?.title || targetId), element("div", "subtle", note?.path || "Vault note"));
+        groupRules.forEach((rule) => {
+          const row = element("div", "saved-rule");
+          const label = element("div", "", ruleLabel(rule));
+          if (!rule.enabled) label.append(element("span", "pill", " · disabled"));
+          const actions = element("div", "inline-actions");
+          const change = element("button", "button", "Change"); change.type = "button"; change.addEventListener("click", () => openLinkDialog(null, rule));
+          const toggle = element("button", "button", rule.enabled ? "Disable" : "Enable"); toggle.type = "button"; toggle.addEventListener("click", () => updateRule(rule, { ...rule, enabled: !rule.enabled }, toggle));
+          const remove = element("button", "button danger", "Remove"); remove.type = "button"; remove.addEventListener("click", () => deleteRule(rule, remove));
+          actions.append(change, toggle, remove); row.append(label, actions); group.append(row);
+        });
+        root.append(group);
+      }
+    }
+
+    function identityCard(item, actions = []) {
+      const row = element("article", "identity-card");
+      const body = element("div", ""); body.append(element("div", "identity-title", item.value), element("div", "identity-meta", `${fieldNames[item.field] || item.field} · ${item.event_count || 0} ${item.event_count === 1 ? "event" : "events"}`));
+      if (item.sample_message) { const details = document.createElement("details"); details.append(element("summary", "", "Show a sample"), element("p", "", item.sample_message)); body.append(details); }
+      const controls = element("div", "inline-actions"); actions.forEach((action) => controls.append(action)); row.append(body, controls); return row;
+    }
+
+    function renderAttention() {
+      const root = document.querySelector("#attention-list"); root.replaceChildren();
+      const ignored = new Set((state.linking?.ignored || []).map((item) => `${item.field}:${item.normalized_value}`));
+      const query = document.querySelector("#link-search").value.trim();
+      const showTechnical = document.querySelector("#show-technical").checked || query.length > 0;
+      const rows = (state.linking?.observed || []).filter((item) => (item.status === "unresolved" || item.status === "ambiguous") && !ignored.has(`${item.field}:${normalize(item.value)}`) && (showTechnical || highSignalFields.has(item.field)) && matchesSearch(item.field, fieldNames[item.field], item.value, item.sample_message));
+      document.querySelector("#attention-count").textContent = `(${rows.length})`;
+      if (!rows.length) { root.append(element("div", "empty", query ? "No names match your search" : "Everything useful is linked or ignored")); return; }
+      rows.forEach((item) => {
+        const link = element("button", "button primary", "Link"); link.type = "button"; link.addEventListener("click", () => openLinkDialog(item));
+        const actions = [link];
+        if (item.status === "unresolved") { const ignore = element("button", "button", "Ignore"); ignore.type = "button"; ignore.addEventListener("click", () => ignoreIdentity(item, ignore)); actions.push(ignore); }
+        root.append(identityCard(item, actions));
       });
     }
 
-    function renderObserved() {
-      const root = document.querySelector("#mapping-list");
-      root.replaceChildren();
-      const filter = document.querySelector("#mapping-filter").value;
-      const rows = (state.linking?.observed || []).filter((item) => filter === "all" || item.status === filter);
-      if (!rows.length) { root.append(element("div", "empty", "No identifiers in this view")); return; }
-      rows.forEach((item) => {
-        const row = element("div", "mapping-row");
-        row.append(element("span", `pill ${item.status}`, `${item.field} · ${item.event_count}`));
-        row.append(element("div", "mapping-value", item.value));
-        row.append(element("div", "mapping-sample", item.resolved_notes.join(", ") || item.sample_message));
-        const select = document.createElement("select");
-        select.setAttribute("aria-label", `Target note for ${item.value}`);
-        select.append(element("option", "", "Select note"), ...noteOptions(item.suggestions[0]?.note_id));
-        const save = element("button", "button primary", "Map");
-        save.type = "button";
-        save.disabled = !state.linking.catalog.notes.length;
-        save.addEventListener("click", async () => {
-          if (!select.value) return;
-          await createRule({ selectors: [{ field: item.field, operator: "exact", value: item.value }], target_note_id: select.value, enabled: true }, save);
-        });
-        row.append(select, save);
-        root.append(row);
-      });
+    function renderIgnored() {
+      const root = document.querySelector("#ignored-list"); root.replaceChildren();
+      const rows = (state.linking?.ignored || []).filter((item) => matchesSearch(item.field, fieldNames[item.field], item.value));
+      document.querySelector("#ignored-count").textContent = `(${state.linking?.ignored.length || 0})`;
+      if (!rows.length) { root.append(element("div", "empty", "No ignored names")); return; }
+      rows.forEach((item) => { const observed = state.linking.observed.find((entry) => entry.field === item.field && normalize(entry.value) === item.normalized_value); const restore = element("button", "button", "Restore"); restore.type = "button"; restore.addEventListener("click", () => restoreIdentity(item.id, restore)); root.append(identityCard({ ...item, event_count: observed?.event_count || 0 }, [restore])); });
     }
+
+    function renderAutomatic() {
+      const root = document.querySelector("#automatic-list"); root.replaceChildren();
+      const rows = (state.linking?.observed || []).filter((item) => item.resolution_kind === "automatic" && matchesSearch(item.field, item.value, item.resolved_notes.join(" ")));
+      if (!rows.length) { root.append(element("div", "empty", "No automatic matches")); return; }
+      rows.forEach((item) => { const card = identityCard(item); card.querySelector(".identity-meta").textContent += ` · ${item.resolved_notes.join(", ")}`; root.append(card); });
+    }
+
+    function renderLinking() { renderAttention(); renderRules(state.linking?.rules || []); renderIgnored(); renderAutomatic(); document.querySelector("#rules-count").textContent = `(${state.linking?.rules.length || 0})`; }
 
     async function loadLinking(useScan = false) {
       const status = document.querySelector("#linking-status");
@@ -402,11 +391,8 @@
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Linking request failed");
         state.linking = data;
-        document.querySelector("#linking-count").textContent = `${data.event_count} events · ${data.observed.filter((item) => item.status === "unresolved").length} unresolved identifiers`;
-        document.querySelector("#rule-target").replaceChildren(...noteOptions());
-        renderCatalog(data.catalog);
-        renderRules(data.rules);
-        renderObserved();
+        document.querySelector("#linking-count").textContent = `${data.event_count} retained events · ${data.catalog.notes.length} vault notes`;
+        renderLinking();
         status.textContent = "Current";
       } catch (error) {
         status.className = "status error";
@@ -433,11 +419,55 @@
     }
 
     async function deleteRule(rule, button) {
-      if (!confirm(`Delete mapping ${ruleLabel(rule)}?`)) return;
+      if (!confirm(`Remove mapping ${ruleLabel(rule)}? Logs and notes will not be deleted.`)) return;
       button.disabled = true;
       const response = await fetch(`/api/linking/rules/${encodeURIComponent(rule.id)}`, { method: "DELETE" });
       if (!response.ok) document.querySelector("#linking-status").textContent = (await response.json()).error || "Mapping delete failed";
       await loadLinking();
+    }
+
+    async function ignoreIdentity(item, button) {
+      button.disabled = true;
+      const response = await fetch("/api/linking/ignored", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ field: item.field, value: item.value }) });
+      const data = await response.json();
+      if (!response.ok) { document.querySelector("#linking-status").textContent = data.error || "Ignore failed"; button.disabled = false; return; }
+      await loadLinking(); showUndo(`Ignored ${item.value}`, data.id);
+    }
+
+    async function restoreIdentity(id, button) {
+      if (button) button.disabled = true;
+      const response = await fetch(`/api/linking/ignored/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!response.ok && response.status !== 404) document.querySelector("#linking-status").textContent = (await response.json()).error || "Restore failed";
+      await loadLinking();
+    }
+
+    function showUndo(message, id) {
+      clearTimeout(state.toastTimer); const toast = document.querySelector("#link-toast"); document.querySelector("#toast-text").textContent = message; toast.hidden = false;
+      document.querySelector("#toast-undo").onclick = async () => { await restoreIdentity(id); toast.hidden = true; };
+      state.toastTimer = setTimeout(() => { toast.hidden = true; }, 7000);
+    }
+
+    function renderNoteResults() {
+      const root = document.querySelector("#note-results"); root.replaceChildren(); const query = document.querySelector("#note-search").value.trim().toLowerCase();
+      const notes = (state.linking?.catalog.notes || []).filter((note) => !query || [note.title, note.path, ...note.aliases].some((value) => value.toLowerCase().includes(query))).slice(0, 100);
+      if (!notes.length) { root.append(element("div", "empty", "No notes match")); return; }
+      notes.forEach((note) => { const button = element("button", `note-result${note.id === state.selectedNoteId ? " selected" : ""}`, note.title); button.type = "button"; button.append(element("small", "", note.path)); button.addEventListener("click", () => { state.selectedNoteId = note.id; renderNoteResults(); renderMappingPreview(); }); root.append(button); });
+    }
+
+    function renderMappingPreview() {
+      const preview = document.querySelector("#mapping-preview"); const note = state.linking?.catalog.notes.find((item) => item.id === state.selectedNoteId);
+      preview.hidden = !state.linkDraft || !note; if (state.linkDraft && note) preview.textContent = `${state.linkDraft.item.value} → ${note.wikilink}`;
+    }
+
+    function openLinkDialog(item = null, rule = null) {
+      state.linkDraft = item ? { item, rule: null } : rule ? { item: { field: rule.selectors[0].field, value: rule.selectors[0].value }, rule } : null;
+      state.selectedNoteId = rule?.target_note_id || item?.suggestions?.[0]?.note_id || null;
+      document.querySelector("#link-dialog-title").textContent = state.linkDraft ? (rule ? "Change link" : "Choose a note") : "Vault notes";
+      document.querySelector("#link-dialog-meta").textContent = state.linkDraft ? `${fieldNames[state.linkDraft.item.field]}: ${state.linkDraft.item.value}` : `${state.linking.catalog.notes.length} discovered notes`;
+      document.querySelector("#link-save").hidden = !state.linkDraft; document.querySelector("#mapping-advanced").hidden = !state.linkDraft;
+      document.querySelector("#dialog-operator").value = rule?.selectors[0]?.operator || "exact";
+      const condition = rule?.selectors[1]; document.querySelector("#dialog-condition-field").value = condition?.field || ""; document.querySelector("#dialog-condition-value").value = condition?.value || ""; document.querySelector("#dialog-condition-operator").value = condition?.operator || "exact";
+      document.querySelector("#note-search").value = ""; renderNoteResults(); renderMappingPreview(); document.querySelector("#link-dialog").showModal(); setTimeout(() => document.querySelector("#note-search").focus(), 0);
     }
 
     function selectedDay() {
@@ -690,26 +720,26 @@
       }
     });
 
-    fillFieldSelect(document.querySelector("#rule-field"));
-    fillFieldSelect(document.querySelector("#condition-field"));
+    document.querySelector("#dialog-condition-field").append(...selectorFields.map((field) => { const option = element("option", "", fieldNames[field]); option.value = field; return option; }));
     document.querySelector("#scan-vault").addEventListener("click", () => loadLinking(true));
-    document.querySelector("#mapping-filter").addEventListener("change", renderObserved);
-    document.querySelector("#add-condition").addEventListener("click", () => {
-      document.querySelector("#condition-row").hidden = false;
-      document.querySelector("#add-condition").hidden = true;
-    });
-    document.querySelector("#remove-condition").addEventListener("click", () => {
-      document.querySelector("#condition-row").hidden = true;
-      document.querySelector("#condition-value").value = "";
-      document.querySelector("#add-condition").hidden = false;
-    });
-    document.querySelector("#rule-form").addEventListener("submit", async (event) => {
+    document.querySelector("#browse-vault").addEventListener("click", () => openLinkDialog());
+    document.querySelector("#link-close").addEventListener("click", () => document.querySelector("#link-dialog").close());
+    document.querySelector("#note-search").addEventListener("input", renderNoteResults);
+    document.querySelector("#link-search").addEventListener("input", renderLinking);
+    document.querySelector("#show-technical").addEventListener("change", renderAttention);
+    document.querySelectorAll(".link-tab").forEach((tab) => tab.addEventListener("click", () => {
+      document.querySelectorAll(".link-tab").forEach((item) => item.setAttribute("aria-selected", String(item === tab)));
+      document.querySelectorAll(".link-view").forEach((view) => { view.hidden = view.id !== `link-${tab.dataset.linkView}`; });
+    }));
+    document.querySelector("#link-form").addEventListener("submit", async (event) => {
       event.preventDefault();
-      const selectors = [{ field: document.querySelector("#rule-field").value, operator: document.querySelector("#rule-operator").value, value: document.querySelector("#rule-value").value.trim() }];
-      const conditionValue = document.querySelector("#condition-value").value.trim();
-      if (!document.querySelector("#condition-row").hidden && conditionValue) selectors.push({ field: document.querySelector("#condition-field").value, operator: document.querySelector("#condition-operator").value, value: conditionValue });
-      await createRule({ selectors, target_note_id: document.querySelector("#rule-target").value, enabled: true }, event.submitter);
-      event.currentTarget.reset();
+      if (!state.linkDraft || !state.selectedNoteId) { document.querySelector("#link-dialog-status").textContent = "Choose a note"; return; }
+      const selectors = [{ field: state.linkDraft.item.field, operator: document.querySelector("#dialog-operator").value, value: state.linkDraft.item.value }];
+      const conditionField = document.querySelector("#dialog-condition-field").value; const conditionValue = document.querySelector("#dialog-condition-value").value.trim();
+      if (conditionField && conditionValue) selectors.push({ field: conditionField, operator: document.querySelector("#dialog-condition-operator").value, value: conditionValue });
+      const rule = { selectors, target_note_id: state.selectedNoteId, enabled: state.linkDraft.rule?.enabled ?? true };
+      if (state.linkDraft.rule) await updateRule(state.linkDraft.rule, rule, event.submitter); else await createRule(rule, event.submitter);
+      document.querySelector("#link-dialog").close();
     });
     document.querySelector("#refresh").addEventListener("click", load);
     const today = new Date();

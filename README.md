@@ -184,7 +184,7 @@ LOG_INBOX_VAULT_DIR=/vault
 LOG_INBOX_VAULT_EXCLUDE_PREFIXES=00 Inbox,01 Work Log,.obsidian
 ```
 
-Open the **Linking** tab to compare retained event identifiers with Markdown filenames and YAML aliases. Mappings are stored in SQLite and may match `source`, `repo`, `project`, `product`, `app`, `service`, `module`, `work_item`, or `branch`. A mapping can include a second exact or prefix condition for feature-specific routing. Folder names and product terminology come only from the mounted vault; the service does not prescribe a taxonomy.
+Open the **Linking** tab to review useful unresolved names, browse saved mappings by destination note, and restore names you previously ignored. Technical identifiers stay hidden until requested, while the shared search still finds them. Choosing **Ignore** only removes a name from the attention list; it never deletes logs or vault content. Mappings are stored in SQLite and may match `source`, `repo`, `project`, `product`, `app`, `service`, `module`, `work_item`, or `branch`. A mapping can include a second exact or prefix condition for feature-specific routing. Folder names and product terminology come only from the mounted vault; the service does not prescribe a taxonomy.
 
 On Linux, pre-create the proposal and daily-note host directories, then set `LOG_INBOX_HOST_UID` and `LOG_INBOX_HOST_GID` to their owner (usually the output of `id -u` and `id -g`). The defaults are `1000:1000`. Pre-creation matters because Docker-created bind directories may be owned by `root` or `nobody`. The MCP service uses the host user namespace so files retain the configured ownership while the process itself remains unprivileged.
 
