@@ -109,10 +109,27 @@
     .recent-notes { margin: 12px 0; }
     .recent-notes .button { margin: 5px 5px 0 0; font-weight: 600; }
     .manual-more { border-top: 1px solid var(--line); padding-top: 3px; }
-    .vault-browser { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 18px; min-height: 420px; }
-    .vault-folders { border-right: 1px solid var(--line); padding-right: 14px; }
-    .vault-folder { display: block; width: 100%; border: 0; background: transparent; text-align: left; padding: 7px 8px; border-radius: 4px; }
+    .vault-browser { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 18px; min-height: 420px; margin-top: 12px; }
+    .vault-browser.searching { grid-template-columns: 1fr; }
+    .vault-folders { border-right: 1px solid var(--line); padding: 2px 14px 2px 0; overflow: auto; }
+    .vault-folders[hidden] { display: none; }
+    .vault-tree, .vault-tree-group { list-style: none; margin: 0; padding: 0; }
+    .vault-tree-group { position: relative; margin-left: 17px; padding-left: 9px; }
+    .vault-tree-group::before { content: ""; position: absolute; left: 2px; top: 0; bottom: 8px; border-left: 1px solid #cbd4cf; }
+    .vault-tree-item { position: relative; }
+    .vault-tree-group > .vault-tree-item::before { content: ""; position: absolute; left: -7px; top: 17px; width: 7px; border-top: 1px solid #cbd4cf; }
+    .vault-folder { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 34px; border: 0; background: transparent; color: var(--ink); text-align: left; padding: 5px 7px; border-radius: 4px; }
+    .vault-folder:hover { background: #edf1ef; }
+    .vault-folder:focus-visible { outline: 2px solid #72b896; outline-offset: -2px; }
     .vault-folder.selected { background: var(--active); color: var(--accent); font-weight: 700; }
+    .vault-chevron { width: 13px; flex: 0 0 13px; color: var(--muted); font-size: 11px; text-align: center; }
+    .vault-chevron.empty { visibility: hidden; }
+    .vault-folder-icon { position: relative; width: 15px; height: 11px; flex: 0 0 15px; border-radius: 2px; background: #c88a2e; }
+    .vault-folder-icon::before { content: ""; position: absolute; left: 1px; top: -3px; width: 7px; height: 4px; border-radius: 2px 2px 0 0; background: #c88a2e; }
+    .vault-folder-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .vault-note-pane { min-width: 0; }
+    .vault-breadcrumb { min-height: 30px; margin-bottom: 8px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+    .vault-breadcrumb strong { color: var(--ink); }
     .vault-note-list { display: grid; align-content: start; gap: 6px; }
     .vault-note-row { padding: 9px 10px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); text-align: left; }
     .vault-note-row small { display: block; color: var(--muted); margin-top: 3px; }
@@ -136,7 +153,7 @@
       .settings { grid-template-columns: 1fr; }
       .identity-card, .advanced-grid { grid-template-columns: 1fr; }
       .vault-browser { grid-template-columns: 1fr; }
-      .vault-folders { border-right: 0; border-bottom: 1px solid var(--line); padding: 0 0 10px; }
+      .vault-folders { max-height: 250px; border-right: 0; border-bottom: 1px solid var(--line); padding: 0 0 10px; }
       .proposal-head { grid-template-columns: 1fr; }
       .proposal-head .button { justify-self: start; }
       .section-head { align-items: flex-start; }
@@ -225,7 +242,7 @@
     <div class="dialog-body">
       <div class="dialog-head"><div><h2>Browse vault</h2><div id="vault-dialog-meta" class="subtle"></div></div><button id="vault-close" class="button" type="button">Close</button></div>
       <input id="vault-search" type="search" placeholder="Search note titles, aliases, or paths" aria-label="Search vault notes">
-      <div class="vault-browser"><nav id="vault-folders" class="vault-folders" aria-label="Vault folders"></nav><div id="vault-notes" class="vault-note-list"></div></div>
+      <div id="vault-browser" class="vault-browser"><nav id="vault-folders" class="vault-folders" aria-label="Vault folders"></nav><section class="vault-note-pane" aria-label="Notes in selected folder"><div id="vault-breadcrumb" class="vault-breadcrumb"></div><div id="vault-notes" class="vault-note-list"></div></section></div>
       <div class="vault-setup-actions"><button id="vault-connect" class="button primary" type="button">Choose vault folder</button><button id="vault-rescan" class="button" type="button">Rescan</button><button id="vault-starter" class="button" type="button">Add developer starter</button><button id="vault-template" class="button" type="button">Add template folder</button><button id="vault-undo" class="button" type="button">Undo last setup</button><label>Daily notes folder<select id="vault-daily-folder"></select></label><button id="vault-disconnect" class="button danger" type="button">Use mounted vault</button><span id="vault-action-status" class="status" aria-live="polite"></span></div>
     </div>
   </dialog>
@@ -253,7 +270,7 @@
   <div id="link-toast" class="toast" role="status" hidden><span id="toast-text"></span><button id="toast-undo" type="button">Undo</button></div>
 
   <script>
-    const state = { instructions: "", preview: null, proposals: [], consolidations: [], linking: null, linkDraft: null, selectedNoteId: null, manualOptions: null, manualNoteIds: [], vaultHandle: null, vaultConnection: null, vaultFolder: "", vaultFolders: [], toastTimer: null, awaitingJobId: null, pollTimer: null, preferencesLoaded: false };
+    const state = { instructions: "", preview: null, proposals: [], consolidations: [], linking: null, linkDraft: null, selectedNoteId: null, manualOptions: null, manualNoteIds: [], vaultHandle: null, vaultConnection: null, vaultFolder: "", vaultFolders: [], vaultExpanded: new Set([""]), vaultTreeFocus: "", toastTimer: null, awaitingJobId: null, pollTimer: null, preferencesLoaded: false };
     const queue = document.querySelector("#queue");
     const count = document.querySelector("#queue-count");
     const healthText = document.querySelector("#health-text");
@@ -420,16 +437,86 @@
       renderVaultStatus();
     }
 
+    function vaultFolderPaths(notes) {
+      const paths = new Set([""]);
+      [...state.vaultFolders, ...notes.map((note) => note.path.includes("/") ? note.path.slice(0, note.path.lastIndexOf("/")) : "")].forEach((path) => {
+        let parent = "";
+        path.split("/").filter(Boolean).forEach((part) => { parent = parent ? `${parent}/${part}` : part; paths.add(parent); });
+      });
+      return [...paths].sort((left, right) => left.localeCompare(right));
+    }
+
+    function vaultTree(folders) {
+      const root = { name: "Vault root", path: "", children: [] }; const nodes = new Map([["", root]]);
+      folders.filter(Boolean).forEach((path) => {
+        const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+        const node = { name: path.slice(path.lastIndexOf("/") + 1), path, children: [] };
+        nodes.set(path, node); nodes.get(parentPath).children.push(node);
+      });
+      nodes.forEach((node) => node.children.sort((left, right) => left.name.localeCompare(right.name)));
+      return root;
+    }
+
+    function expandVaultAncestors(path) {
+      if (!path) return;
+      let parent = ""; state.vaultExpanded.add("");
+      path.split("/").filter(Boolean).slice(0, -1).forEach((part) => { parent = parent ? `${parent}/${part}` : part; state.vaultExpanded.add(parent); });
+    }
+
+    function focusVaultTree(path) {
+      const target = [...document.querySelectorAll("#vault-folders [role=treeitem]")].find((item) => item.dataset.path === path);
+      if (target) target.focus();
+    }
+
+    function handleVaultTreeKey(event, node) {
+      const items = [...document.querySelectorAll("#vault-folders [role=treeitem]")]; const index = items.indexOf(event.currentTarget);
+      let focusPath = null;
+      if (event.key === "ArrowDown" && index < items.length - 1) focusPath = items[index + 1].dataset.path;
+      else if (event.key === "ArrowUp" && index > 0) focusPath = items[index - 1].dataset.path;
+      else if (event.key === "Home") focusPath = items[0]?.dataset.path;
+      else if (event.key === "End") focusPath = items.at(-1)?.dataset.path;
+      else if (event.key === "ArrowRight" && node.children.length) {
+        if (!state.vaultExpanded.has(node.path)) { state.vaultExpanded.add(node.path); renderVaultBrowser(); focusPath = node.path; }
+        else focusPath = node.children[0].path;
+      } else if (event.key === "ArrowLeft") {
+        if (node.children.length && state.vaultExpanded.has(node.path)) { state.vaultExpanded.delete(node.path); renderVaultBrowser(); focusPath = node.path; }
+        else focusPath = node.path.includes("/") ? node.path.slice(0, node.path.lastIndexOf("/")) : node.path ? "" : null;
+      } else if (event.key === "Enter" || event.key === " ") {
+        state.vaultFolder = node.path; state.vaultTreeFocus = node.path; renderVaultBrowser(); focusPath = node.path;
+      }
+      if (focusPath !== null && focusPath !== undefined) { event.preventDefault(); state.vaultTreeFocus = focusPath; focusVaultTree(focusPath); }
+    }
+
+    function renderVaultTreeNode(node, level = 1) {
+      const item = element("li", "vault-tree-item"); item.setAttribute("role", "none");
+      const button = element("button", `vault-folder${node.path === state.vaultFolder ? " selected" : ""}`); button.type = "button"; button.setAttribute("role", "treeitem"); button.setAttribute("aria-level", String(level)); button.setAttribute("aria-selected", String(node.path === state.vaultFolder)); button.dataset.path = node.path; button.tabIndex = node.path === state.vaultTreeFocus ? 0 : -1;
+      if (node.children.length) button.setAttribute("aria-expanded", String(state.vaultExpanded.has(node.path)));
+      const chevron = element("span", `vault-chevron${node.children.length ? "" : " empty"}`, state.vaultExpanded.has(node.path) ? "▼" : "▶"); chevron.setAttribute("aria-hidden", "true");
+      const icon = element("span", "vault-folder-icon"); icon.setAttribute("aria-hidden", "true");
+      button.append(chevron, icon, element("span", "vault-folder-name", node.name));
+      button.addEventListener("click", (event) => {
+        state.vaultTreeFocus = node.path;
+        if (node.children.length && event.target.closest(".vault-chevron")) state.vaultExpanded.has(node.path) ? state.vaultExpanded.delete(node.path) : state.vaultExpanded.add(node.path);
+        else { state.vaultFolder = node.path; expandVaultAncestors(node.path); }
+        renderVaultBrowser(); focusVaultTree(node.path);
+      });
+      button.addEventListener("focus", () => { state.vaultTreeFocus = node.path; }); button.addEventListener("keydown", (event) => handleVaultTreeKey(event, node)); item.append(button);
+      if (node.children.length && state.vaultExpanded.has(node.path)) { const group = element("ul", "vault-tree-group"); group.setAttribute("role", "group"); node.children.forEach((child) => group.append(renderVaultTreeNode(child, level + 1))); item.append(group); }
+      return item;
+    }
+
     function renderVaultBrowser() {
-      const notes = state.linking?.catalog.notes || []; const query = document.querySelector("#vault-search").value.trim().toLowerCase();
-      const folders = [...new Set(["", ...state.vaultFolders, ...notes.map((note) => note.path.includes("/") ? note.path.slice(0, note.path.lastIndexOf("/")) : "")])].sort();
-      if (!folders.includes(state.vaultFolder)) state.vaultFolder = "";
-      const folderRoot = document.querySelector("#vault-folders"); folderRoot.replaceChildren();
-      folders.forEach((folder) => { const button = element("button", `vault-folder${folder === state.vaultFolder ? " selected" : ""}`, folder || "Vault root"); button.type = "button"; button.style.paddingLeft = `${8 + folder.split("/").filter(Boolean).length * 12}px`; button.addEventListener("click", () => { state.vaultFolder = folder; renderVaultBrowser(); }); folderRoot.append(button); });
+      const notes = state.linking?.catalog.notes || []; const query = document.querySelector("#vault-search").value.trim().toLowerCase(); const folders = vaultFolderPaths(notes);
+      if (!folders.includes(state.vaultFolder)) state.vaultFolder = ""; expandVaultAncestors(state.vaultFolder);
+      const browser = document.querySelector("#vault-browser"); const folderRoot = document.querySelector("#vault-folders"); browser.classList.toggle("searching", Boolean(query)); folderRoot.hidden = Boolean(query); folderRoot.replaceChildren();
+      const tree = element("ul", "vault-tree"); tree.setAttribute("role", "tree"); tree.setAttribute("aria-label", "Vault folders"); tree.append(renderVaultTreeNode(vaultTree(folders))); folderRoot.append(tree);
       const root = document.querySelector("#vault-notes"); root.replaceChildren();
-      const visible = notes.filter((note) => (query ? [note.title, note.path, ...note.aliases].some((value) => value.toLowerCase().includes(query)) : (note.path.includes("/") ? note.path.slice(0, note.path.lastIndexOf("/")) : "") === state.vaultFolder));
-      if (!visible.length) { root.append(element("div", "empty", query ? "No notes match" : "No notes in this folder")); }
-      visible.forEach((note) => { const row = element("div", "vault-note-row", note.title); row.append(element("small", "", note.path)); root.append(row); });
+      const visible = notes.filter((note) => query ? [note.title, note.path, ...note.aliases].some((value) => value.toLowerCase().includes(query)) : (note.path.includes("/") ? note.path.slice(0, note.path.lastIndexOf("/")) : "") === state.vaultFolder);
+      const breadcrumb = document.querySelector("#vault-breadcrumb"); breadcrumb.replaceChildren();
+      if (query) breadcrumb.append(element("strong", "", `${visible.length} search result${visible.length === 1 ? "" : "s"}`), document.createTextNode(` for “${document.querySelector("#vault-search").value.trim()}”`));
+      else breadcrumb.append(element("span", "", state.vaultFolder ? `Vault root / ${state.vaultFolder.split("/").join(" / ")}` : "Vault root"));
+      if (!visible.length) root.append(element("div", "empty", query ? "No notes match" : "No notes in this folder"));
+      visible.forEach((note) => { const row = element("div", "vault-note-row", note.title); row.append(element("small", "", query ? (note.path.includes("/") ? note.path.slice(0, note.path.lastIndexOf("/")) : "Vault root") : note.path)); root.append(row); });
       document.querySelector("#vault-dialog-meta").textContent = state.vaultConnection ? `${state.vaultConnection.name || "Vault"} · ${notes.length} notes` : "Choose an existing or empty folder";
       const browserMode = state.vaultConnection?.mode === "browser"; document.querySelector("#vault-rescan").disabled = !browserMode; document.querySelector("#vault-starter").disabled = !browserMode; document.querySelector("#vault-template").disabled = !browserMode; document.querySelector("#vault-undo").hidden = !browserMode || !localStorage.getItem("log-inbox-last-setup"); document.querySelector("#vault-disconnect").hidden = !browserMode;
       const daily = document.querySelector("#vault-daily-folder"); const savedDaily = localStorage.getItem("log-inbox-daily-folder") || ""; daily.replaceChildren(...folders.map((folder) => { const option = element("option", "", folder || "Vault root"); option.value = folder; option.selected = folder === savedDaily; return option; }));
