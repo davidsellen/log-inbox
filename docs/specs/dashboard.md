@@ -46,6 +46,9 @@ The MCP service exposes a small local interface for reviewing Markdown proposals
 - Compare all retained event identifiers with the catalog, including scalar and array metadata.
 - Persist user-approved exact or prefix rules in SQLite; optional conditions make a rule specific to a branch, work item, module, or other supported field.
 - Treat model output as a suggestion only. The resolver accepts only notes present in the current catalog.
+- Browser mode uses an explicitly selected local directory, persists its handle only in browser storage, and synchronizes a derived catalog for background consolidation.
+- **Browse vault** presents the discovered folder tree and can add a developer starter or a selected Markdown template folder. Setup is additive; existing files are never intentionally opened for writing.
+- Browser-mode proposal application prepares content server-side, verifies the source and result hashes in the browser, and acknowledges evidence only after the write is verified.
 
 ## HTTP API
 
@@ -56,6 +59,8 @@ The MCP service exposes a small local interface for reviewing Markdown proposals
 - `POST /api/linking/scan` refreshes the read-only catalog view.
 - `POST`, `PUT`, and `DELETE /api/linking/rules` manage persisted mappings.
 - `PUT /api/linking/ignored` hides an unresolved identifier; `DELETE /api/linking/ignored/{id}` restores it. Ignoring is reversible and never deletes events or vault notes.
+- `GET /api/vault/connection` reports browser, mounted, or unconfigured mode; `PUT` and `DELETE /api/vault/browser/catalog` synchronize or disconnect a browser-selected vault.
+- `POST /api/proposals/{id}/browser-apply/prepare` renders an idempotent daily-note result; `POST /api/proposals/{id}/browser-apply/acknowledge` consumes it after browser verification.
 - `POST /api/consolidations/daily` idempotently queues a durable daily consolidation job.
 - `GET /api/consolidations/{job_id}` returns authoritative durable job state.
 - `POST /api/consolidations/{job_id}/cancel` requests cancellation of pending or running work.

@@ -162,6 +162,57 @@ impl ProposalInbox {
         })
     }
 
+    pub fn prepare_browser_apply(
+        &self,
+        proposal_id: &str,
+        current: &str,
+    ) -> Result<BrowserApplyPlan, String> {
+        validate_proposal_id(proposal_id)?;
+        let proposal_path = self.find_proposal(proposal_id)?;
+        let contents = fs::read_to_string(&proposal_path)
+            .map_err(|error| format!("reading proposal {}: {error}", proposal_path.display()))?;
+        let proposal = parse_proposal(&contents)?;
+        if proposal.frontmatter.proposal_id != proposal_id {
+            return Err("proposal ID does not match its frontmatter".to_owned());
+        }
+        validate_note_name(&proposal.frontmatter.target_note)?;
+        let marker = proposal
+            .frontmatter
+            .consolidation_job_id
+            .as_deref()
+            .map_or_else(
+                || format!("<!-- log-inbox:{proposal_id} -->"),
+                |job_id| {
+                    format!("<!-- log-inbox:consolidation:{job_id} proposal:{proposal_id} -->")
+                },
+            );
+        let updated = if current.contains(&marker) {
+            current.to_owned()
+        } else {
+            let replacement_prefix = proposal
+                .frontmatter
+                .consolidation_job_id
+                .as_deref()
+                .map(|job_id| format!("<!-- log-inbox:consolidation:{job_id} proposal:"));
+            replacement_prefix
+                .as_deref()
+                .and_then(|prefix| replace_generated_section(current, &proposal, &marker, prefix))
+                .unwrap_or_else(|| render_daily_note(current, &proposal, &marker))
+        };
+        let updated_revision = content_revision(&updated);
+        Ok(BrowserApplyPlan {
+            proposal_id: proposal_id.to_owned(),
+            target_note: proposal.frontmatter.target_note,
+            current_revision: content_revision(current),
+            updated_revision: updated_revision.clone(),
+            updated_content: updated,
+            acknowledgement_token: format!(
+                "{proposal_id}:{}:{updated_revision}",
+                content_revision(&proposal.markdown)
+            ),
+        })
+    }
+
     pub fn discard(&self, proposal_id: &str) -> Result<(), String> {
         validate_proposal_id(proposal_id)?;
         let proposal_path = self.find_proposal(proposal_id)?;
@@ -235,6 +286,16 @@ pub struct AppliedProposal {
     pub supersedes_proposal_ids: Vec<String>,
     pub proposal_removed: bool,
     pub status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BrowserApplyPlan {
+    pub proposal_id: String,
+    pub target_note: String,
+    pub current_revision: String,
+    pub updated_revision: String,
+    pub updated_content: String,
+    pub acknowledgement_token: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -317,7 +378,7 @@ fn pending_proposal(path: PathBuf) -> Result<PendingProposal, String> {
     })
 }
 
-fn content_revision(markdown: &str) -> String {
+pub(crate) fn content_revision(markdown: &str) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in markdown.as_bytes() {
         hash ^= u64::from(*byte);
@@ -593,6 +654,38 @@ mod tests {
                     .starts_with('.'))
         );
 
+        fs::remove_dir_all(directory).expect("test directory is removable");
+    }
+
+    #[test]
+    fn prepares_idempotent_browser_apply_without_touching_the_daily_note() {
+        let directory = std::env::temp_dir().join(format!(
+            "log-inbox-browser-apply-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let inbox = ProposalInbox {
+            pending_dir: directory.clone(),
+        };
+        let staged = inbox.stage(&proposal()).expect("proposal stages");
+
+        let plan = inbox
+            .prepare_browser_apply(&staged.proposal_id, "# Existing note\n")
+            .expect("browser apply prepares");
+        assert_eq!(plan.target_note, "Configured daily note");
+        assert!(plan.updated_content.contains("# Existing note"));
+        assert!(
+            plan.updated_content
+                .contains("Consolidated a bounded log window")
+        );
+        assert_eq!(
+            content_revision(&plan.updated_content),
+            plan.updated_revision
+        );
+
+        let retry = inbox
+            .prepare_browser_apply(&staged.proposal_id, &plan.updated_content)
+            .expect("browser apply retry prepares");
+        assert_eq!(retry.updated_content, plan.updated_content);
         fs::remove_dir_all(directory).expect("test directory is removable");
     }
 

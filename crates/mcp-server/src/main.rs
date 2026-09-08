@@ -186,6 +186,29 @@ struct ManualLogOptions {
     recent_note_ids: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct BrowserVaultFile {
+    path: String,
+    contents: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserVaultSyncInput {
+    name: String,
+    files: Vec<BrowserVaultFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserApplyInput {
+    current_content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserApplyAcknowledgement {
+    acknowledgement_token: String,
+    verified_revision: String,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -200,6 +223,14 @@ async fn main() -> anyhow::Result<()> {
     daily_consolidation::migrate_prompt_preference(&store)?;
     store.recover_daily_consolidations()?;
     let vault_context = vault_context::VaultContextProvider::from_env();
+    if let Some(saved) = store.get_preferences()?.get("browser_vault_catalog") {
+        match serde_json::from_str(saved) {
+            Ok(catalog) => vault_context
+                .set_browser_catalog(Some(catalog))
+                .map_err(anyhow::Error::msg)?,
+            Err(error) => tracing::warn!(%error, "ignoring invalid saved browser vault catalog"),
+        }
+    }
     let state = AppState {
         store,
         llm_config: llm::LlmConfig::from_env(),
@@ -240,6 +271,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/dashboard", get(dashboard_data))
         .route("/api/logs/manual/options", get(manual_log_options))
         .route("/api/logs/manual", post(create_manual_log))
+        .route("/api/vault/connection", get(vault_connection))
+        .route(
+            "/api/vault/browser/catalog",
+            put(sync_browser_vault).delete(disconnect_browser_vault),
+        )
         .route("/api/preferences", put(save_preferences))
         .route("/api/linking", get(linking_data))
         .route("/api/linking/scan", post(linking_data))
@@ -260,6 +296,14 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/proposals/{proposal_id}/apply",
             post(apply_dashboard_proposal),
+        )
+        .route(
+            "/api/proposals/{proposal_id}/browser-apply/prepare",
+            post(prepare_browser_apply),
+        )
+        .route(
+            "/api/proposals/{proposal_id}/browser-apply/acknowledge",
+            post(acknowledge_browser_apply),
         )
         .route(
             "/api/proposals/{proposal_id}/discard",
@@ -418,6 +462,93 @@ async fn manual_log_options(
         notes: catalog.notes,
         recent_note_ids,
     }))
+}
+
+async fn vault_connection(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let browser = state
+        .vault_context
+        .browser_catalog()
+        .map_err(ApiError::internal)?;
+    let catalog = state.vault_context.catalog().map_err(ApiError::internal)?;
+    Ok(Json(json!({
+        "mode": if browser.is_some() { "browser" } else if catalog.configured { "mounted" } else { "unconfigured" },
+        "name": catalog.root,
+        "revision": catalog.revision,
+        "note_count": catalog.notes.len(),
+    })))
+}
+
+async fn sync_browser_vault(
+    State(state): State<AppState>,
+    Json(input): Json<BrowserVaultSyncInput>,
+) -> Result<Json<vault_context::VaultCatalog>, ApiError> {
+    if input.name.trim().is_empty() || input.name.len() > 200 {
+        return Err(ApiError::bad_request(
+            "vault name must contain 1 to 200 bytes",
+        ));
+    }
+    if input.files.len() > 500 {
+        return Err(ApiError::bad_request(
+            "vault scan is limited to 500 Markdown files",
+        ));
+    }
+    let mut files = Vec::with_capacity(input.files.len());
+    let mut seen_paths = HashSet::new();
+    for file in input.files {
+        let path = PathBuf::from(file.path.trim());
+        if path.as_os_str().is_empty()
+            || path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(ApiError::bad_request(
+                "vault file path must remain relative",
+            ));
+        }
+        if file.contents.len() > 1024 * 1024 {
+            return Err(ApiError::bad_request(format!(
+                "vault note is larger than 1 MiB: {}",
+                path.display()
+            )));
+        }
+        let normalized_path = path.to_string_lossy().replace('\\', "/");
+        if !seen_paths.insert(normalized_path.to_ascii_lowercase()) {
+            return Err(ApiError::conflict(format!(
+                "vault scan contains a duplicate or case-colliding path: {normalized_path}"
+            )));
+        }
+        files.push((normalized_path, file.contents));
+    }
+    let catalog = state
+        .vault_context
+        .catalog_from_browser_files(input.name.trim(), &files)
+        .map_err(ApiError::bad_request)?;
+    state
+        .store
+        .set_preferences(&BTreeMap::from([(
+            "browser_vault_catalog".to_owned(),
+            serde_json::to_string(&catalog)
+                .map_err(|error| ApiError::internal(error.to_string()))?,
+        )]))
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    state
+        .vault_context
+        .set_browser_catalog(Some(catalog.clone()))
+        .map_err(ApiError::internal)?;
+    Ok(Json(catalog))
+}
+
+async fn disconnect_browser_vault(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+    state
+        .store
+        .delete_preference("browser_vault_catalog")
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    state
+        .vault_context
+        .set_browser_catalog(None)
+        .map_err(ApiError::internal)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create_manual_log(
@@ -748,6 +879,90 @@ async fn apply_dashboard_proposal(
 ) -> Result<Json<Value>, ApiError> {
     let applied = apply_proposal(&state, &proposal_id).map_err(ApiError::bad_request)?;
     Ok(Json(json!(applied)))
+}
+
+async fn prepare_browser_apply(
+    State(state): State<AppState>,
+    AxumPath(proposal_id): AxumPath<String>,
+    Json(input): Json<BrowserApplyInput>,
+) -> Result<Json<proposal_inbox::BrowserApplyPlan>, ApiError> {
+    if input.current_content.len() > 2 * 1024 * 1024 {
+        return Err(ApiError::bad_request(
+            "daily note exceeds the 2 MiB browser apply limit",
+        ));
+    }
+    let inbox = state.proposal_inbox.as_ref().ok_or_else(|| {
+        ApiError::bad_request("proposal inbox is not configured; set LOG_INBOX_PROPOSAL_DIR")
+    })?;
+    inbox
+        .prepare_browser_apply(&proposal_id, &input.current_content)
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
+async fn acknowledge_browser_apply(
+    State(state): State<AppState>,
+    AxumPath(proposal_id): AxumPath<String>,
+    Json(input): Json<BrowserApplyAcknowledgement>,
+) -> Result<Json<Value>, ApiError> {
+    let _guard = state
+        .apply_lock
+        .lock()
+        .map_err(|_| ApiError::internal("proposal operation lock is poisoned"))?;
+    let inbox = state.proposal_inbox.as_ref().ok_or_else(|| {
+        ApiError::bad_request("proposal inbox is not configured; set LOG_INBOX_PROPOSAL_DIR")
+    })?;
+    let selected = inbox.get(&proposal_id).map_err(ApiError::bad_request)?;
+    let expected_token = format!(
+        "{proposal_id}:{}:{}",
+        selected.revision, input.verified_revision
+    );
+    if input.acknowledgement_token != expected_token {
+        return Err(ApiError::conflict(
+            "proposal or browser write changed since the result was prepared",
+        ));
+    }
+    let selected_event_ids = selected
+        .evidence_event_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut covered = selected
+        .supersedes_proposal_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for proposal in inbox.list().map_err(ApiError::internal)? {
+        if proposal.proposal_id != proposal_id
+            && proposal.target_note == selected.target_note
+            && !proposal.evidence_event_ids.is_empty()
+            && proposal
+                .evidence_event_ids
+                .iter()
+                .all(|event_id| selected_event_ids.contains(event_id.as_str()))
+        {
+            covered.insert(proposal.proposal_id);
+        }
+    }
+    state
+        .store
+        .mark_reviewed(
+            &selected.evidence_event_ids,
+            &format!("browser-vault/{}.md", selected.target_note),
+            "proposal-browser-apply",
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    for superseded_id in &covered {
+        if superseded_id != &proposal_id {
+            inbox
+                .discard_if_present(superseded_id)
+                .map_err(ApiError::internal)?;
+        }
+    }
+    inbox.discard(&proposal_id).map_err(ApiError::internal)?;
+    Ok(Json(
+        json!({ "proposal_id": proposal_id, "status": "applied", "proposal_removed": true }),
+    ))
 }
 
 async fn update_dashboard_proposal(

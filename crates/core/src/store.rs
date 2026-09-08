@@ -469,6 +469,11 @@ impl Store {
         Ok(())
     }
 
+    pub fn delete_preference(&self, key: &str) -> Result<bool> {
+        let conn = self.connect()?;
+        Ok(conn.execute("DELETE FROM app_preferences WHERE key = ?1", params![key])? > 0)
+    }
+
     pub fn list_link_rules(&self) -> Result<Vec<VaultLinkRule>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(

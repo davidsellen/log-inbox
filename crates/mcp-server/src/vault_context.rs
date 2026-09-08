@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     env, fs,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 const METADATA_FIELDS: &[(&str, &str)] = &[
@@ -28,9 +28,10 @@ pub struct VaultContextProvider {
     product_index_path: Option<PathBuf>,
     vault_dir: Option<PathBuf>,
     excluded_prefixes: Vec<PathBuf>,
+    browser_catalog: Arc<Mutex<Option<VaultCatalog>>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultCatalog {
     pub configured: bool,
     pub root: Option<String>,
@@ -38,7 +39,7 @@ pub struct VaultCatalog {
     pub notes: Vec<VaultNote>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultNote {
     pub id: String,
     pub title: String,
@@ -116,10 +117,61 @@ impl VaultContextProvider {
             product_index_path: env_path("LOG_INBOX_PRODUCT_INDEX_FILE"),
             vault_dir: env_path("LOG_INBOX_VAULT_DIR"),
             excluded_prefixes,
+            browser_catalog: Arc::new(Mutex::new(None)),
         }
     }
 
+    pub fn set_browser_catalog(&self, catalog: Option<VaultCatalog>) -> Result<(), String> {
+        *self
+            .browser_catalog
+            .lock()
+            .map_err(|_| "browser vault catalog lock is poisoned".to_owned())? = catalog;
+        Ok(())
+    }
+
+    pub fn browser_catalog(&self) -> Result<Option<VaultCatalog>, String> {
+        self.browser_catalog
+            .lock()
+            .map(|catalog| catalog.clone())
+            .map_err(|_| "browser vault catalog lock is poisoned".to_owned())
+    }
+
+    pub fn catalog_from_browser_files(
+        &self,
+        name: &str,
+        files: &[(String, String)],
+    ) -> Result<VaultCatalog, String> {
+        let mut notes = files
+            .iter()
+            .filter(|(path, _)| {
+                let path = Path::new(path);
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+                    && !path
+                        .components()
+                        .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
+                    && !self
+                        .excluded_prefixes
+                        .iter()
+                        .any(|prefix| path.starts_with(prefix))
+            })
+            .map(|(path, contents)| note_from_contents(Path::new(path), contents))
+            .collect::<Result<Vec<_>, _>>()?;
+        notes.sort_by(|left, right| left.path.cmp(&right.path));
+        finish_catalog_links(&mut notes);
+        Ok(VaultCatalog {
+            configured: true,
+            root: Some(name.to_owned()),
+            revision: catalog_revision(&notes),
+            notes,
+        })
+    }
+
     pub fn catalog(&self) -> Result<VaultCatalog, String> {
+        if let Some(catalog) = self.browser_catalog()? {
+            return Ok(catalog);
+        }
         let Some(root) = &self.vault_dir else {
             return self.legacy_catalog();
         };
@@ -130,17 +182,7 @@ impl VaultContextProvider {
             .into_iter()
             .map(|path| read_note(root, &path))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut counts = HashMap::<String, usize>::new();
-        for note in &notes {
-            *counts.entry(note.title.clone()).or_default() += 1;
-        }
-        for note in &mut notes {
-            note.wikilink = if counts.get(&note.title).copied().unwrap_or(0) > 1 {
-                format!("[[{}]]", note.id)
-            } else {
-                format!("[[{}]]", note.title)
-            };
-        }
+        finish_catalog_links(&mut notes);
         Ok(VaultCatalog {
             configured: true,
             root: Some(root.display().to_string()),
@@ -410,18 +452,22 @@ fn collect_markdown(
 
 fn read_note(root: &Path, path: &Path) -> Result<VaultNote, String> {
     let relative = path.strip_prefix(root).map_err(|error| error.to_string())?;
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("reading note {}: {error}", path.display()))?;
+    note_from_contents(relative, &contents)
+}
+
+fn note_from_contents(relative: &Path, contents: &str) -> Result<VaultNote, String> {
     let id = relative
         .with_extension("")
         .to_string_lossy()
         .replace('\\', "/");
-    let title = path
+    let title = relative
         .file_stem()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| format!("invalid Markdown filename {}", path.display()))?
+        .ok_or_else(|| format!("invalid Markdown filename {}", relative.display()))?
         .to_owned();
-    let contents = fs::read_to_string(path)
-        .map_err(|error| format!("reading note {}: {error}", path.display()))?;
-    let frontmatter = parse_frontmatter(&contents).unwrap_or_default();
+    let frontmatter = parse_frontmatter(contents).unwrap_or_default();
     let mut references = BTreeMap::new();
     for key in ["ado", "work_item", "pr", "pull_request"] {
         if let Some(value) = frontmatter.extra.get(key) {
@@ -442,6 +488,20 @@ fn read_note(root: &Path, path: &Path) -> Result<VaultNote, String> {
         tags: frontmatter.tags,
         references,
     })
+}
+
+fn finish_catalog_links(notes: &mut [VaultNote]) {
+    let mut counts = HashMap::<String, usize>::new();
+    for note in notes.iter() {
+        *counts.entry(note.title.clone()).or_default() += 1;
+    }
+    for note in notes {
+        note.wikilink = if counts.get(&note.title).copied().unwrap_or(0) > 1 {
+            format!("[[{}]]", note.id)
+        } else {
+            format!("[[{}]]", note.title)
+        };
+    }
 }
 
 fn parse_frontmatter(contents: &str) -> Option<Frontmatter> {
@@ -661,6 +721,7 @@ mod tests {
             product_index_path: None,
             vault_dir: Some(root.clone()),
             excluded_prefixes: Vec::new(),
+            browser_catalog: Arc::new(Mutex::new(None)),
         };
         let events = vec![event(Map::from_iter([(
             "product".to_owned(),
@@ -671,6 +732,34 @@ mod tests {
             json!(["[[Customer Portal]]"])
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn builds_the_same_catalog_shape_from_browser_files() {
+        let provider = VaultContextProvider {
+            config_path: None,
+            product_index_path: None,
+            vault_dir: None,
+            excluded_prefixes: vec![PathBuf::from("Private")],
+            browser_catalog: Arc::new(Mutex::new(None)),
+        };
+        let catalog = provider
+            .catalog_from_browser_files(
+                "My vault",
+                &[
+                    (
+                        "Projects/Customer Portal.md".to_owned(),
+                        "---\naliases: [portal-api]\n---\n# Customer Portal\n".to_owned(),
+                    ),
+                    ("Private/Secret.md".to_owned(), "# Secret".to_owned()),
+                ],
+            )
+            .expect("browser catalog builds");
+
+        assert_eq!(catalog.root.as_deref(), Some("My vault"));
+        assert_eq!(catalog.notes.len(), 1);
+        assert_eq!(catalog.notes[0].aliases, ["portal-api"]);
+        assert_eq!(catalog.notes[0].wikilink, "[[Customer Portal]]");
     }
 
     #[test]
@@ -689,6 +778,7 @@ mod tests {
             product_index_path: None,
             vault_dir: Some(root.clone()),
             excluded_prefixes: Vec::new(),
+            browser_catalog: Arc::new(Mutex::new(None)),
         };
         let events = vec![event(Map::from_iter([(
             "canonical_note_candidates".to_owned(),
@@ -769,6 +859,7 @@ mod tests {
             product_index_path: None,
             vault_dir: Some(root.clone()),
             excluded_prefixes: Vec::new(),
+            browser_catalog: Arc::new(Mutex::new(None)),
         };
         let rule = VaultLinkRule {
             id: "rule_navigation".to_owned(),

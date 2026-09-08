@@ -109,6 +109,14 @@
     .recent-notes { margin: 12px 0; }
     .recent-notes .button { margin: 5px 5px 0 0; font-weight: 600; }
     .manual-more { border-top: 1px solid var(--line); padding-top: 3px; }
+    .vault-browser { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 18px; min-height: 420px; }
+    .vault-folders { border-right: 1px solid var(--line); padding-right: 14px; }
+    .vault-folder { display: block; width: 100%; border: 0; background: transparent; text-align: left; padding: 7px 8px; border-radius: 4px; }
+    .vault-folder.selected { background: var(--active); color: var(--accent); font-weight: 700; }
+    .vault-note-list { display: grid; align-content: start; gap: 6px; }
+    .vault-note-row { padding: 9px 10px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); text-align: left; }
+    .vault-note-row small { display: block; color: var(--muted); margin-top: 3px; }
+    .vault-setup-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 14px; margin-top: 14px; border-top: 1px solid var(--line); }
     .mapping-preview { margin: 12px 0; padding: 11px; background: var(--active); border-radius: 5px; font-size: 13px; }
     .advanced-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding-top: 10px; }
     .toast { position: fixed; right: 22px; bottom: 22px; display: flex; align-items: center; gap: 12px; background: #17201c; color: white; padding: 12px 14px; border-radius: 7px; box-shadow: 0 8px 28px rgba(0,0,0,.2); z-index: 3; }
@@ -127,6 +135,8 @@
       .shell { padding-top: 18px; }
       .settings { grid-template-columns: 1fr; }
       .identity-card, .advanced-grid { grid-template-columns: 1fr; }
+      .vault-browser { grid-template-columns: 1fr; }
+      .vault-folders { border-right: 0; border-bottom: 1px solid var(--line); padding: 0 0 10px; }
       .proposal-head { grid-template-columns: 1fr; }
       .proposal-head .button { justify-self: start; }
       .section-head { align-items: flex-start; }
@@ -139,7 +149,7 @@
   <header class="topbar">
     <div class="topbar-inner">
       <div class="brand">Log Inbox</div>
-      <div class="top-actions"><button id="add-log" class="button" type="button">+ Add log</button><div class="health"><span class="health-dot"></span><span id="health-text">Connected</span></div></div>
+      <div class="top-actions"><button id="add-log" class="button" type="button">+ Add log</button><div class="health"><span class="health-dot"></span><span id="health-text">Service online</span></div></div>
     </div>
   </header>
   <main class="shell">
@@ -167,7 +177,7 @@
     <section id="linking-panel" class="panel">
       <div class="section-head">
         <div><h1>Vault links</h1><div id="linking-count" class="count">Connect log names to the notes you already use.</div></div>
-        <div class="link-tools"><input id="link-search" type="search" placeholder="Search names, types, or notes" aria-label="Search vault links"><span id="linking-status" class="status"></span><button id="browse-vault" class="button" type="button">Browse notes</button><button id="scan-vault" class="button" type="button">Scan vault</button></div>
+        <div class="link-tools"><input id="link-search" type="search" placeholder="Search names, types, or notes" aria-label="Search vault links"><span id="vault-status" class="subtle"></span><span id="linking-status" class="status"></span><button id="browse-vault" class="button" type="button">Browse vault</button><button id="scan-vault" class="button" type="button">Rescan</button></div>
       </div>
       <nav class="link-tabs" aria-label="Vault link views"><button class="link-tab" data-link-view="attention" aria-selected="true">Needs attention <span id="attention-count"></span></button><button class="link-tab" data-link-view="mappings" aria-selected="false">Mappings <span id="rules-count"></span></button><button class="link-tab" data-link-view="ignored" aria-selected="false">Ignored <span id="ignored-count"></span></button></nav>
       <section id="link-attention" class="link-view"><div class="link-view-head"><div><h2>Names that need a home</h2><div class="subtle">Link useful names; ignore noise. Nothing here changes your logs.</div></div><label class="check"><input id="show-technical" type="checkbox"> Show technical names</label></div><div id="attention-list" class="identity-list" aria-live="polite"></div></section>
@@ -211,6 +221,15 @@
     </div>
   </dialog>
 
+  <dialog id="vault-dialog">
+    <div class="dialog-body">
+      <div class="dialog-head"><div><h2>Browse vault</h2><div id="vault-dialog-meta" class="subtle"></div></div><button id="vault-close" class="button" type="button">Close</button></div>
+      <input id="vault-search" type="search" placeholder="Search note titles, aliases, or paths" aria-label="Search vault notes">
+      <div class="vault-browser"><nav id="vault-folders" class="vault-folders" aria-label="Vault folders"></nav><div id="vault-notes" class="vault-note-list"></div></div>
+      <div class="vault-setup-actions"><button id="vault-connect" class="button primary" type="button">Choose vault folder</button><button id="vault-rescan" class="button" type="button">Rescan</button><button id="vault-starter" class="button" type="button">Add developer starter</button><button id="vault-template" class="button" type="button">Add template folder</button><button id="vault-undo" class="button" type="button">Undo last setup</button><label>Daily notes folder<select id="vault-daily-folder"></select></label><button id="vault-disconnect" class="button danger" type="button">Use mounted vault</button><span id="vault-action-status" class="status" aria-live="polite"></span></div>
+    </div>
+  </dialog>
+
   <dialog id="manual-log-dialog">
     <form id="manual-log-form" class="dialog-body">
       <div class="dialog-head"><div><h2>Add work log</h2><div class="subtle">Capture your work now; organize it in daily consolidation.</div></div><button id="manual-log-close" class="button" type="button">Close</button></div>
@@ -234,7 +253,7 @@
   <div id="link-toast" class="toast" role="status" hidden><span id="toast-text"></span><button id="toast-undo" type="button">Undo</button></div>
 
   <script>
-    const state = { instructions: "", preview: null, proposals: [], consolidations: [], linking: null, linkDraft: null, selectedNoteId: null, manualOptions: null, manualNoteIds: [], toastTimer: null, awaitingJobId: null, pollTimer: null, preferencesLoaded: false };
+    const state = { instructions: "", preview: null, proposals: [], consolidations: [], linking: null, linkDraft: null, selectedNoteId: null, manualOptions: null, manualNoteIds: [], vaultHandle: null, vaultConnection: null, vaultFolder: "", vaultFolders: [], toastTimer: null, awaitingJobId: null, pollTimer: null, preferencesLoaded: false };
     const queue = document.querySelector("#queue");
     const count = document.querySelector("#queue-count");
     const healthText = document.querySelector("#health-text");
@@ -321,6 +340,182 @@
         state.manualOptions = data; status.textContent = ""; renderManualNotes();
       } catch (error) { state.manualOptions = { notes: [], recent_note_ids: [] }; status.className = "status error"; status.textContent = `${error.message}; you can still save the log.`; renderManualNotes(); }
       document.querySelector("#manual-message").focus();
+    }
+
+    function vaultDb() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open("log-inbox", 1);
+        request.onupgradeneeded = () => request.result.createObjectStore("handles");
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    async function storedVaultHandle() {
+      const db = await vaultDb();
+      return new Promise((resolve, reject) => { const request = db.transaction("handles").objectStore("handles").get("active-vault"); request.onsuccess = () => resolve(request.result || null); request.onerror = () => reject(request.error); });
+    }
+
+    async function saveVaultHandle(handle) {
+      const db = await vaultDb();
+      return new Promise((resolve, reject) => { const request = db.transaction("handles", "readwrite").objectStore("handles").put(handle, "active-vault"); request.onsuccess = () => resolve(); request.onerror = () => reject(request.error); });
+    }
+
+    async function ensureVaultPermission(handle, request = false) {
+      const options = { mode: "readwrite" };
+      if (await handle.queryPermission(options) === "granted") return true;
+      return request && await handle.requestPermission(options) === "granted";
+    }
+
+    async function collectVaultFiles(directory, prefix = "", files = [], applyExclusions = true) {
+      for await (const [name, handle] of directory.entries()) {
+        if (name.startsWith(".") || applyExclusions && ["00 Inbox", "01 Work Log"].includes(prefix ? `${prefix}/${name}` : name)) continue;
+        const path = prefix ? `${prefix}/${name}` : name;
+        if (handle.kind === "directory") await collectVaultFiles(handle, path, files, applyExclusions);
+        else if (name.toLowerCase().endsWith(".md")) {
+          if (files.length >= 500) throw new Error("Vault scan is limited to 500 Markdown files");
+          const file = await handle.getFile(); if (file.size > 1024 * 1024) throw new Error(`${path} is larger than 1 MiB`);
+          files.push({ path, contents: await file.text() });
+        }
+      }
+      return files;
+    }
+
+    async function collectVaultFolders(directory, prefix = "", folders = [""]) {
+      for await (const [name, handle] of directory.entries()) {
+        if (handle.kind !== "directory" || name.startsWith(".")) continue;
+        const path = prefix ? `${prefix}/${name}` : name; folders.push(path); await collectVaultFolders(handle, path, folders);
+      }
+      return folders;
+    }
+
+    async function syncVaultHandle(handle, askPermission = false) {
+      if (!await ensureVaultPermission(handle, askPermission)) throw new Error("Vault permission is required");
+      const files = await collectVaultFiles(handle); state.vaultFolders = await collectVaultFolders(handle);
+      const response = await fetch("/api/vault/browser/catalog", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: handle.name, files }) });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error || "Vault scan failed");
+      state.vaultHandle = handle; state.vaultConnection = { mode: "browser", name: handle.name, revision: data.revision, note_count: data.notes.length };
+      await saveVaultHandle(handle); await loadLinking(); renderVaultStatus(); renderVaultBrowser(); return data;
+    }
+
+    async function connectVault() {
+      if (!window.showDirectoryPicker) { throw new Error("This browser cannot choose a local folder; use Chrome/Edge or mounted mode"); }
+      const handle = await window.showDirectoryPicker({ mode: "readwrite", id: "log-inbox-vault" });
+      return syncVaultHandle(handle, true);
+    }
+
+    function renderVaultStatus() {
+      const node = document.querySelector("#vault-status"); const connection = state.vaultConnection;
+      if (!connection) { node.textContent = "Vault not connected"; return; }
+      if (connection.mode === "browser") node.textContent = state.vaultHandle ? `Vault: ${connection.name}` : `Vault: ${connection.name} · reconnect`;
+      else if (connection.mode === "mounted") node.textContent = "Mounted vault";
+      else node.textContent = "Vault not connected";
+    }
+
+    async function loadVaultConnection() {
+      const response = await fetch("/api/vault/connection"); state.vaultConnection = await response.json();
+      if (state.vaultConnection.mode === "browser") {
+        try { state.vaultHandle = await storedVaultHandle(); } catch (_) { state.vaultHandle = null; }
+      }
+      renderVaultStatus();
+    }
+
+    function renderVaultBrowser() {
+      const notes = state.linking?.catalog.notes || []; const query = document.querySelector("#vault-search").value.trim().toLowerCase();
+      const folders = [...new Set(["", ...state.vaultFolders, ...notes.map((note) => note.path.includes("/") ? note.path.slice(0, note.path.lastIndexOf("/")) : "")])].sort();
+      if (!folders.includes(state.vaultFolder)) state.vaultFolder = "";
+      const folderRoot = document.querySelector("#vault-folders"); folderRoot.replaceChildren();
+      folders.forEach((folder) => { const button = element("button", `vault-folder${folder === state.vaultFolder ? " selected" : ""}`, folder || "Vault root"); button.type = "button"; button.style.paddingLeft = `${8 + folder.split("/").filter(Boolean).length * 12}px`; button.addEventListener("click", () => { state.vaultFolder = folder; renderVaultBrowser(); }); folderRoot.append(button); });
+      const root = document.querySelector("#vault-notes"); root.replaceChildren();
+      const visible = notes.filter((note) => (query ? [note.title, note.path, ...note.aliases].some((value) => value.toLowerCase().includes(query)) : (note.path.includes("/") ? note.path.slice(0, note.path.lastIndexOf("/")) : "") === state.vaultFolder));
+      if (!visible.length) { root.append(element("div", "empty", query ? "No notes match" : "No notes in this folder")); }
+      visible.forEach((note) => { const row = element("div", "vault-note-row", note.title); row.append(element("small", "", note.path)); root.append(row); });
+      document.querySelector("#vault-dialog-meta").textContent = state.vaultConnection ? `${state.vaultConnection.name || "Vault"} · ${notes.length} notes` : "Choose an existing or empty folder";
+      const browserMode = state.vaultConnection?.mode === "browser"; document.querySelector("#vault-rescan").disabled = !browserMode; document.querySelector("#vault-starter").disabled = !browserMode; document.querySelector("#vault-template").disabled = !browserMode; document.querySelector("#vault-undo").hidden = !browserMode || !localStorage.getItem("log-inbox-last-setup"); document.querySelector("#vault-disconnect").hidden = !browserMode;
+      const daily = document.querySelector("#vault-daily-folder"); const savedDaily = localStorage.getItem("log-inbox-daily-folder") || ""; daily.replaceChildren(...folders.map((folder) => { const option = element("option", "", folder || "Vault root"); option.value = folder; option.selected = folder === savedDaily; return option; }));
+    }
+
+    async function openVaultBrowser() {
+      if (!state.vaultConnection) await loadVaultConnection();
+      document.querySelector("#vault-dialog").showModal(); renderVaultBrowser();
+    }
+
+    async function directoryChild(parent, name, create = false) { return parent.getDirectoryHandle(name, { create }); }
+    async function pathExists(parent, name, kind) { try { await (kind === "directory" ? parent.getDirectoryHandle(name) : parent.getFileHandle(name)); return true; } catch (error) { if (error.name === "NotFoundError") return false; throw error; } }
+
+    async function applyStructure(entries, label) {
+      if (!state.vaultHandle || !await ensureVaultPermission(state.vaultHandle, true)) throw new Error("Reconnect the vault before creating files");
+      const missing = [];
+      for (const entry of entries) {
+        let parent = state.vaultHandle; const parts = entry.path.split("/"); const filename = parts.pop();
+        let relative = ""; let parentMissing = false;
+        for (const part of parts) { relative = relative ? `${relative}/${part}` : part; if (parentMissing) { missing.push(`${relative}/`); continue; } if (await pathExists(parent, part, "directory")) parent = await directoryChild(parent, part); else { missing.push(`${relative}/`); parentMissing = true; } }
+        if (parentMissing || !await pathExists(parent, filename, "file")) missing.push(entry.path);
+      }
+      if (!missing.length) { showNotice("That structure already exists; nothing changed."); return; }
+      if (!confirm(`${label} will add only these missing paths:\n\n${missing.join("\n")}\n\nExisting files will remain unchanged.`)) return;
+      const createdFiles = []; const createdDirectories = [];
+      for (const entry of entries) {
+        let parent = state.vaultHandle; const parts = entry.path.split("/"); const filename = parts.pop();
+        let directoryPath = "";
+        for (const part of parts) { directoryPath = directoryPath ? `${directoryPath}/${part}` : part; if (!await pathExists(parent, part, "directory")) createdDirectories.push(directoryPath); parent = await directoryChild(parent, part, true); }
+        if (await pathExists(parent, filename, "file")) continue;
+        const fileHandle = await parent.getFileHandle(filename, { create: true }); const writable = await fileHandle.createWritable(); await writable.write(entry.contents); await writable.close(); createdFiles.push({ path: entry.path, revision: contentRevision(entry.contents) });
+      }
+      localStorage.setItem("log-inbox-last-setup", JSON.stringify({ label, files: createdFiles, directories: [...new Set(createdDirectories)] }));
+      await syncVaultHandle(state.vaultHandle); showNotice(`${label} added. Existing files were unchanged.`);
+    }
+
+    async function undoLastSetup() {
+      const setup = JSON.parse(localStorage.getItem("log-inbox-last-setup") || "null"); if (!setup || !state.vaultHandle) return;
+      if (!confirm(`Undo ${setup.label}? Only unchanged files created by that setup will be removed.`)) return;
+      let preserved = 0;
+      for (const entry of [...setup.files].reverse()) {
+        const parts = entry.path.split("/"); const filename = parts.pop(); const parent = await vaultDirectoryAt(parts.join("/")); const current = await readVaultText(parent, filename);
+        if (current && contentRevision(current) === entry.revision) await parent.removeEntry(filename); else preserved += 1;
+      }
+      for (const path of [...setup.directories].sort((a, b) => b.length - a.length)) { const parts = path.split("/"); const name = parts.pop(); try { await (await vaultDirectoryAt(parts.join("/"))).removeEntry(name); } catch (_) {} }
+      localStorage.removeItem("log-inbox-last-setup"); await syncVaultHandle(state.vaultHandle); showNotice(preserved ? `Undo completed; ${preserved} changed file(s) were preserved.` : "Setup undone.");
+    }
+
+    async function addStarterStructure() {
+      const content = (title) => `---\nlog_inbox_managed: true\n---\n\n# ${title}\n`;
+      await applyStructure(["Projects", "Systems", "Technologies"].map((title) => ({ path: `${title}/${title}.md`, contents: content(title) })), "Developer starter");
+    }
+
+    async function addTemplateStructure() {
+      if (!window.showDirectoryPicker) throw new Error("This browser cannot choose a template folder");
+      const template = await window.showDirectoryPicker({ mode: "read", id: "log-inbox-template" }); const files = await collectVaultFiles(template, "", [], false);
+      await applyStructure(files, `Template ${template.name}`);
+    }
+
+    async function vaultDirectoryAt(relative) {
+      let directory = state.vaultHandle;
+      for (const part of relative.split("/").filter(Boolean)) directory = await directory.getDirectoryHandle(part);
+      return directory;
+    }
+
+    async function readVaultText(directory, filename) {
+      try { return await (await (await directory.getFileHandle(filename)).getFile()).text(); }
+      catch (error) { if (error.name === "NotFoundError") return ""; throw error; }
+    }
+
+    function contentRevision(content) {
+      let hash = 0xcbf29ce484222325n;
+      for (const byte of new TextEncoder().encode(content)) { hash ^= BigInt(byte); hash = BigInt.asUintN(64, hash * 0x100000001b3n); }
+      return hash.toString(16).padStart(16, "0");
+    }
+
+    async function applyProposalInBrowser(proposal) {
+      if (!state.vaultHandle || !await ensureVaultPermission(state.vaultHandle, true)) throw new Error("Reconnect the vault before applying");
+      const directory = await vaultDirectoryAt(localStorage.getItem("log-inbox-daily-folder") || ""); const filename = `${proposal.target_note}.md`; const current = await readVaultText(directory, filename);
+      const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.proposal_id)}/browser-apply/prepare`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ current_content: current }) }); const plan = await response.json();
+      if (!response.ok) throw new Error(plan.error || "Could not prepare browser apply");
+      if (contentRevision(await readVaultText(directory, filename)) !== plan.current_revision) throw new Error("The daily note changed; review and apply again");
+      const handle = await directory.getFileHandle(filename, { create: true }); const writable = await handle.createWritable(); await writable.write(plan.updated_content); await writable.close();
+      const verified = await readVaultText(directory, filename); if (contentRevision(verified) !== plan.updated_revision) throw new Error("The daily note write could not be verified; the proposal remains in Queue");
+      const acknowledged = await fetch(`/api/proposals/${encodeURIComponent(proposal.proposal_id)}/browser-apply/acknowledge`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ acknowledgement_token: plan.acknowledgement_token, verified_revision: plan.updated_revision }) });
+      if (!acknowledged.ok) throw new Error((await acknowledged.json()).error || "The note was written but acknowledgement failed; retry Apply to finish safely");
     }
 
     function proposalsForSelectedDay(proposals) {
@@ -418,7 +613,7 @@
       for (const [targetId, groupRules] of groups) {
         const note = state.linking.catalog.notes.find((item) => item.id === targetId);
         const group = element("section", "mapping-group");
-        group.append(element("h3", "", note?.title || targetId), element("div", "subtle", note?.path || "Vault note"));
+        group.append(element("h3", "", note?.title || "Missing note"), element("div", note ? "subtle" : "status error", note?.path || `${targetId} is no longer in the current vault`));
         groupRules.forEach((rule) => {
           const row = element("div", "saved-rule");
           const label = element("div", "", ruleLabel(rule));
@@ -617,7 +812,7 @@
         renderProposals(data.proposals);
         if (!state.preferencesLoaded) fillPreferences(data.preferences, data.instructions);
         renderConsolidationState();
-        healthText.textContent = "Connected";
+        healthText.textContent = "Service online";
       } catch (error) {
         healthText.textContent = "Unavailable";
         queue.replaceChildren(element("div", "empty", error.message));
@@ -630,8 +825,11 @@
       button.disabled = true;
       button.textContent = "Applying";
       try {
-        const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.proposal_id)}/apply`, { method: "POST" });
-        if (!response.ok) throw new Error((await response.json()).error || "Apply failed");
+        if (state.vaultConnection?.mode === "browser") await applyProposalInBrowser(proposal);
+        else {
+          const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.proposal_id)}/apply`, { method: "POST" });
+          if (!response.ok) throw new Error((await response.json()).error || "Apply failed");
+        }
         await load();
         return true;
       } catch (error) {
@@ -816,7 +1014,7 @@
     });
 
     document.querySelector("#dialog-condition-field").append(...selectorFields.map((field) => { const option = element("option", "", fieldNames[field]); option.value = field; return option; }));
-    document.querySelector("#scan-vault").addEventListener("click", () => loadLinking(true));
+    document.querySelector("#scan-vault").addEventListener("click", async () => { if (state.vaultConnection?.mode === "browser") { try { await syncVaultHandle(state.vaultHandle, true); } catch (error) { document.querySelector("#linking-status").textContent = error.message; } } else loadLinking(true); });
     document.querySelector("#add-log").addEventListener("click", openManualLog);
     document.querySelector("#manual-log-close").addEventListener("click", closeManualLog);
     document.querySelector("#manual-log-cancel").addEventListener("click", closeManualLog);
@@ -835,7 +1033,16 @@
       } catch (error) { status.className = "status error"; status.textContent = error.message; }
       finally { button.disabled = false; }
     });
-    document.querySelector("#browse-vault").addEventListener("click", () => openLinkDialog());
+    document.querySelector("#browse-vault").addEventListener("click", openVaultBrowser);
+    document.querySelector("#vault-close").addEventListener("click", () => document.querySelector("#vault-dialog").close());
+    document.querySelector("#vault-search").addEventListener("input", renderVaultBrowser);
+    document.querySelector("#vault-daily-folder").addEventListener("change", (event) => localStorage.setItem("log-inbox-daily-folder", event.currentTarget.value));
+    document.querySelector("#vault-connect").addEventListener("click", async () => { const status = document.querySelector("#vault-action-status"); try { status.textContent = "Connecting…"; await connectVault(); status.textContent = "Connected"; } catch (error) { status.className = "status error"; status.textContent = error.message; } });
+    document.querySelector("#vault-rescan").addEventListener("click", async () => { const status = document.querySelector("#vault-action-status"); try { status.textContent = "Scanning…"; await syncVaultHandle(state.vaultHandle, true); status.textContent = "Up to date"; } catch (error) { status.className = "status error"; status.textContent = error.message; } });
+    document.querySelector("#vault-starter").addEventListener("click", async () => { try { await addStarterStructure(); } catch (error) { document.querySelector("#vault-action-status").textContent = error.message; } });
+    document.querySelector("#vault-template").addEventListener("click", async () => { try { await addTemplateStructure(); } catch (error) { if (error.name !== "AbortError") document.querySelector("#vault-action-status").textContent = error.message; } });
+    document.querySelector("#vault-undo").addEventListener("click", async () => { try { await undoLastSetup(); } catch (error) { document.querySelector("#vault-action-status").textContent = error.message; } });
+    document.querySelector("#vault-disconnect").addEventListener("click", async () => { if (!confirm("Disconnect this browser vault and return to the mounted vault? No files will be changed.")) return; await fetch("/api/vault/browser/catalog", { method: "DELETE" }); state.vaultHandle = null; state.vaultConnection = null; await loadVaultConnection(); await loadLinking(); renderVaultBrowser(); });
     document.querySelector("#link-close").addEventListener("click", () => document.querySelector("#link-dialog").close());
     document.querySelector("#note-search").addEventListener("input", renderNoteResults);
     document.querySelector("#link-search").addEventListener("input", renderLinking);
@@ -866,6 +1073,7 @@
       renderConsolidationState();
     });
     if (location.hash === "#linking") document.querySelector('[data-tab="linking"]').click();
+    loadVaultConnection();
     load();
   </script>
 </body>
