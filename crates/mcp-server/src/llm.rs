@@ -16,6 +16,7 @@ const CONTEXT_METADATA_KEYS: &[&str] = &[
     "task_id",
     "session_id",
     "event_type",
+    "entry_kind",
     "sequence",
     "repo",
     "project",
@@ -40,6 +41,8 @@ const CONTEXT_METADATA_KEYS: &[&str] = &[
     "artifact_path",
     "artifact_sha256",
     "canonical_note",
+    "canonical_note_candidates",
+    "workstream",
 ];
 
 #[derive(Debug, Clone)]
@@ -138,6 +141,51 @@ pub async fn suggest_markdown_summary(
         return Err("suggest_markdown_summary requires at least one event".to_owned());
     }
 
+    if args.mode == "daily-consolidation" {
+        let all_event_ids = events
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<Vec<_>>();
+        let (manual, automated): (Vec<_>, Vec<_>) = events.into_iter().partition(is_manual_event);
+        if !manual.is_empty() {
+            let manual_markdown = render_manual_entries(&args, &manual);
+            if automated.is_empty() {
+                return Ok(SummaryProposal {
+                    target_note: default_target_note(&args),
+                    canonical_links: configured_workstream_links(&args),
+                    link_candidates: allowed_canonical_links(&args),
+                    markdown: format!("### My notes\n\n{manual_markdown}"),
+                    evidence_event_ids: all_event_ids,
+                    confidence: "high".to_owned(),
+                    open_questions: Vec::new(),
+                    requires_review: true,
+                    provider: "manual".to_owned(),
+                    supersedes_proposal_ids: Vec::new(),
+                    consolidation_job_id: None,
+                    link_context_revision: link_context_revision(&args),
+                });
+            }
+            let mut proposal = suggest_automated_summary(config, args.clone(), automated).await?;
+            proposal.markdown = format!(
+                "### My notes\n\n{manual_markdown}\n\n### Automated activity\n\n{}",
+                demote_workstream_headings(&proposal.markdown)
+            );
+            proposal.evidence_event_ids = all_event_ids;
+            proposal.canonical_links = configured_workstream_links(&args);
+            proposal.link_candidates = allowed_canonical_links(&args);
+            return Ok(proposal);
+        }
+        return suggest_automated_summary(config, args, automated).await;
+    }
+
+    suggest_automated_summary(config, args, events).await
+}
+
+async fn suggest_automated_summary(
+    config: Option<&LlmConfig>,
+    args: SuggestMarkdownSummaryArgs,
+    events: Vec<StoredLogEvent>,
+) -> Result<SummaryProposal, String> {
     let Some(config) = config else {
         return Ok(fallback_proposal(
             args,
@@ -194,6 +242,77 @@ pub async fn suggest_markdown_summary(
         .ok_or_else(|| "LLM response did not include a choice".to_owned())?;
 
     parse_proposal(content, &args, &events, &config.base_url)
+}
+
+fn is_manual_event(event: &StoredLogEvent) -> bool {
+    event.metadata.get("entry_kind").and_then(Value::as_str) == Some("manual")
+}
+
+fn render_manual_entries(args: &SuggestMarkdownSummaryArgs, events: &[StoredLogEvent]) -> String {
+    let mut events = events.iter().collect::<Vec<_>>();
+    events.sort_by_key(|event| (event.timestamp, event.received_at));
+    events
+        .into_iter()
+        .map(|event| {
+            let links = links_for_group(args, &event_group_key(event));
+            let prefix = if links.is_empty() {
+                String::new()
+            } else {
+                format!("{} — ", links.join(" · "))
+            };
+            let message = event.message.trim().replace('\n', "\n    ");
+            let references = ["work_item", "pull_request"]
+                .into_iter()
+                .filter_map(|key| {
+                    event
+                        .metadata
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .map(|value| (key, value))
+                })
+                .map(|(kind, value)| render_manual_reference(kind, value))
+                .collect::<Vec<_>>();
+            if references.is_empty() {
+                format!("- {prefix}{message}")
+            } else {
+                format!("- {prefix}{message} · {}", references.join(" · "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_manual_reference(kind: &str, value: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return format!("`{}`", value.replace('`', "'"));
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return format!("`{}`", value.replace('`', "'"));
+    }
+    let label = url
+        .path_segments()
+        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back())
+        .filter(|segment| segment.chars().all(|character| character.is_ascii_digit()))
+        .map(|id| {
+            if kind == "pull_request" {
+                format!("PR {id}")
+            } else {
+                format!("Work item {id}")
+            }
+        })
+        .unwrap_or_else(|| url.host_str().unwrap_or("Reference").to_owned());
+    format!("[{label}](<{}>)", url.as_str())
+}
+
+fn demote_workstream_headings(markdown: &str) -> String {
+    markdown
+        .lines()
+        .map(|line| {
+            line.strip_prefix("### ")
+                .map_or_else(|| line.to_owned(), |line| format!("#### {line}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn build_prompt(
@@ -928,6 +1047,104 @@ mod tests {
         assert_eq!(proposal.evidence_event_ids, ["evt_test"]);
         assert!(proposal.requires_review);
         assert_eq!(proposal.provider, "not_configured");
+    }
+
+    #[tokio::test]
+    async fn renders_manual_daily_entries_verbatim_without_the_llm() {
+        let now = Utc::now();
+        let event = StoredLogEvent {
+            id: "evt_manual".to_owned(),
+            received_at: now,
+            timestamp: now,
+            source: "manual/dashboard".to_owned(),
+            level: "info".to_owned(),
+            message: "Reviewed the design decision.".to_owned(),
+            metadata: Map::from_iter([
+                ("entry_kind".to_owned(), Value::from("manual")),
+                ("task_id".to_owned(), Value::from("manual_1")),
+                (
+                    "pull_request".to_owned(),
+                    Value::from("https://dev.azure.com/org/project/pullrequest/9374"),
+                ),
+            ]),
+            fingerprint: None,
+            truncated: false,
+            reviewed: false,
+        };
+        let args = SuggestMarkdownSummaryArgs {
+            event_ids: vec![event.id.clone()],
+            vault_context: json!({
+                "daily_note": "Daily log Sep 8",
+                "candidate_notes": ["[[Sweet CRM]]"],
+                "workstream_links": { "repo:|pull-request:9374": ["[[Sweet CRM]]"] },
+            }),
+            mode: "daily-consolidation".to_owned(),
+            task: None,
+        };
+
+        let proposal = suggest_markdown_summary(None, args, vec![event])
+            .await
+            .expect("manual proposal renders");
+
+        assert_eq!(proposal.provider, "manual");
+        assert!(proposal.markdown.starts_with("### My notes"));
+        assert!(
+            proposal
+                .markdown
+                .contains("[[Sweet CRM]] — Reviewed the design decision.")
+        );
+        assert!(proposal.markdown.contains("[PR 9374]"));
+        assert!(!proposal.markdown.contains("LLM is not configured"));
+    }
+
+    #[tokio::test]
+    async fn separates_manual_notes_from_automated_daily_activity() {
+        let now = Utc::now();
+        let manual = StoredLogEvent {
+            id: "evt_manual".to_owned(),
+            received_at: now,
+            timestamp: now,
+            source: "manual/dashboard".to_owned(),
+            level: "info".to_owned(),
+            message: "Recorded the customer decision.".to_owned(),
+            metadata: Map::from_iter([
+                ("entry_kind".to_owned(), Value::from("manual")),
+                ("task_id".to_owned(), Value::from("manual_1")),
+            ]),
+            fingerprint: None,
+            truncated: false,
+            reviewed: false,
+        };
+        let automated = StoredLogEvent {
+            id: "evt_auto".to_owned(),
+            received_at: now,
+            timestamp: now,
+            source: "codex/fedora".to_owned(),
+            level: "info".to_owned(),
+            message: "Validated the implementation.".to_owned(),
+            metadata: Map::from_iter([("task_id".to_owned(), Value::from("task_1"))]),
+            fingerprint: None,
+            truncated: false,
+            reviewed: false,
+        };
+        let args = SuggestMarkdownSummaryArgs {
+            event_ids: vec![manual.id.clone(), automated.id.clone()],
+            vault_context: json!({
+                "daily_note": "Daily log Sep 8",
+                "workstream_links": { "manual_1": [], "task_1": [] },
+            }),
+            mode: "daily-consolidation".to_owned(),
+            task: None,
+        };
+
+        let proposal = suggest_markdown_summary(None, args, vec![manual, automated])
+            .await
+            .expect("mixed proposal renders");
+
+        assert!(proposal.markdown.contains("### My notes"));
+        assert!(proposal.markdown.contains("### Automated activity"));
+        assert!(proposal.markdown.contains("#### codex/fedora"));
+        assert_eq!(proposal.evidence_event_ids.len(), 2);
     }
 
     #[test]

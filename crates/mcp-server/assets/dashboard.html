@@ -30,6 +30,9 @@
     .brand { font-size: 18px; font-weight: 700; }
     .health { display: flex; align-items: center; gap: 8px; color: #cbd5d0; font-size: 13px; }
     .health-dot { width: 9px; height: 9px; border-radius: 50%; background: #60c991; }
+    .top-actions { display: flex; align-items: center; gap: 14px; }
+    .topbar .button { background: transparent; color: #fff; border-color: #536159; }
+    .topbar .button:hover { background: #26322c; border-color: #819088; }
     .shell { max-width: 1180px; margin: 0 auto; padding: 26px 24px 48px; }
     .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
     .tab { border: 0; border-bottom: 3px solid transparent; background: transparent; color: var(--muted); padding: 10px 14px 9px; font-weight: 650; }
@@ -100,6 +103,12 @@
     .note-result { text-align: left; border: 1px solid var(--line); background: var(--surface); border-radius: 5px; padding: 9px 10px; }
     .note-result.selected { border-color: var(--accent); background: var(--active); }
     .note-result small { display: block; color: var(--muted); margin-top: 2px; }
+    .chip-list { display: flex; flex-wrap: wrap; gap: 7px; margin: 9px 0; }
+    .chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #a9c8b7; background: var(--active); border-radius: 999px; padding: 5px 9px; font-size: 12px; }
+    .chip button { border: 0; background: transparent; color: var(--muted); padding: 0; line-height: 1; }
+    .recent-notes { margin: 12px 0; }
+    .recent-notes .button { margin: 5px 5px 0 0; font-weight: 600; }
+    .manual-more { border-top: 1px solid var(--line); padding-top: 3px; }
     .mapping-preview { margin: 12px 0; padding: 11px; background: var(--active); border-radius: 5px; font-size: 13px; }
     .advanced-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding-top: 10px; }
     .toast { position: fixed; right: 22px; bottom: 22px; display: flex; align-items: center; gap: 12px; background: #17201c; color: white; padding: 12px 14px; border-radius: 7px; box-shadow: 0 8px 28px rgba(0,0,0,.2); z-index: 3; }
@@ -130,7 +139,7 @@
   <header class="topbar">
     <div class="topbar-inner">
       <div class="brand">Log Inbox</div>
-      <div class="health"><span class="health-dot"></span><span id="health-text">Connected</span></div>
+      <div class="top-actions"><button id="add-log" class="button" type="button">+ Add log</button><div class="health"><span class="health-dot"></span><span id="health-text">Connected</span></div></div>
     </div>
   </header>
   <main class="shell">
@@ -202,6 +211,16 @@
     </div>
   </dialog>
 
+  <dialog id="manual-log-dialog">
+    <form id="manual-log-form" class="dialog-body">
+      <div class="dialog-head"><div><h2>Add work log</h2><div class="subtle">Capture your work now; organize it in daily consolidation.</div></div><button id="manual-log-close" class="button" type="button">Close</button></div>
+      <label>What did you work on?<textarea id="manual-message" maxlength="4000" required placeholder="Finished the access review and documented the decision."></textarea></label>
+      <div><label for="manual-note-search">Related notes <span class="subtle">optional</span></label><div id="manual-selected-notes" class="chip-list" aria-live="polite"></div><div id="manual-recent-notes" class="recent-notes"></div><input id="manual-note-search" type="search" placeholder="Find an existing vault note…" autocomplete="off"><div id="manual-note-results" class="note-results" role="listbox"></div></div>
+      <details class="manual-more"><summary>Add references or change time</summary><div class="advanced-grid"><label>Work item<input id="manual-work-item" placeholder="ADO 57950 or URL"></label><label>Pull request<input id="manual-pull-request" placeholder="PR 9374 or URL"></label><label>When<input id="manual-timestamp" type="datetime-local" required></label></div></details>
+      <div class="dialog-actions"><span id="manual-log-status" class="status" aria-live="polite"></span><button id="manual-log-cancel" class="button" type="button">Cancel</button><button id="manual-log-save" class="button primary" type="submit">Save log</button></div>
+    </form>
+  </dialog>
+
   <dialog id="link-dialog">
     <form id="link-form" class="dialog-body">
       <div class="dialog-head"><div><h2 id="link-dialog-title">Choose a note</h2><div id="link-dialog-meta" class="subtle"></div></div><button id="link-close" class="button" type="button">Close</button></div>
@@ -215,7 +234,7 @@
   <div id="link-toast" class="toast" role="status" hidden><span id="toast-text"></span><button id="toast-undo" type="button">Undo</button></div>
 
   <script>
-    const state = { instructions: "", preview: null, proposals: [], consolidations: [], linking: null, linkDraft: null, selectedNoteId: null, toastTimer: null, awaitingJobId: null, pollTimer: null, preferencesLoaded: false };
+    const state = { instructions: "", preview: null, proposals: [], consolidations: [], linking: null, linkDraft: null, selectedNoteId: null, manualOptions: null, manualNoteIds: [], toastTimer: null, awaitingJobId: null, pollTimer: null, preferencesLoaded: false };
     const queue = document.querySelector("#queue");
     const count = document.querySelector("#queue-count");
     const healthText = document.querySelector("#health-text");
@@ -231,6 +250,77 @@
       if (className) node.className = className;
       if (text !== undefined) node.textContent = text;
       return node;
+    }
+
+    function localDateTimeValue(date = new Date()) {
+      const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+      return local.toISOString().slice(0, 16);
+    }
+
+    function localDateTimeWithOffset(value) {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "";
+      const offset = -date.getTimezoneOffset();
+      const sign = offset >= 0 ? "+" : "-";
+      const hours = String(Math.floor(Math.abs(offset) / 60)).padStart(2, "0");
+      const minutes = String(Math.abs(offset) % 60).padStart(2, "0");
+      return `${value}:00${sign}${hours}:${minutes}`;
+    }
+
+    function manualNote(id) {
+      return state.manualOptions?.notes.find((note) => note.id === id);
+    }
+
+    function toggleManualNote(id) {
+      if (state.manualNoteIds.includes(id)) state.manualNoteIds = state.manualNoteIds.filter((item) => item !== id);
+      else if (state.manualNoteIds.length < 8) state.manualNoteIds.push(id);
+      renderManualNotes();
+    }
+
+    function renderManualNotes() {
+      const selected = document.querySelector("#manual-selected-notes"); selected.replaceChildren();
+      state.manualNoteIds.forEach((id) => {
+        const note = manualNote(id); if (!note) return;
+        const chip = element("span", "chip", note.title); const remove = element("button", "", "×"); remove.type = "button"; remove.setAttribute("aria-label", `Remove ${note.title}`); remove.addEventListener("click", () => toggleManualNote(id)); chip.append(remove); selected.append(chip);
+      });
+      const recent = document.querySelector("#manual-recent-notes"); recent.replaceChildren();
+      const recentIds = state.manualOptions?.recent_note_ids || [];
+      if (recentIds.length) {
+        recent.append(element("span", "subtle", "Recent:"));
+        recentIds.filter((id) => !state.manualNoteIds.includes(id)).forEach((id) => { const note = manualNote(id); if (!note) return; const button = element("button", "button", note.title); button.type = "button"; button.addEventListener("click", () => toggleManualNote(id)); recent.append(button); });
+      }
+      renderManualNoteResults();
+    }
+
+    function renderManualNoteResults() {
+      const root = document.querySelector("#manual-note-results"); root.replaceChildren();
+      const query = document.querySelector("#manual-note-search").value.trim().toLowerCase();
+      if (!query) return;
+      const notes = (state.manualOptions?.notes || []).filter((note) => !state.manualNoteIds.includes(note.id) && [note.title, note.path, ...note.aliases].some((value) => value.toLowerCase().includes(query))).slice(0, 30);
+      if (!notes.length) { root.append(element("div", "empty", "No existing notes match")); return; }
+      notes.forEach((note) => { const button = element("button", "note-result", note.title); button.type = "button"; button.setAttribute("role", "option"); button.append(element("small", "", note.path)); button.addEventListener("click", () => { toggleManualNote(note.id); document.querySelector("#manual-note-search").value = ""; renderManualNoteResults(); }); root.append(button); });
+    }
+
+    function manualLogDirty() {
+      return Boolean(document.querySelector("#manual-message").value.trim() || state.manualNoteIds.length || document.querySelector("#manual-work-item").value.trim() || document.querySelector("#manual-pull-request").value.trim());
+    }
+
+    function closeManualLog() {
+      if (manualLogDirty() && !confirm("Discard this unsaved work log?")) return;
+      document.querySelector("#manual-log-dialog").close();
+    }
+
+    async function openManualLog() {
+      const status = document.querySelector("#manual-log-status"); status.className = "status"; status.textContent = "Loading notes…";
+      state.manualNoteIds = [];
+      document.querySelector("#manual-message").value = ""; document.querySelector("#manual-work-item").value = ""; document.querySelector("#manual-pull-request").value = ""; document.querySelector("#manual-note-search").value = ""; document.querySelector("#manual-timestamp").value = localDateTimeValue();
+      const dialog = document.querySelector("#manual-log-dialog"); dialog.showModal();
+      try {
+        const response = await fetch("/api/logs/manual/options"); const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Vault notes unavailable");
+        state.manualOptions = data; status.textContent = ""; renderManualNotes();
+      } catch (error) { state.manualOptions = { notes: [], recent_note_ids: [] }; status.className = "status error"; status.textContent = `${error.message}; you can still save the log.`; renderManualNotes(); }
+      document.querySelector("#manual-message").focus();
     }
 
     function proposalsForSelectedDay(proposals) {
@@ -442,9 +532,14 @@
     }
 
     function showUndo(message, id) {
-      clearTimeout(state.toastTimer); const toast = document.querySelector("#link-toast"); document.querySelector("#toast-text").textContent = message; toast.hidden = false;
+      clearTimeout(state.toastTimer); const toast = document.querySelector("#link-toast"); document.querySelector("#toast-text").textContent = message; document.querySelector("#toast-undo").hidden = false; toast.hidden = false;
       document.querySelector("#toast-undo").onclick = async () => { await restoreIdentity(id); toast.hidden = true; };
       state.toastTimer = setTimeout(() => { toast.hidden = true; }, 7000);
+    }
+
+    function showNotice(message) {
+      clearTimeout(state.toastTimer); const toast = document.querySelector("#link-toast"); document.querySelector("#toast-text").textContent = message; document.querySelector("#toast-undo").hidden = true; toast.hidden = false;
+      state.toastTimer = setTimeout(() => { toast.hidden = true; document.querySelector("#toast-undo").hidden = false; }, 5000);
     }
 
     function renderNoteResults() {
@@ -722,6 +817,24 @@
 
     document.querySelector("#dialog-condition-field").append(...selectorFields.map((field) => { const option = element("option", "", fieldNames[field]); option.value = field; return option; }));
     document.querySelector("#scan-vault").addEventListener("click", () => loadLinking(true));
+    document.querySelector("#add-log").addEventListener("click", openManualLog);
+    document.querySelector("#manual-log-close").addEventListener("click", closeManualLog);
+    document.querySelector("#manual-log-cancel").addEventListener("click", closeManualLog);
+    document.querySelector("#manual-log-dialog").addEventListener("cancel", (event) => { if (manualLogDirty()) { event.preventDefault(); closeManualLog(); } });
+    document.querySelector("#manual-note-search").addEventListener("input", renderManualNoteResults);
+    document.querySelector("#manual-message").addEventListener("keydown", (event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") document.querySelector("#manual-log-form").requestSubmit(); });
+    document.addEventListener("keydown", (event) => { if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "l") { event.preventDefault(); if (!document.querySelector("dialog[open]")) openManualLog(); } });
+    document.querySelector("#manual-log-form").addEventListener("submit", async (event) => {
+      event.preventDefault(); const button = event.submitter || document.querySelector("#manual-log-save"); const status = document.querySelector("#manual-log-status"); const timestamp = localDateTimeWithOffset(document.querySelector("#manual-timestamp").value);
+      if (!timestamp) { status.className = "status error"; status.textContent = "Choose a valid date and time"; return; }
+      button.disabled = true; status.className = "status"; status.textContent = "Saving…";
+      try {
+        const response = await fetch("/api/logs/manual", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: document.querySelector("#manual-message").value, timestamp, vault_note_ids: state.manualNoteIds, work_item: document.querySelector("#manual-work-item").value || null, pull_request: document.querySelector("#manual-pull-request").value || null }) });
+        const data = await response.json(); if (!response.ok) throw new Error(data.error || "Log save failed");
+        document.querySelector("#manual-message").value = ""; state.manualNoteIds = []; document.querySelector("#manual-work-item").value = ""; document.querySelector("#manual-pull-request").value = ""; document.querySelector("#manual-log-dialog").close(); showNotice(`Saved for ${new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).format(new Date(`${data.day}T12:00:00`))}. It will be included in consolidation.`);
+      } catch (error) { status.className = "status error"; status.textContent = error.message; }
+      finally { button.disabled = false; }
+    });
     document.querySelector("#browse-vault").addEventListener("click", () => openLinkDialog());
     document.querySelector("#link-close").addEventListener("click", () => document.querySelector("#link-dialog").close());
     document.querySelector("#note-search").addEventListener("input", renderNoteResults);

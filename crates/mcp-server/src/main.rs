@@ -9,7 +9,10 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use log_inbox_core::{
-    models::{DailyConsolidationJob, IgnoredLinkIdentity, LinkSelector, LogQuery, VaultLinkRule},
+    models::{
+        DailyConsolidationJob, IgnoredLinkIdentity, LinkSelector, LogEventInput, LogQuery,
+        VaultLinkRule,
+    },
     settings::Settings,
     store::Store,
 };
@@ -165,6 +168,24 @@ struct LinkingData {
     event_count: usize,
 }
 
+#[derive(Debug, Deserialize)]
+struct ManualLogInput {
+    message: String,
+    timestamp: String,
+    #[serde(default)]
+    vault_note_ids: Vec<String>,
+    #[serde(default)]
+    work_item: Option<String>,
+    #[serde(default)]
+    pull_request: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ManualLogOptions {
+    notes: Vec<vault_context::VaultNote>,
+    recent_note_ids: Vec<String>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -217,6 +238,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/", get(dashboard_page))
         .route("/favicon.ico", get(favicon))
         .route("/api/dashboard", get(dashboard_data))
+        .route("/api/logs/manual/options", get(manual_log_options))
+        .route("/api/logs/manual", post(create_manual_log))
         .route("/api/preferences", put(save_preferences))
         .route("/api/linking", get(linking_data))
         .route("/api/linking/scan", post(linking_data))
@@ -361,6 +384,144 @@ async fn dashboard_data(State(state): State<AppState>) -> Result<Json<DashboardD
         proposals,
         consolidations,
     }))
+}
+
+async fn manual_log_options(
+    State(state): State<AppState>,
+) -> Result<Json<ManualLogOptions>, ApiError> {
+    let catalog = state.vault_context.catalog().map_err(ApiError::internal)?;
+    let valid = catalog
+        .notes
+        .iter()
+        .map(|note| note.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    let recent_note_ids = state
+        .store
+        .all_events()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .into_iter()
+        .filter(|event| event.metadata.get("entry_kind").and_then(Value::as_str) == Some("manual"))
+        .flat_map(|event| {
+            event
+                .metadata
+                .get("canonical_note_candidates")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+        .filter(|id| valid.contains(id.as_str()) && seen.insert(id.clone()))
+        .take(5)
+        .collect();
+    Ok(Json(ManualLogOptions {
+        notes: catalog.notes,
+        recent_note_ids,
+    }))
+}
+
+async fn create_manual_log(
+    State(state): State<AppState>,
+    Json(input): Json<ManualLogInput>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let message = input.message.trim();
+    if message.is_empty() || message.len() > 4_000 {
+        return Err(ApiError::bad_request(
+            "work description must contain 1 to 4000 bytes",
+        ));
+    }
+    if input.vault_note_ids.len() > 8 {
+        return Err(ApiError::bad_request("select no more than 8 vault notes"));
+    }
+    let parsed_timestamp = DateTime::parse_from_rfc3339(input.timestamp.trim())
+        .map_err(|_| ApiError::bad_request("timestamp must include a timezone offset"))?;
+    let day = parsed_timestamp.format("%Y-%m-%d").to_string();
+    let timestamp = parsed_timestamp.with_timezone(&Utc);
+    let catalog = state.vault_context.catalog().map_err(ApiError::internal)?;
+    let mut note_ids = Vec::new();
+    let mut seen_note_ids = HashSet::new();
+    for id in input.vault_note_ids {
+        let id = id.trim().to_owned();
+        if !id.is_empty() && seen_note_ids.insert(id.clone()) {
+            note_ids.push(id);
+        }
+    }
+    if let Some(stale) = note_ids
+        .iter()
+        .find(|id| !catalog.notes.iter().any(|note| &note.id == *id))
+    {
+        return Err(ApiError::bad_request(format!(
+            "vault note is no longer available: {stale}"
+        )));
+    }
+    let work_item = validate_manual_reference(input.work_item, "work item")?;
+    let pull_request = validate_manual_reference(input.pull_request, "pull request")?;
+    let task_id = format!("manual_{}", uuid::Uuid::new_v4().simple());
+    let primary_note = note_ids.first().cloned();
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("agent".to_owned(), Value::String("human".to_owned()));
+    metadata.insert("entry_kind".to_owned(), Value::String("manual".to_owned()));
+    metadata.insert(
+        "event_type".to_owned(),
+        Value::String("complete".to_owned()),
+    );
+    metadata.insert("status".to_owned(), Value::String("completed".to_owned()));
+    metadata.insert("task_id".to_owned(), Value::String(task_id.clone()));
+    metadata.insert("session_id".to_owned(), Value::String(task_id));
+    metadata.insert("sequence".to_owned(), Value::from(1));
+    metadata.insert(
+        "canonical_note_candidates".to_owned(),
+        Value::Array(note_ids.iter().cloned().map(Value::String).collect()),
+    );
+    if let Some(workstream) = primary_note {
+        metadata.insert("workstream".to_owned(), Value::String(workstream));
+    }
+    if let Some(value) = work_item {
+        metadata.insert("work_item".to_owned(), Value::String(value));
+    }
+    if let Some(value) = pull_request {
+        metadata.insert("pull_request".to_owned(), Value::String(value));
+    }
+    let event = state
+        .store
+        .insert_event(LogEventInput {
+            source: "manual/dashboard".to_owned(),
+            level: Some("info".to_owned()),
+            timestamp: Some(timestamp),
+            message: message.to_owned(),
+            metadata: Some(metadata),
+            fingerprint: None,
+        })
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "id": event.id, "timestamp": event.timestamp, "day": day })),
+    ))
+}
+
+fn validate_manual_reference(
+    value: Option<String>,
+    label: &str,
+) -> Result<Option<String>, ApiError> {
+    let Some(value) = value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if value.len() > 2_048 {
+        return Err(ApiError::bad_request(format!("{label} is too long")));
+    }
+    if value.contains("://") {
+        let parsed = reqwest::Url::parse(&value)
+            .map_err(|_| ApiError::bad_request(format!("{label} URL is invalid")))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(ApiError::bad_request(format!(
+                "{label} URL must use http or https"
+            )));
+        }
+    }
+    Ok(Some(value))
 }
 
 async fn save_preferences(

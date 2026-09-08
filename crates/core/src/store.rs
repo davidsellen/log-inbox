@@ -377,6 +377,7 @@ impl Store {
             WHERE r.event_id IS NULL
               AND p.event_id IS NULL
               AND e.received_at <= ?1
+              AND COALESCE(json_extract(e.metadata_json, '$.entry_kind'), '') != 'manual'
             ORDER BY e.received_at ASC
             LIMIT ?2
             "#,
@@ -1084,6 +1085,31 @@ mod tests {
             store
                 .get_unstaged_events(Utc::now(), 10)
                 .expect("unstaged events reload")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn manual_entries_wait_for_daily_consolidation_instead_of_auto_staging() {
+        let store = temp_store();
+        store
+            .insert_event(LogEventInput {
+                source: "manual/dashboard".to_owned(),
+                level: Some("info".to_owned()),
+                timestamp: None,
+                message: "Documented the design decision".to_owned(),
+                metadata: Some(Map::from_iter([(
+                    "entry_kind".to_owned(),
+                    Value::from("manual"),
+                )])),
+                fingerprint: None,
+            })
+            .expect("manual event inserted");
+
+        assert!(
+            store
+                .get_unstaged_events(Utc::now(), 10)
+                .expect("unstaged automatic events load")
                 .is_empty()
         );
     }

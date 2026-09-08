@@ -11,6 +11,13 @@ The MCP service exposes a small local interface for reviewing Markdown proposals
 - Applying a proposal appends it to its daily note, marks its evidence reviewed, and removes the pending file.
 - Discarding a proposal marks its evidence reviewed with a discarded outcome, removes the pending file, and leaves the original logs in SQLite.
 
+## Manual Work Logs
+
+- A global **Add log** dialog captures one required work description, optional existing vault notes, optional work-item and pull-request references, and a local timestamp.
+- The dashboard validates selected notes against the current vault catalog and stores the entry through the same redacting event store without exposing an API key to the browser.
+- Manual entries do not create standalone automatic proposals. Whole-day consolidation renders them verbatim under **My notes** and sends only automated activity to the LLM.
+- Mixed reports place **My notes** before **Automated activity** while retaining every event ID for review, apply, and reconsolidation.
+
 ## Daily Consolidation
 
 1. The browser sends the selected local day's UTC start and end instants plus the expected daily-note filename.
@@ -43,6 +50,7 @@ The MCP service exposes a small local interface for reviewing Markdown proposals
 ## HTTP API
 
 - `GET /api/dashboard` returns preferences, generated instructions, and pending proposals.
+- `GET /api/logs/manual/options` returns selectable vault notes and recent choices; `POST /api/logs/manual` records a manual entry for daily consolidation.
 - `PUT /api/preferences` validates and persists non-secret preferences.
 - `GET /api/linking` returns the current catalog, observed identifiers, suggestions, and rules.
 - `POST /api/linking/scan` refreshes the read-only catalog view.
