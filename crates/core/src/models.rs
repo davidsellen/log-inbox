@@ -106,6 +106,31 @@ pub struct IgnoredLinkIdentity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextMapping {
+    pub id: String,
+    pub workspace_id: String,
+    pub selectors: Vec<LinkSelector>,
+    pub canonical_note_path: String,
+    pub enabled: bool,
+    pub source_identity: Option<String>,
+    pub source_digest: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IgnoredContextIdentity {
+    pub id: String,
+    pub workspace_id: String,
+    pub field: String,
+    pub value: String,
+    pub normalized_value: String,
+    pub source_identity: Option<String>,
+    pub source_digest: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackupVerification {
     pub path: PathBuf,
     pub schema_version: i64,

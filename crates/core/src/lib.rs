@@ -1,4 +1,5 @@
 pub mod auth;
+mod context_store;
 pub mod daily;
 mod daily_store;
 pub mod models;

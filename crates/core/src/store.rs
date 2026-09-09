@@ -533,6 +533,61 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 11 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE context_mappings (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    selectors_json TEXT NOT NULL,
+                    canonical_note_path TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    source_identity TEXT,
+                    source_digest TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(workspace_id, selectors_json),
+                    FOREIGN KEY(workspace_id) REFERENCES workspace_profiles(id) ON DELETE CASCADE
+                );
+                CREATE INDEX idx_context_mappings_workspace_note
+                    ON context_mappings(workspace_id, canonical_note_path);
+
+                CREATE TABLE ignored_context_identities (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    field TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    normalized_value TEXT NOT NULL,
+                    source_identity TEXT,
+                    source_digest TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(workspace_id, field, normalized_value),
+                    FOREIGN KEY(workspace_id) REFERENCES workspace_profiles(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE migration_items (
+                    operation_id TEXT NOT NULL,
+                    item_kind TEXT NOT NULL,
+                    source_identity TEXT NOT NULL,
+                    source_digest TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'inventoried', 'imported', 'cleanup_pending', 'cleaned',
+                        'preserved', 'error'
+                    )),
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(operation_id, item_kind, source_identity),
+                    FOREIGN KEY(operation_id) REFERENCES migration_journal(operation_id) ON DELETE CASCADE
+                );
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (11, 'workspace scoped context and migration items', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -1947,10 +2002,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 10);
+        assert_eq!(store.schema_version().expect("version reads"), 11);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 10);
+        assert_eq!(store.schema_version().expect("version remains"), 11);
     }
 
     #[test]
@@ -2018,7 +2073,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 10);
+        assert_eq!(verification.schema_version, 11);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());
