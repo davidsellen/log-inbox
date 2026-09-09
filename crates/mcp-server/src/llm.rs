@@ -291,7 +291,7 @@ fn render_manual_reference(kind: &str, value: &str) -> String {
     }
     let label = url
         .path_segments()
-        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back())
+        .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
         .filter(|segment| segment.chars().all(|character| character.is_ascii_digit()))
         .map(|id| {
             if kind == "pull_request" {
@@ -457,8 +457,7 @@ fn normalized_group_value(value: &str) -> String {
 fn normalized_reference_value(value: &str) -> String {
     value
         .split(|character: char| !character.is_ascii_digit())
-        .filter(|part| !part.is_empty())
-        .next_back()
+        .rfind(|part| !part.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| normalized_group_value(value))
 }
@@ -737,13 +736,12 @@ fn deterministic_title(event: &StoredLogEvent) -> String {
         }
     }
     for key in ["modules", "module"] {
-        if let Some(value) = event.metadata.get(key) {
-            if let Some(first) = value
+        if let Some(value) = event.metadata.get(key)
+            && let Some(first) = value
                 .as_str()
                 .or_else(|| value.as_array()?.first()?.as_str())
-            {
-                return first.to_owned();
-            }
+        {
+            return first.to_owned();
         }
     }
     event
@@ -1015,8 +1013,92 @@ fn default_mode() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
+    use serde::Deserialize;
     use serde_json::Map;
+
+    #[derive(Debug, Deserialize)]
+    struct GroupingFixtures {
+        schema_version: u64,
+        cases: Vec<GroupingCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct GroupingCase {
+        name: String,
+        events: Vec<FixtureEvent>,
+        expected_daily_prompt_event_ids: Vec<String>,
+        target_contract_note: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct FixtureEvent {
+        id: String,
+        timestamp: DateTime<Utc>,
+        received_at: DateTime<Utc>,
+        source: String,
+        message: String,
+        metadata: Map<String, Value>,
+        expected_group_key: String,
+    }
+
+    impl FixtureEvent {
+        fn stored(&self) -> StoredLogEvent {
+            StoredLogEvent {
+                id: self.id.clone(),
+                received_at: self.received_at,
+                timestamp: self.timestamp,
+                source: self.source.clone(),
+                level: "info".to_owned(),
+                message: self.message.clone(),
+                metadata: self.metadata.clone(),
+                fingerprint: None,
+                truncated: false,
+                reviewed: false,
+            }
+        }
+    }
+
+    #[test]
+    fn golden_daily_grouping_fixtures_characterize_the_baseline() {
+        let fixtures: GroupingFixtures =
+            serde_json::from_str(include_str!("../tests/fixtures/daily-grouping.json"))
+                .expect("daily grouping fixture is valid JSON");
+        assert_eq!(fixtures.schema_version, 1);
+
+        for case in fixtures.cases {
+            assert!(
+                !case.target_contract_note.trim().is_empty(),
+                "{} must explain the target contract",
+                case.name
+            );
+            let events = case
+                .events
+                .iter()
+                .map(FixtureEvent::stored)
+                .collect::<Vec<_>>();
+
+            for (fixture, event) in case.events.iter().zip(&events) {
+                assert_eq!(
+                    event_group_key(event),
+                    fixture.expected_group_key,
+                    "{}: unexpected durable group key for {}",
+                    case.name,
+                    fixture.id
+                );
+            }
+
+            let selected = events_for_prompt("daily-consolidation", &events)
+                .into_iter()
+                .map(|event| event.id.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                selected, case.expected_daily_prompt_event_ids,
+                "{}: prompt projection changed",
+                case.name
+            );
+        }
+    }
 
     #[tokio::test]
     async fn returns_reviewable_fallback_when_llm_is_not_configured() {

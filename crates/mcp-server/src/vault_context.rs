@@ -279,10 +279,9 @@ impl VaultContextProvider {
         for mapping in config.products {
             if mapping.aliases.iter().any(|alias| {
                 all_event_fields().any(|field| event_contains(events, field, "exact", alias))
-            }) {
-                if let Some(note) = find_note(&catalog.notes, &mapping.note) {
-                    candidates.insert(note.wikilink.clone());
-                }
+            }) && let Some(note) = find_note(&catalog.notes, &mapping.note)
+            {
+                candidates.insert(note.wikilink.clone());
             }
         }
         Ok(json!({

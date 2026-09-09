@@ -1,0 +1,13 @@
+{
+  "name": "log-inbox-browser-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:browser": "playwright test",
+    "test:browser:chromium": "playwright test --project=chromium",
+    "test:browser:firefox": "playwright test --project=firefox"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

@@ -124,16 +124,19 @@ All milestone acceptance criteria below are pending. Deliver small reviewable ch
 
 ### M0 — Freeze Contracts and Protect the Baseline
 
-- [ ] Add representative golden event/day fixtures and characterize useful existing behavior.
-- [ ] Specify the day/evidence/revision schema, state transitions, ownership markers and Apply recovery protocol.
+M0 is delivered as three behavior-preserving review slices: **M0a Contracts**, **M0b Characterization**, and **M0c Storage and security foundation**. Authentication and workspace identity must land before M1 exposes manual-entry, omission, dismissal, editing, or other new mutation endpoints.
+
+- [x] **M0a:** Specify the day/evidence/revision schema, state transitions, ownership markers and Apply recovery protocol in the [Daily domain contract](specs/daily-domain.md).
 - [ ] Define the single-owner deployment threat model, scopes, workspace binding, date semantics and retention exceptions.
-- [ ] Add versioned migrations, consistent backup/restore verification, and an idempotent migration journal.
-- [ ] Add formatting/Clippy checks and the browser test harness; record actual results instead of assuming the current suite passes.
+- [x] **M0b:** Add representative golden event/day fixtures and characterize useful existing behavior.
+- [x] Add formatting/Clippy checks and a Chromium/Firefox browser test harness; record actual results instead of assuming the current suite passes.
+- [ ] **M0c:** Add versioned migrations, consistent backup/restore verification, an idempotent migration journal, stable workspace identity, and the authentication/authorization foundation.
 
 Exit gate: contracts and fixtures are reviewable, the backup can be restored, and no new unauthenticated writable exposure has been introduced.
 
 ### M1 — Trustworthy Daily Preview
 
+- [ ] Develop the replacement behind a disabled feature gate. Its preview may read legacy evidence, but it cannot mutate review state or Markdown until M0c is complete.
 - [ ] Implement server-authoritative date navigation and one current candidate with immutable snapshots/revisions.
 - [ ] Tighten grouping/deduplication and preserve unique decision/validation evidence.
 - [ ] Implement strict structured generation, adaptive fields, evidence coverage and explicit failures without raw fallback.
@@ -145,7 +148,7 @@ Exit gate: representative days can be reviewed accurately without Knowledge setu
 
 ### M2 — Safe Apply and Coordinated Cutover
 
-- [ ] Enable authentication, CSRF and scoped sensitive access before the new writable mode.
+- [ ] Enforce the M0c authentication, CSRF and scoped sensitive-access foundation for every new mutation and write path.
 - [ ] Resolve all reads/writes from one stable workspace profile and reviewed daily convention/template.
 - [ ] Implement block diffs, conflict reconciliation, path safety, idempotency, recovery copies and Apply journaling.
 - [ ] Implement the migration protocol below, with dry-run reporting and source-preserving failure behavior.
