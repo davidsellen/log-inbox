@@ -137,3 +137,15 @@ pub struct MigrationJournalEntry {
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardSession {
+    pub token_digest: String,
+    pub csrf_digest: String,
+    pub scopes: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub idle_expires_at: DateTime<Utc>,
+    pub absolute_expires_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}

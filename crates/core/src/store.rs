@@ -1,8 +1,9 @@
 use crate::{
+    auth::{SessionCredentials, normalize_scopes, token_digest},
     models::{
-        BackupVerification, DailyConsolidationJob, IgnoredLinkIdentity, LogEventInput, LogQuery,
-        LogQueryResult, MarkReviewedResult, MigrationJournalEntry, SourceSummary, StagedEventGroup,
-        StoredLogEvent, VaultLinkRule, WorkspaceProfile,
+        BackupVerification, DailyConsolidationJob, DashboardSession, IgnoredLinkIdentity,
+        LogEventInput, LogQuery, LogQueryResult, MarkReviewedResult, MigrationJournalEntry,
+        SourceSummary, StagedEventGroup, StoredLogEvent, VaultLinkRule, WorkspaceProfile,
     },
     redaction::{redact_metadata, redact_text},
 };
@@ -209,6 +210,38 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+
+        if current < 4 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE owner_security (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                    secret_hash TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE dashboard_sessions (
+                    token_digest TEXT PRIMARY KEY,
+                    csrf_digest TEXT NOT NULL,
+                    scopes_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    idle_expires_at TEXT NOT NULL,
+                    absolute_expires_at TEXT NOT NULL,
+                    revoked_at TEXT
+                );
+
+                CREATE INDEX idx_dashboard_sessions_expiry
+                    ON dashboard_sessions(idle_expires_at, absolute_expires_at);
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (4, 'dashboard authentication', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -292,6 +325,152 @@ impl Store {
         )?;
         self.workspace_profile(&id)?
             .context("created workspace profile missing")
+    }
+
+    pub fn set_owner_secret_hash(&self, secret_hash: &str) -> Result<()> {
+        anyhow::ensure!(
+            !secret_hash.trim().is_empty(),
+            "owner secret hash is required"
+        );
+        let conn = self.connect()?;
+        conn.execute(
+            r#"
+            INSERT INTO owner_security (singleton, secret_hash, updated_at)
+            VALUES (1, ?1, ?2)
+            ON CONFLICT(singleton) DO UPDATE SET
+                secret_hash = excluded.secret_hash,
+                updated_at = excluded.updated_at
+            "#,
+            params![secret_hash, Utc::now().to_rfc3339()],
+        )?;
+        self.revoke_all_dashboard_sessions()?;
+        Ok(())
+    }
+
+    pub fn owner_secret_hash(&self) -> Result<Option<String>> {
+        let conn = self.connect()?;
+        conn.query_row(
+            "SELECT secret_hash FROM owner_security WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn create_dashboard_session(
+        &self,
+        credentials: &SessionCredentials,
+        scopes: &[String],
+        now: DateTime<Utc>,
+        idle_ttl: Duration,
+        absolute_ttl: Duration,
+    ) -> Result<DashboardSession> {
+        anyhow::ensure!(idle_ttl > Duration::zero(), "idle TTL must be positive");
+        anyhow::ensure!(absolute_ttl >= idle_ttl, "absolute TTL must cover idle TTL");
+        let scopes = normalize_scopes(scopes)?;
+        let session = DashboardSession {
+            token_digest: token_digest(&credentials.session_token),
+            csrf_digest: token_digest(&credentials.csrf_token),
+            scopes,
+            created_at: now,
+            last_seen_at: now,
+            idle_expires_at: now + idle_ttl,
+            absolute_expires_at: now + absolute_ttl,
+            revoked_at: None,
+        };
+        let conn = self.connect()?;
+        conn.execute(
+            r#"
+            INSERT INTO dashboard_sessions
+                (token_digest, csrf_digest, scopes_json, created_at, last_seen_at,
+                 idle_expires_at, absolute_expires_at, revoked_at)
+            VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, NULL)
+            "#,
+            params![
+                session.token_digest,
+                session.csrf_digest,
+                serde_json::to_string(&session.scopes)?,
+                now.to_rfc3339(),
+                session.idle_expires_at.to_rfc3339(),
+                session.absolute_expires_at.to_rfc3339()
+            ],
+        )?;
+        Ok(session)
+    }
+
+    pub fn authenticate_dashboard_session(
+        &self,
+        session_token: &str,
+        csrf_token: Option<&str>,
+        required_scope: &str,
+        now: DateTime<Utc>,
+        idle_ttl: Duration,
+    ) -> Result<DashboardSession> {
+        let digest = token_digest(session_token);
+        let mut session = self
+            .dashboard_session(&digest)?
+            .context("dashboard session is not valid")?;
+        anyhow::ensure!(session.revoked_at.is_none(), "dashboard session is revoked");
+        anyhow::ensure!(
+            now < session.idle_expires_at,
+            "dashboard session idle timeout expired"
+        );
+        anyhow::ensure!(
+            now < session.absolute_expires_at,
+            "dashboard session expired"
+        );
+        anyhow::ensure!(
+            session.scopes.iter().any(|scope| scope == required_scope),
+            "dashboard session lacks required scope"
+        );
+        if let Some(csrf_token) = csrf_token {
+            anyhow::ensure!(
+                token_digest(csrf_token) == session.csrf_digest,
+                "CSRF token does not match the dashboard session"
+            );
+        }
+        session.last_seen_at = now;
+        session.idle_expires_at = (now + idle_ttl).min(session.absolute_expires_at);
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE dashboard_sessions SET last_seen_at = ?1, idle_expires_at = ?2 WHERE token_digest = ?3",
+            params![
+                session.last_seen_at.to_rfc3339(),
+                session.idle_expires_at.to_rfc3339(),
+                session.token_digest
+            ],
+        )?;
+        Ok(session)
+    }
+
+    pub fn revoke_dashboard_session(&self, session_token: &str) -> Result<bool> {
+        let conn = self.connect()?;
+        let changed = conn.execute(
+            "UPDATE dashboard_sessions SET revoked_at = ?1 WHERE token_digest = ?2 AND revoked_at IS NULL",
+            params![Utc::now().to_rfc3339(), token_digest(session_token)],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn revoke_all_dashboard_sessions(&self) -> Result<usize> {
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE dashboard_sessions SET revoked_at = ?1 WHERE revoked_at IS NULL",
+            params![Utc::now().to_rfc3339()],
+        )
+        .map_err(Into::into)
+    }
+
+    fn dashboard_session(&self, digest: &str) -> Result<Option<DashboardSession>> {
+        let conn = self.connect()?;
+        conn.query_row(
+            "SELECT token_digest, csrf_digest, scopes_json, created_at, last_seen_at, idle_expires_at, absolute_expires_at, revoked_at FROM dashboard_sessions WHERE token_digest = ?1",
+            params![digest],
+            dashboard_session_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn activate_workspace_profile(&self, id: &str) -> Result<WorkspaceProfile> {
@@ -1218,6 +1397,23 @@ fn migration_journal_from_row(row: &Row<'_>) -> rusqlite::Result<MigrationJourna
     })
 }
 
+fn dashboard_session_from_row(row: &Row<'_>) -> rusqlite::Result<DashboardSession> {
+    let scopes_json: String = row.get(2)?;
+    let scopes = serde_json::from_str(&scopes_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(DashboardSession {
+        token_digest: row.get(0)?,
+        csrf_digest: row.get(1)?,
+        scopes,
+        created_at: parse_utc(row.get(3)?),
+        last_seen_at: parse_utc(row.get(4)?),
+        idle_expires_at: parse_utc(row.get(5)?),
+        absolute_expires_at: parse_utc(row.get(6)?),
+        revoked_at: row.get::<_, Option<String>>(7)?.map(parse_utc),
+    })
+}
+
 fn schema_version(conn: &Connection) -> Result<i64> {
     conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
@@ -1350,10 +1546,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 3);
+        assert_eq!(store.schema_version().expect("version reads"), 4);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 3);
+        assert_eq!(store.schema_version().expect("version remains"), 4);
     }
 
     #[test]
@@ -1375,7 +1571,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 3);
+        assert_eq!(verification.schema_version, 4);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());
@@ -1494,6 +1690,105 @@ mod tests {
             .expect("migration completes");
         assert_eq!(completed.status, "completed");
         assert!(completed.completed_at.is_some());
+    }
+
+    #[test]
+    fn scopes_expires_and_revokes_dashboard_sessions() {
+        use crate::auth::{generate_session_credentials, hash_owner_secret};
+
+        let store = temp_store();
+        let owner_hash = hash_owner_secret("owner-secret-with-enough-bytes").expect("owner hashes");
+        store
+            .set_owner_secret_hash(&owner_hash)
+            .expect("owner hash stores");
+        assert_eq!(
+            store.owner_secret_hash().expect("owner reads"),
+            Some(owner_hash)
+        );
+
+        let credentials = generate_session_credentials();
+        let now = Utc::now();
+        let session = store
+            .create_dashboard_session(
+                &credentials,
+                &["logs:read".to_owned(), "review:write".to_owned()],
+                now,
+                Duration::minutes(30),
+                Duration::hours(8),
+            )
+            .expect("session stores");
+        assert!(!session.token_digest.contains(&credentials.session_token));
+        assert!(
+            store
+                .authenticate_dashboard_session(
+                    &credentials.session_token,
+                    None,
+                    "logs:read",
+                    now + Duration::minutes(1),
+                    Duration::minutes(30),
+                )
+                .is_ok()
+        );
+        assert!(
+            store
+                .authenticate_dashboard_session(
+                    &credentials.session_token,
+                    Some("wrong-csrf"),
+                    "review:write",
+                    now + Duration::minutes(1),
+                    Duration::minutes(30),
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .authenticate_dashboard_session(
+                    &credentials.session_token,
+                    Some(&credentials.csrf_token),
+                    "vault:write",
+                    now + Duration::minutes(1),
+                    Duration::minutes(30),
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .revoke_dashboard_session(&credentials.session_token)
+                .expect("revokes")
+        );
+        assert!(
+            store
+                .authenticate_dashboard_session(
+                    &credentials.session_token,
+                    None,
+                    "logs:read",
+                    now + Duration::minutes(2),
+                    Duration::minutes(30),
+                )
+                .is_err()
+        );
+
+        let expiring = generate_session_credentials();
+        store
+            .create_dashboard_session(
+                &expiring,
+                &["logs:read".to_owned()],
+                now,
+                Duration::minutes(5),
+                Duration::minutes(10),
+            )
+            .expect("expiring session stores");
+        assert!(
+            store
+                .authenticate_dashboard_session(
+                    &expiring.session_token,
+                    None,
+                    "logs:read",
+                    now + Duration::minutes(6),
+                    Duration::minutes(5),
+                )
+                .is_err()
+        );
     }
 
     #[test]
