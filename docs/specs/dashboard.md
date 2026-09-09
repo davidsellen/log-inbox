@@ -47,9 +47,10 @@ The MCP service exposes a small local interface for reviewing Markdown proposals
 - Persist user-approved exact or prefix rules in SQLite; optional conditions make a rule specific to a branch, work item, module, or other supported field.
 - Treat model output as a suggestion only. The resolver accepts only notes present in the current catalog.
 - Browser mode uses an explicitly selected local directory, persists its handle only in browser storage, and synchronizes a derived catalog for background consolidation.
-- **Destinations** keeps vault-scoped semantic roles separate from identifier-to-note links. Suggestions are editable, numeric prefixes are not interpreted as policy, and nothing is saved without confirmation.
-- The complete Markdown tree is used only for inspection or inside a task-specific destination picker. Operational folders remain visible but cannot be selected as destinations.
-- Connection, rescan, starter, and template actions live under Knowledge settings. Setup is additive; existing files are never intentionally opened for writing.
+- **Structure** keeps vault-scoped semantic roles separate from identifier-to-note links. Detected folders, the unnumbered baseline, blank setup, and imported templates always begin as editable drafts; numeric prefixes are not interpreted as policy.
+- Existing locations are selected through a search-first folder picker. Raw Markdown files and an explorer-style tree are not part of structure setup; canonical notes remain searchable in Links and Add Log.
+- Review lists every destination, resolved example, reused folder, and missing folder before Apply. Browser mode creates only approved missing directories and rolls back newly created empty directories if saving fails. Mounted mode remains read-only.
+- Connection and rescan actions live under Knowledge settings. Structure templates are configuration manifests and never copy Markdown content.
 - Browser-mode proposal application prepares content server-side, verifies the source and result hashes in the browser, and acknowledges evidence only after the write is verified.
 - The Queue always shows the resolved daily-summary destination and makes clear that the note is written only after review and Apply.
 
@@ -63,7 +64,7 @@ The MCP service exposes a small local interface for reviewing Markdown proposals
 - `POST`, `PUT`, and `DELETE /api/linking/rules` manage persisted mappings.
 - `PUT /api/linking/ignored` hides an unresolved identifier; `DELETE /api/linking/ignored/{id}` restores it. Ignoring is reversible and never deletes events or vault notes.
 - `GET /api/vault/connection` reports browser, mounted, or unconfigured mode; `PUT` and `DELETE /api/vault/browser/catalog` synchronize or disconnect a browser-selected vault.
-- `GET /api/knowledge` returns the active vault profile, total/linkable counts, saved destinations, editable suggestions, folders, and protected paths. `PUT /api/knowledge/destinations/{role}` validates and saves one destination for that vault and catalog revision.
+- `GET /api/knowledge` returns the active vault profile, total/linkable counts, saved destinations, editable suggestions, folders, and protected paths. `POST /api/knowledge/structure/preview` validates a complete draft and reports examples plus existing and missing folders. `PUT /api/knowledge/structure` atomically saves the reviewed structure for that vault and catalog revision.
 - `POST /api/proposals/{id}/browser-apply/prepare` renders an idempotent daily-note result; `POST /api/proposals/{id}/browser-apply/acknowledge` consumes it after browser verification.
 - `POST /api/consolidations/daily` idempotently queues a durable daily consolidation job.
 - `GET /api/consolidations/{job_id}` returns authoritative durable job state.

@@ -22,6 +22,7 @@
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
     body { margin: 0; background: var(--canvas); color: var(--ink); }
     button, input, select, textarea { font: inherit; letter-spacing: 0; }
     button { cursor: pointer; }
@@ -96,12 +97,24 @@
     .pill.ambiguous { color: var(--danger); }
     .mapping-group { background: var(--surface); border: 1px solid var(--line); border-radius: 7px; margin-bottom: 12px; padding: 15px 16px; }
     .mapping-group h3 { margin: 0 0 7px; }
-    .destination-list { display: grid; gap: 12px; margin-top: 14px; }
-    .destination-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+    .structure-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; margin: 14px 0; }
+    .structure-toolbar .inline-actions { flex-wrap: wrap; }
+    .destination-list { display: grid; gap: 10px; margin-top: 14px; }
+    .destination-card { display: grid; grid-template-columns: auto minmax(180px, .8fr) minmax(220px, 1fr) minmax(220px, 1fr) auto; gap: 14px; align-items: center; padding: 14px 16px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
     .destination-card h3 { margin: 0 0 4px; }
+    .destination-card label { margin: 0; }
     .destination-path { margin-top: 9px; font: 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
     .destination-status { color: var(--accent); font-size: 12px; font-weight: 700; }
     .destination-status.pending { color: var(--pending); }
+    .structure-summary { padding: 12px 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+    .structure-summary.dirty { border-color: #d7b36a; background: #fff9ed; }
+    .structure-actions { display: flex; justify-content: flex-end; align-items: center; gap: 9px; margin-top: 14px; }
+    .folder-results { display: grid; gap: 6px; max-height: 52vh; overflow: auto; margin-top: 12px; }
+    .folder-result { display: flex; justify-content: space-between; gap: 12px; text-align: left; border: 1px solid var(--line); background: var(--surface); border-radius: 5px; padding: 10px 12px; }
+    .folder-result:hover, .folder-result.selected { border-color: var(--accent); background: var(--active); }
+    .review-list { display: grid; gap: 8px; margin: 12px 0; }
+    .review-row { display: grid; grid-template-columns: minmax(140px, .5fr) minmax(0, 1fr); gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+    .review-paths { max-height: 180px; overflow: auto; padding: 10px 12px; background: var(--code); border-radius: 5px; font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
     .knowledge-section-title { margin-top: 28px; }
     .settings-card { padding: 16px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); margin-bottom: 12px; }
     .saved-rule { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 13px; }
@@ -119,32 +132,6 @@
     .recent-notes { margin: 12px 0; }
     .recent-notes .button { margin: 5px 5px 0 0; font-weight: 600; }
     .manual-more { border-top: 1px solid var(--line); padding-top: 3px; }
-    .vault-browser { min-height: 420px; margin-top: 12px; }
-    .vault-folders { max-height: 54vh; padding: 2px 0; overflow: auto; }
-    .vault-folders[hidden] { display: none; }
-    .vault-tree, .vault-tree-group { list-style: none; margin: 0; padding: 0; }
-    .vault-tree-group { position: relative; margin-left: 17px; padding-left: 9px; }
-    .vault-tree-group::before { content: ""; position: absolute; left: 2px; top: 0; bottom: 8px; border-left: 1px solid #cbd4cf; }
-    .vault-tree-item { position: relative; }
-    .vault-tree-group > .vault-tree-item::before { content: ""; position: absolute; left: -7px; top: 17px; width: 7px; border-top: 1px solid #cbd4cf; }
-    .vault-folder { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 34px; border: 0; background: transparent; color: var(--ink); text-align: left; padding: 5px 7px; border-radius: 4px; }
-    .vault-folder:hover { background: #edf1ef; }
-    .vault-folder:focus-visible { outline: 2px solid #72b896; outline-offset: -2px; }
-    .vault-folder.selected { background: var(--active); color: var(--accent); font-weight: 700; }
-    .vault-chevron { width: 13px; flex: 0 0 13px; color: var(--muted); font-size: 11px; text-align: center; }
-    .vault-chevron.empty { visibility: hidden; }
-    .vault-folder-icon { position: relative; width: 15px; height: 11px; flex: 0 0 15px; border-radius: 2px; background: #8a9690; }
-    .vault-folder-icon::before { content: ""; position: absolute; left: 1px; top: -3px; width: 7px; height: 4px; border-radius: 2px 2px 0 0; background: #8a9690; }
-    .vault-file-icon { position: relative; width: 13px; height: 16px; flex: 0 0 13px; border: 1px solid #9aa49f; border-radius: 1px; }
-    .vault-file-icon::after { content: ""; position: absolute; left: 2px; right: 2px; top: 5px; height: 1px; background: #b2bbb6; box-shadow: 0 3px #b2bbb6; }
-    .vault-folder-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .vault-note-pane { min-width: 0; }
-    .vault-breadcrumb { min-height: 30px; margin-bottom: 8px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
-    .vault-breadcrumb strong { color: var(--ink); }
-    .vault-note-list { display: grid; align-content: start; gap: 6px; }
-    .vault-note-row { padding: 9px 10px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); text-align: left; }
-    .vault-note-row small { display: block; color: var(--muted); margin-top: 3px; }
-    .vault-setup-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 14px; margin-top: 14px; border-top: 1px solid var(--line); }
     .mapping-preview { margin: 12px 0; padding: 11px; background: var(--active); border-radius: 5px; font-size: 13px; }
     .advanced-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding-top: 10px; }
     .toast { position: fixed; right: 22px; bottom: 22px; display: flex; align-items: center; gap: 12px; background: #17201c; color: white; padding: 12px 14px; border-radius: 7px; box-shadow: 0 8px 28px rgba(0,0,0,.2); z-index: 3; }
@@ -162,8 +149,7 @@
       .topbar-inner, .shell { padding-left: 16px; padding-right: 16px; }
       .shell { padding-top: 18px; }
       .settings { grid-template-columns: 1fr; }
-      .identity-card, .advanced-grid, .destination-card { grid-template-columns: 1fr; }
-      .vault-folders { max-height: 48vh; }
+      .identity-card, .advanced-grid, .destination-card, .review-row { grid-template-columns: 1fr; }
       .proposal-head { grid-template-columns: 1fr; }
       .proposal-head .button { justify-self: start; }
       .section-head { align-items: flex-start; }
@@ -205,10 +191,10 @@
     <section id="linking-panel" class="panel">
       <div class="section-head">
         <div><h1>Knowledge</h1><div id="linking-count" class="count">Choose where useful knowledge belongs.</div></div>
-        <div class="link-tools"><span id="vault-status" class="subtle"></span><span id="linking-status" class="status"></span><button id="browse-vault" class="button" type="button">Inspect vault</button></div>
+        <div class="link-tools"><span id="vault-status" class="subtle"></span><span id="linking-status" class="status"></span></div>
       </div>
-      <nav class="link-tabs" aria-label="Knowledge views"><button class="link-tab" data-link-view="destinations" aria-selected="true">Destinations</button><button class="link-tab" data-link-view="links" aria-selected="false">Links <span id="attention-count"></span></button><button class="link-tab" data-link-view="ignored" aria-selected="false">Ignored <span id="ignored-count"></span></button><button class="link-tab" data-link-view="settings" aria-selected="false">Settings</button></nav>
-      <section id="link-destinations" class="link-view"><div id="knowledge-summary" class="subtle"></div><div id="destination-list" class="destination-list" aria-live="polite"></div></section>
+      <nav class="link-tabs" aria-label="Knowledge views"><button class="link-tab" data-link-view="destinations" aria-selected="true">Structure</button><button class="link-tab" data-link-view="links" aria-selected="false">Links <span id="attention-count"></span></button><button class="link-tab" data-link-view="ignored" aria-selected="false">Ignored <span id="ignored-count"></span></button><button class="link-tab" data-link-view="settings" aria-selected="false">Settings</button></nav>
+      <section id="link-destinations" class="link-view"><div id="knowledge-summary" class="structure-summary"></div><div class="structure-toolbar"><div class="inline-actions"><button id="structure-detected" class="button" type="button">Use detected</button><button id="structure-baseline" class="button" type="button">Developer baseline</button><button id="structure-blank" class="button" type="button">Start blank</button></div><div class="inline-actions"><button id="structure-import-button" class="button" type="button">Import template</button><button id="structure-export" class="button" type="button">Export template</button><input id="structure-import" type="file" accept="application/json,.json" hidden></div></div><div id="destination-list" class="destination-list" aria-live="polite"></div><div class="structure-actions"><span id="structure-status" class="status" aria-live="polite"></span><button id="structure-reset" class="button" type="button">Reset</button><button id="structure-review" class="button primary" type="button">Review changes</button></div></section>
       <section id="link-links" class="link-view" hidden><div class="link-view-head"><div><h2>Names that need a home</h2><div class="subtle">Link useful names to canonical notes; ignore noise.</div></div><div class="link-tools"><input id="link-search" type="search" placeholder="Search names or notes" aria-label="Search knowledge links"><label class="check"><input id="show-technical" type="checkbox"> Show technical names</label></div></div><div id="attention-list" class="identity-list" aria-live="polite"></div><h2 class="knowledge-section-title">Saved links <span id="rules-count"></span></h2><div id="saved-rules"></div><details><summary>Automatic matches</summary><div id="automatic-list" class="identity-list"></div></details></section>
       <section id="link-ignored" class="link-view" hidden><div class="link-view-head"><div><h2>Ignored names</h2><div class="subtle">Hidden from Needs attention. Restore one whenever it becomes useful.</div></div></div><div id="ignored-list" class="identity-list"></div></section>
       <section id="link-settings" class="link-view" hidden><div id="knowledge-settings"></div></section>
@@ -250,12 +236,20 @@
     </div>
   </dialog>
 
-  <dialog id="vault-dialog">
+  <dialog id="folder-dialog">
     <div class="dialog-body">
-      <div class="dialog-head"><div><h2 id="vault-dialog-title">Inspect vault</h2><div id="vault-dialog-meta" class="subtle"></div></div><button id="vault-close" class="button" type="button">Close</button></div>
-      <input id="vault-search" type="search" placeholder="Search note titles, aliases, or paths" aria-label="Search vault notes">
-      <div id="vault-browser" class="vault-browser"><nav id="vault-folders" class="vault-folders" aria-label="Vault files"></nav><section id="vault-search-pane" class="vault-note-pane" aria-label="Vault search results" hidden><div id="vault-breadcrumb" class="vault-breadcrumb"></div><div id="vault-notes" class="vault-note-list"></div></section></div>
-      <div id="vault-picker-summary" class="mapping-preview" hidden><div id="vault-picker-path"></div><label id="vault-template-label">Path pattern<input id="vault-path-template" autocomplete="off"></label></div><div class="vault-setup-actions"><button id="vault-use-folder" class="button primary" type="button" hidden>Use this folder</button><button id="vault-create-folder" class="button" type="button" hidden>Create folder here</button><button id="vault-connect" class="button" type="button">Choose Markdown vault</button><button id="vault-rescan" class="button" type="button">Rescan</button><button id="vault-starter" class="button" type="button">Add starter structure</button><button id="vault-template" class="button" type="button">Import template</button><button id="vault-undo" class="button" type="button">Undo last setup</button><button id="vault-disconnect" class="button danger" type="button">Use mounted vault</button><span id="vault-action-status" class="status" aria-live="polite"></span></div>
+      <div class="dialog-head"><div><h2 id="folder-dialog-title">Choose an existing folder</h2><div class="subtle">Only folders are shown. Markdown files remain in your editor.</div></div><button id="folder-close" class="button" type="button">Close</button></div>
+      <input id="folder-search" type="search" placeholder="Search folder paths" aria-label="Search vault folders">
+      <label class="check"><input id="folder-show-all" type="checkbox"> Show all folders</label>
+      <div id="folder-results" class="folder-results" role="listbox"></div>
+    </div>
+  </dialog>
+
+  <dialog id="structure-review-dialog">
+    <div class="dialog-body">
+      <div class="dialog-head"><div><h2>Review knowledge structure</h2><div class="subtle">Nothing changes until you apply this review.</div></div><button id="structure-review-close" class="button" type="button">Close</button></div>
+      <div id="structure-review-content"></div>
+      <div class="dialog-actions"><span id="structure-apply-status" class="status" aria-live="polite"></span><button id="structure-review-cancel" class="button" type="button">Cancel</button><button id="structure-apply" class="button primary" type="button">Apply structure</button></div>
     </div>
   </dialog>
 
@@ -282,7 +276,7 @@
   <div id="link-toast" class="toast" role="status" hidden><span id="toast-text"></span><button id="toast-undo" type="button">Undo</button></div>
 
   <script>
-    const state = { instructions: "", preview: null, proposals: [], consolidations: [], linking: null, knowledge: null, destinationDraft: null, linkDraft: null, selectedNoteId: null, manualOptions: null, manualNoteIds: [], vaultHandle: null, vaultConnection: null, vaultFolder: "", vaultFolders: [], vaultExpanded: new Set([""]), vaultTreeFocus: "", toastTimer: null, awaitingJobId: null, pollTimer: null, preferencesLoaded: false };
+    const state = { instructions: "", preview: null, proposals: [], consolidations: [], linking: null, knowledge: null, structureDraft: null, structurePreview: null, folderRole: null, linkDraft: null, selectedNoteId: null, manualOptions: null, manualNoteIds: [], vaultHandle: null, vaultConnection: null, vaultFolders: [], toastTimer: null, awaitingJobId: null, pollTimer: null, preferencesLoaded: false };
     const queue = document.querySelector("#queue");
     const count = document.querySelector("#queue-count");
     const healthText = document.querySelector("#health-text");
@@ -445,10 +439,10 @@
       if (!await ensureVaultPermission(handle, askPermission)) throw new Error("Vault permission is required");
       const files = await collectVaultFiles(handle); state.vaultFolders = await collectVaultFolders(handle); const treePaths = await collectVaultTreePaths(handle);
       const vaultId = requestedVaultId || state.vaultConnection?.mode === "browser" && state.vaultConnection.vault_id || await storedVaultId() || crypto.randomUUID();
-      const response = await fetch("/api/vault/browser/catalog", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ vault_id: vaultId, name: handle.name, files, tree_paths: treePaths }) });
+      const response = await fetch("/api/vault/browser/catalog", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ vault_id: vaultId, name: handle.name, files, markdown_paths: treePaths, folder_paths: state.vaultFolders.filter(Boolean) }) });
       const data = await response.json(); if (!response.ok) throw new Error(data.error || "Vault scan failed");
       state.vaultHandle = handle; state.vaultConnection = { mode: "browser", vault_id: data.vault_id, name: handle.name, revision: data.revision, note_count: data.notes.length };
-      await saveVaultHandle(handle); await saveVaultId(data.vault_id); await loadLinking(); await loadKnowledge(); renderVaultStatus(); renderVaultBrowser(); return data;
+      await saveVaultHandle(handle); await saveVaultId(data.vault_id); await loadLinking(); await loadKnowledge(); renderVaultStatus(); return data;
     }
 
     async function connectVault() {
@@ -469,12 +463,28 @@
       daily_activity: { title: "Daily activity", description: "Chronological summaries written only after review.", template: true },
       product_knowledge: { title: "Product knowledge", description: "Canonical product and feature notes used for links.", template: false },
       engineering_knowledge: { title: "Engineering knowledge", description: "Canonical systems, infrastructure, and technology notes.", template: false },
-      decision_records: { title: "Decision records", description: "Future standalone records beside the mapped subject.", template: true, future: true },
-      feature_recaps: { title: "Feature recaps", description: "Future managed updates to mapped feature or system notes.", template: false, future: true }
+      decision_records: { title: "Decision records", description: "Standalone records beside the mapped subject.", template: true },
+      feature_recaps: { title: "Feature recaps", description: "Managed updates to mapped feature or system notes.", template: false }
     };
 
     function destinationFor(role) { return state.knowledge?.destinations.find((item) => item.role === role) || null; }
     function suggestionFor(role) { return state.knowledge?.suggestions.find((item) => item.role === role) || null; }
+    function draftFor(role) { return state.structureDraft?.find((item) => item.role === role) || null; }
+    function cloneDestinations(items) { return items.map((item) => ({ role: item.role, base_path: item.base_path || "", path_template: item.path_template || "", enabled: Boolean(item.enabled) })); }
+    function detectedStructure() { return cloneDestinations(Object.keys(destinationRoles).map((role) => destinationFor(role) || suggestionFor(role))); }
+    function baselineStructure() {
+      return cloneDestinations([
+        { role: "daily_activity", base_path: "Work Log", path_template: "{year}/{month_name}/Daily log {month_name} {day}.md", enabled: true },
+        { role: "product_knowledge", base_path: "Products", path_template: "", enabled: true },
+        { role: "engineering_knowledge", base_path: "Engineering", path_template: "", enabled: true },
+        { role: "decision_records", base_path: "", path_template: "Decisions/{date} {slug}.md", enabled: false },
+        { role: "feature_recaps", base_path: "", path_template: "", enabled: false }
+      ]);
+    }
+    function blankStructure() { return baselineStructure().map((item) => ({ ...item, base_path: "", enabled: false })); }
+    function resetStructureDraft(items = detectedStructure()) { state.structureDraft = cloneDestinations(items); state.structurePreview = null; renderKnowledge(); }
+    function structureDirty() { return JSON.stringify(state.structureDraft || []) !== JSON.stringify(cloneDestinations(state.knowledge?.destinations || [])); }
+    function markStructureDirty() { const summary = document.querySelector("#knowledge-summary"); summary.className = "structure-summary dirty"; summary.textContent = "Unsaved structure draft · Review changes before anything is saved or created."; document.querySelector("#structure-reset").disabled = false; document.querySelector("#structure-review").disabled = false; state.structurePreview = null; }
 
     function resolvePathTemplate(template, date = selectedDay().start, slug = "decision-title") {
       const monthName = new Intl.DateTimeFormat("en", { month: "short" }).format(date);
@@ -510,7 +520,7 @@
     async function loadKnowledge() {
       const response = await fetch("/api/knowledge"); const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Knowledge settings could not be loaded");
-      state.knowledge = data; renderKnowledge(); renderDailyDestination();
+      state.knowledge = data; if (!state.structureDraft || !structureDirty()) state.structureDraft = detectedStructure(); renderKnowledge(); renderDailyDestination();
     }
 
     function destinationExample(destination) {
@@ -522,208 +532,72 @@
 
     function renderKnowledge() {
       if (!state.knowledge) return;
-      document.querySelector("#knowledge-summary").textContent = `${state.knowledge.vault.total_markdown_files} Markdown files · ${state.knowledge.vault.linkable_notes} linkable knowledge notes · Suggestions are editable and never saved automatically.`;
+      if (!state.structureDraft) state.structureDraft = detectedStructure();
+      const summary = document.querySelector("#knowledge-summary"); summary.className = `structure-summary${structureDirty() ? " dirty" : ""}`;
+      summary.textContent = structureDirty() ? "Unsaved structure draft · Review changes before anything is saved or created." : `${state.knowledge.vault.linkable_notes} linkable notes · Structure is scoped to this vault.`;
       const root = document.querySelector("#destination-list"); root.replaceChildren();
       Object.entries(destinationRoles).forEach(([role, meta]) => {
-        const mountedDaily = role === "daily_activity" && state.vaultConnection?.mode === "mounted"; const configured = destinationFor(role); const suggestion = suggestionFor(role); const shown = configured || suggestion;
-        const card = element("article", "destination-card"); const body = element("div");
-        body.append(element("h3", "", meta.title), element("p", "subtle", meta.description));
-        const status = element("div", `destination-status${configured || mountedDaily ? "" : " pending"}`, mountedDaily ? "Managed by deployment" : configured ? "Configured" : suggestion?.base_path ? "Suggested from your vault" : meta.future ? "Available for future proposals" : "Needs setup");
-        body.append(status, element("div", "destination-path", mountedDaily ? dailyDestination() : destinationExample(shown)));
-        const action = element("button", "button", mountedDaily ? "Deployment setting" : meta.future ? "Planned" : configured ? "Change" : suggestion?.base_path ? "Review suggestion" : "Set up"); action.type = "button"; action.disabled = Boolean(meta.future || mountedDaily); if (!meta.future && !mountedDaily) action.addEventListener("click", () => openDestinationPicker(role));
-        card.append(body, action); root.append(card);
+        const draft = draftFor(role); const mountedDaily = role === "daily_activity" && state.vaultConnection?.mode === "mounted"; if (mountedDaily) draft.enabled = true;
+        const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = mountedDaily || draft.enabled; enabled.disabled = mountedDaily; enabled.setAttribute("aria-label", `Enable ${meta.title}`); enabled.addEventListener("change", () => { draft.enabled = enabled.checked; state.structurePreview = null; renderKnowledge(); });
+        const body = element("div"); body.append(element("h3", "", meta.title), element("p", "subtle", meta.description));
+        const pathLabel = element("label", "", "Folder"); const path = document.createElement("input"); path.value = mountedDaily ? state.vaultConnection.daily_notes_path || "Deployment setting" : draft.base_path; path.disabled = mountedDaily || !draft.enabled; path.placeholder = role === "decision_records" ? "Beside mapped subject" : "Relative vault path"; path.addEventListener("input", () => { draft.base_path = path.value; markStructureDirty(); }); pathLabel.append(path);
+        const detail = element("div");
+        if (meta.template) { const templateLabel = element("label", "", "Path pattern"); const template = document.createElement("input"); const example = element("div", "destination-path", mountedDaily ? dailyDestination() : `Example: ${destinationExample(draft)}`); template.value = draft.path_template; template.disabled = mountedDaily || !draft.enabled; template.addEventListener("input", () => { draft.path_template = template.value; example.textContent = `Example: ${destinationExample(draft)}`; markStructureDirty(); }); templateLabel.append(template); detail.append(templateLabel, example); }
+        else detail.append(element("div", "destination-path", draft.enabled ? destinationExample(draft) : "Disabled"));
+        const choose = element("button", "button", "Choose existing"); choose.type = "button"; choose.disabled = mountedDaily || !draft.enabled; choose.addEventListener("click", () => openFolderPicker(role));
+        const card = element("article", "destination-card"); card.append(enabled, body, pathLabel, detail, choose); root.append(card);
       });
+      document.querySelector("#structure-reset").disabled = !structureDirty(); document.querySelector("#structure-review").disabled = !structureDirty();
       const settings = document.querySelector("#knowledge-settings"); settings.replaceChildren();
       const connection = element("section", "settings-card"); connection.append(element("h2", "", "Knowledge base"), element("p", "", `${state.knowledge.vault.name || "Not connected"} · ${state.knowledge.vault.total_markdown_files} Markdown files`));
-      const inspect = element("button", "button", "Inspect vault"); inspect.type = "button"; inspect.addEventListener("click", openVaultBrowser); connection.append(inspect); settings.append(connection);
+      const actions = element("div", "inline-actions"); const connect = element("button", "button", "Choose Markdown vault"); connect.type = "button"; connect.addEventListener("click", connectKnowledgeVault); actions.append(connect);
+      if (state.vaultConnection?.mode === "browser") { const rescan = element("button", "button", "Rescan"); rescan.type = "button"; rescan.addEventListener("click", rescanKnowledgeVault); const disconnect = element("button", "button danger", "Use mounted vault"); disconnect.type = "button"; disconnect.addEventListener("click", disconnectKnowledgeVault); actions.append(rescan, disconnect); }
+      connection.append(actions); settings.append(connection);
       const system = element("section", "settings-card"); system.append(element("h2", "", "System locations"), element("p", "subtle", "Operational paths are read-only here and can never be document destinations."));
       (state.knowledge.protected_paths || []).forEach((path) => system.append(element("div", "destination-path", path))); settings.append(system);
-    }
-
-    async function saveDestinationDraft() {
-      const draft = state.destinationDraft; if (!draft) return;
-      const response = await fetch(`/api/knowledge/destinations/${encodeURIComponent(draft.role)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ base_path: state.vaultFolder, path_template: document.querySelector("#vault-path-template").value.trim(), enabled: true, catalog_revision: state.knowledge.vault.revision }) });
-      const data = await response.json(); if (!response.ok) throw new Error(data.error || "Destination could not be saved");
-      await loadKnowledge(); state.destinationDraft = null; document.querySelector("#vault-dialog").close(); showNotice(`${destinationRoles[draft.role].title} destination saved.`);
-    }
-
-    async function createDestinationFolder() {
-      if (!state.destinationDraft || !state.vaultHandle || !await ensureVaultPermission(state.vaultHandle, true)) throw new Error("Connect a writable browser vault first");
-      const name = prompt("New folder name"); if (name === null) return; const trimmed = name.trim();
-      if (!trimmed || trimmed === "." || trimmed === ".." || /[\\/]/.test(trimmed) || trimmed.startsWith(".")) throw new Error("Use a plain visible folder name without slashes");
-      const path = [state.vaultFolder, trimmed].filter(Boolean).join("/");
-      if ((state.knowledge?.protected_paths || []).some((protectedPath) => path === protectedPath || path.startsWith(`${protectedPath}/`))) throw new Error("System locations cannot contain knowledge destinations");
-      if (!confirm(`Create only this folder?\n\n${path}\n\nNo files will be changed.`)) return;
-      const parent = await vaultDirectoryAt(state.vaultFolder); if (await pathExists(parent, trimmed, "directory")) throw new Error("That folder already exists");
-      await parent.getDirectoryHandle(trimmed, { create: true }); localStorage.setItem("log-inbox-last-setup", JSON.stringify({ label: `Destination folder ${path}`, files: [], directories: [path] }));
-      state.vaultFolder = path; await syncVaultHandle(state.vaultHandle); renderVaultBrowser();
-    }
-
-    function openDestinationPicker(role) {
-      const destination = destinationFor(role) || suggestionFor(role); state.destinationDraft = { role }; state.vaultFolder = destination?.base_path || ""; expandVaultAncestors(state.vaultFolder);
-      document.querySelector("#vault-dialog-title").textContent = `Choose ${destinationRoles[role].title.toLowerCase()} destination`;
-      document.querySelector("#vault-path-template").value = destination?.path_template || ""; document.querySelector("#vault-template-label").hidden = !destinationRoles[role].template;
-      document.querySelector("#vault-use-folder").hidden = false; document.querySelector("#vault-picker-summary").hidden = false; document.querySelector("#vault-dialog").showModal(); renderVaultBrowser();
-    }
-
-    function vaultFolderPaths(treePaths) {
-      const paths = new Set([""]);
-      [...state.vaultFolders, ...treePaths.map((path) => path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "")].forEach((path) => {
-        let parent = "";
-        path.split("/").filter(Boolean).forEach((part) => { parent = parent ? `${parent}/${part}` : part; paths.add(parent); });
-      });
-      return [...paths].sort((left, right) => left.localeCompare(right));
-    }
-
-    function vaultTree(folders, treePaths) {
-      const root = { name: "Vault root", path: "", kind: "folder", children: [] }; const nodes = new Map([["", root]]);
-      folders.filter(Boolean).forEach((path) => {
-        const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-        const node = { name: path.slice(path.lastIndexOf("/") + 1), path, kind: "folder", children: [] };
-        nodes.set(path, node); nodes.get(parentPath).children.push(node);
-      });
-      treePaths.forEach((path) => {
-        const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-        nodes.get(parentPath)?.children.push({ name: path.slice(path.lastIndexOf("/") + 1).replace(/\.md$/i, ""), path, kind: "file", children: [] });
-      });
-      nodes.forEach((node) => node.children.sort((left, right) => left.kind === right.kind ? left.name.localeCompare(right.name) : left.kind === "folder" ? -1 : 1));
-      return root;
-    }
-
-    function expandVaultAncestors(path) {
-      if (!path) return;
-      let parent = ""; state.vaultExpanded.add("");
-      path.split("/").filter(Boolean).slice(0, -1).forEach((part) => { parent = parent ? `${parent}/${part}` : part; state.vaultExpanded.add(parent); });
-    }
-
-    function focusVaultTree(path) {
-      const target = [...document.querySelectorAll("#vault-folders [role=treeitem]")].find((item) => item.dataset.path === path);
-      if (target) target.focus();
-    }
-
-    function handleVaultTreeKey(event, node) {
-      const items = [...document.querySelectorAll("#vault-folders [role=treeitem]")]; const index = items.indexOf(event.currentTarget);
-      let focusPath = null;
-      if (event.key === "ArrowDown" && index < items.length - 1) focusPath = items[index + 1].dataset.path;
-      else if (event.key === "ArrowUp" && index > 0) focusPath = items[index - 1].dataset.path;
-      else if (event.key === "Home") focusPath = items[0]?.dataset.path;
-      else if (event.key === "End") focusPath = items.at(-1)?.dataset.path;
-      else if (event.key === "ArrowRight" && node.kind === "folder" && node.children.length) {
-        if (!state.vaultExpanded.has(node.path)) { state.vaultExpanded.add(node.path); renderVaultBrowser(); focusPath = node.path; }
-        else focusPath = node.children[0].path;
-      } else if (event.key === "ArrowLeft") {
-        if (node.kind === "folder" && node.children.length && state.vaultExpanded.has(node.path)) { state.vaultExpanded.delete(node.path); renderVaultBrowser(); focusPath = node.path; }
-        else focusPath = node.path.includes("/") ? node.path.slice(0, node.path.lastIndexOf("/")) : node.path ? "" : null;
-      } else if (event.key === "Enter" || event.key === " ") {
-        if (node.kind === "folder") { if (state.destinationDraft) state.vaultFolder = node.path; else state.vaultExpanded.has(node.path) ? state.vaultExpanded.delete(node.path) : state.vaultExpanded.add(node.path); }
-        state.vaultTreeFocus = node.path; renderVaultBrowser(); focusPath = node.path;
-      }
-      if (focusPath !== null && focusPath !== undefined) { event.preventDefault(); state.vaultTreeFocus = focusPath; focusVaultTree(focusPath); }
-    }
-
-    function renderVaultTreeNode(node, level = 1) {
-      const item = element("li", "vault-tree-item"); item.setAttribute("role", "none");
-      const selected = Boolean(state.destinationDraft) && node.kind === "folder" && node.path === state.vaultFolder;
-      const button = element("button", `vault-folder${selected ? " selected" : ""}`); button.type = "button"; button.setAttribute("role", "treeitem"); button.setAttribute("aria-level", String(level)); button.setAttribute("aria-selected", String(selected)); button.dataset.path = node.path; button.tabIndex = node.path === state.vaultTreeFocus ? 0 : -1;
-      if (node.kind === "folder" && node.children.length) button.setAttribute("aria-expanded", String(state.vaultExpanded.has(node.path)));
-      const chevron = element("span", `vault-chevron${node.kind === "folder" && node.children.length ? "" : " empty"}`, state.vaultExpanded.has(node.path) ? "▼" : "▶"); chevron.setAttribute("aria-hidden", "true");
-      const icon = element("span", node.kind === "folder" ? "vault-folder-icon" : "vault-file-icon"); icon.setAttribute("aria-hidden", "true");
-      button.append(chevron, icon, element("span", "vault-folder-name", node.name));
-      button.addEventListener("click", (event) => {
-        state.vaultTreeFocus = node.path;
-        if (node.kind === "folder") {
-          if (state.destinationDraft && !event.target.closest(".vault-chevron")) state.vaultFolder = node.path;
-          else state.vaultExpanded.has(node.path) ? state.vaultExpanded.delete(node.path) : state.vaultExpanded.add(node.path);
-          expandVaultAncestors(node.path);
-        }
-        renderVaultBrowser(); focusVaultTree(node.path);
-      });
-      button.addEventListener("focus", () => { state.vaultTreeFocus = node.path; }); button.addEventListener("keydown", (event) => handleVaultTreeKey(event, node)); item.append(button);
-      if (node.kind === "folder" && node.children.length && state.vaultExpanded.has(node.path)) { const group = element("ul", "vault-tree-group"); group.setAttribute("role", "group"); node.children.forEach((child) => group.append(renderVaultTreeNode(child, level + 1))); item.append(group); }
-      return item;
-    }
-
-    function renderVaultBrowser() {
-      const notes = state.linking?.catalog.notes || []; const treePaths = state.linking?.catalog.tree_paths?.length ? state.linking.catalog.tree_paths : notes.map((note) => note.path); const queryText = document.querySelector("#vault-search").value.trim(); const query = queryText.toLowerCase(); const folders = vaultFolderPaths(treePaths);
-      if (!folders.includes(state.vaultFolder)) state.vaultFolder = "";
-      const validFocusPaths = new Set([...folders, ...treePaths]); if (!validFocusPaths.has(state.vaultTreeFocus)) state.vaultTreeFocus = folders.includes(state.vaultFolder) ? state.vaultFolder : "";
-      expandVaultAncestors(state.vaultFolder);
-      const folderRoot = document.querySelector("#vault-folders"); folderRoot.hidden = Boolean(query); folderRoot.replaceChildren();
-      const tree = element("ul", "vault-tree"); tree.setAttribute("role", "tree"); tree.setAttribute("aria-label", "Vault files"); tree.append(renderVaultTreeNode(vaultTree(folders, treePaths))); folderRoot.append(tree);
-      const searchPane = document.querySelector("#vault-search-pane"); searchPane.hidden = !query; const root = document.querySelector("#vault-notes"); root.replaceChildren();
-      if (query) {
-        const notesByPath = new Map(notes.map((note) => [note.path, note])); const visible = treePaths.filter((path) => { const note = notesByPath.get(path); return [path, note?.title || "", ...(note?.aliases || [])].some((value) => value.toLowerCase().includes(query)); });
-        const breadcrumb = document.querySelector("#vault-breadcrumb"); breadcrumb.replaceChildren(element("strong", "", `${visible.length} search result${visible.length === 1 ? "" : "s"}`), document.createTextNode(` for “${queryText}”`));
-        if (!visible.length) root.append(element("div", "empty", "No notes match"));
-        visible.forEach((path) => { const note = notesByPath.get(path); const row = element("div", "vault-note-row", note?.title || path.slice(path.lastIndexOf("/") + 1).replace(/\.md$/i, "")); row.append(element("small", "", path)); root.append(row); });
-      }
-      document.querySelector("#vault-dialog-meta").textContent = state.destinationDraft ? "Select a folder, review the exact example, then save explicitly." : state.vaultConnection ? `${state.vaultConnection.name || "Vault"} · ${treePaths.length} Markdown files · inspection only` : "Choose an existing or empty folder";
-      const browserMode = state.vaultConnection?.mode === "browser"; const picking = Boolean(state.destinationDraft);
-      ["#vault-connect", "#vault-rescan", "#vault-starter", "#vault-template", "#vault-disconnect"].forEach((selector) => { document.querySelector(selector).hidden = picking; }); document.querySelector("#vault-create-folder").hidden = !picking || !browserMode;
-      document.querySelector("#vault-rescan").disabled = !browserMode; document.querySelector("#vault-starter").disabled = !browserMode || notes.length > 2; document.querySelector("#vault-starter").title = notes.length > 2 ? "Starter structures are offered only for empty or unstructured vaults" : ""; document.querySelector("#vault-template").disabled = !browserMode; document.querySelector("#vault-undo").hidden = picking || !browserMode || !localStorage.getItem("log-inbox-last-setup");
-      if (picking) {
-        const draft = { ...suggestionFor(state.destinationDraft.role), ...destinationFor(state.destinationDraft.role), base_path: state.vaultFolder, path_template: document.querySelector("#vault-path-template").value.trim() };
-        document.querySelector("#vault-picker-path").textContent = `Example: ${destinationExample(draft)}`;
-        const protectedPath = (state.knowledge?.protected_paths || []).some((path) => state.vaultFolder === path || state.vaultFolder.startsWith(`${path}/`));
-        document.querySelector("#vault-use-folder").disabled = protectedPath; document.querySelector("#vault-picker-path").className = protectedPath ? "status error" : "";
-        if (protectedPath) document.querySelector("#vault-picker-path").textContent = "System locations cannot be knowledge destinations.";
-      }
-    }
-
-    async function openVaultBrowser() {
-      if (!state.vaultConnection) await loadVaultConnection();
-      state.destinationDraft = null; document.querySelector("#vault-dialog-title").textContent = "Inspect vault"; document.querySelector("#vault-use-folder").hidden = true; document.querySelector("#vault-picker-summary").hidden = true;
-      document.querySelector("#vault-dialog").showModal(); renderVaultBrowser();
     }
 
     async function directoryChild(parent, name, create = false) { return parent.getDirectoryHandle(name, { create }); }
     async function pathExists(parent, name, kind) { try { await (kind === "directory" ? parent.getDirectoryHandle(name) : parent.getFileHandle(name)); return true; } catch (error) { if (error.name === "NotFoundError") return false; throw error; } }
 
-    async function applyStructure(entries, label) {
-      if (!state.vaultHandle || !await ensureVaultPermission(state.vaultHandle, true)) throw new Error("Reconnect the vault before creating files");
-      const missing = [];
-      for (const entry of entries) {
-        let parent = state.vaultHandle; const parts = entry.path.split("/"); const filename = parts.pop();
-        let relative = ""; let parentMissing = false;
-        for (const part of parts) { relative = relative ? `${relative}/${part}` : part; if (parentMissing) { missing.push(`${relative}/`); continue; } if (await pathExists(parent, part, "directory")) parent = await directoryChild(parent, part); else { missing.push(`${relative}/`); parentMissing = true; } }
-        if (parentMissing || !await pathExists(parent, filename, "file")) missing.push(entry.path);
-      }
-      if (!missing.length) { showNotice("That structure already exists; nothing changed."); return; }
-      if (!confirm(`${label} will add only these missing paths:\n\n${missing.join("\n")}\n\nExisting files will remain unchanged.`)) return;
-      const createdFiles = []; const createdDirectories = [];
-      for (const entry of entries) {
-        let parent = state.vaultHandle; const parts = entry.path.split("/"); const filename = parts.pop();
-        let directoryPath = "";
-        for (const part of parts) { directoryPath = directoryPath ? `${directoryPath}/${part}` : part; if (!await pathExists(parent, part, "directory")) createdDirectories.push(directoryPath); parent = await directoryChild(parent, part, true); }
-        if (await pathExists(parent, filename, "file")) continue;
-        const fileHandle = await parent.getFileHandle(filename, { create: true }); const writable = await fileHandle.createWritable(); await writable.write(entry.contents); await writable.close(); createdFiles.push({ path: entry.path, revision: contentRevision(entry.contents) });
-      }
-      localStorage.setItem("log-inbox-last-setup", JSON.stringify({ label, files: createdFiles, directories: [...new Set(createdDirectories)] }));
-      await syncVaultHandle(state.vaultHandle); showNotice(`${label} added. Existing files were unchanged.`);
+    function availableFolders() { return [...new Set([...(state.knowledge?.folders || []), ...state.vaultFolders])].sort((a, b) => a.localeCompare(b)); }
+    function renderFolderResults() {
+      const query = document.querySelector("#folder-search").value.trim().toLowerCase(); const showAll = document.querySelector("#folder-show-all").checked; const draft = draftFor(state.folderRole); const root = document.querySelector("#folder-results"); root.replaceChildren();
+      const terms = state.folderRole === "daily_activity" ? ["daily", "work log"] : state.folderRole === "product_knowledge" ? ["product"] : state.folderRole === "engineering_knowledge" ? ["engineering", "system", "technology"] : ["decision"];
+      const folders = availableFolders().filter(Boolean).map((path) => ({ path, likely: terms.some((term) => path.toLowerCase().includes(term)) })).filter((item) => query ? item.path.toLowerCase().includes(query) : showAll || item.likely).sort((left, right) => Number(right.likely) - Number(left.likely) || left.path.localeCompare(right.path)).slice(0, 100);
+      if (!folders.length) root.append(element("div", "empty", showAll || query ? "No folders match" : "No likely folders found. Show all folders or type a path directly."));
+      folders.forEach((item) => { const button = element("button", `folder-result${draft?.base_path === item.path ? " selected" : ""}`, item.path); button.type = "button"; button.setAttribute("role", "option"); button.append(element("span", "subtle", item.likely ? "Suggested" : "Existing")); button.addEventListener("click", () => { draft.base_path = item.path; state.structurePreview = null; document.querySelector("#folder-dialog").close(); renderKnowledge(); }); root.append(button); });
+    }
+    function openFolderPicker(role) { state.folderRole = role; document.querySelector("#folder-search").value = ""; document.querySelector("#folder-show-all").checked = false; document.querySelector("#folder-dialog-title").textContent = `Choose ${destinationRoles[role].title.toLowerCase()} folder`; document.querySelector("#folder-dialog").showModal(); renderFolderResults(); setTimeout(() => document.querySelector("#folder-search").focus(), 0); }
+
+    async function connectKnowledgeVault() { const status = document.querySelector("#structure-status"); try { status.textContent = "Connecting…"; await connectVault(); resetStructureDraft(); status.textContent = "Connected"; } catch (error) { if (error.name !== "AbortError") { status.className = "status error"; status.textContent = error.message; } } }
+    async function rescanKnowledgeVault() { const status = document.querySelector("#structure-status"); try { status.textContent = "Scanning…"; await syncVaultHandle(state.vaultHandle, true); status.textContent = "Up to date"; } catch (error) { status.className = "status error"; status.textContent = error.message; } }
+    async function disconnectKnowledgeVault() { if (!confirm("Disconnect this browser vault and return to the mounted vault? No files will be changed.")) return; await fetch("/api/vault/browser/catalog", { method: "DELETE" }); state.vaultHandle = null; state.vaultConnection = null; state.structureDraft = null; await loadVaultConnection(); await loadLinking(); await loadKnowledge(); }
+
+    function structurePayload(revision = state.knowledge.vault.revision) { return { destinations: cloneDestinations(state.structureDraft), catalog_revision: revision, example_date: document.querySelector("#consolidate-date").value }; }
+    async function previewStructure() { const response = await fetch("/api/knowledge/structure/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(structurePayload()) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || "Structure could not be previewed"); state.structurePreview = data; renderStructureReview(); document.querySelector("#structure-review-dialog").showModal(); }
+    function renderStructureReview() {
+      const preview = state.structurePreview; const root = document.querySelector("#structure-review-content"); root.replaceChildren(); if (!preview) return;
+      const list = element("div", "review-list"); preview.destinations.forEach((destination) => { const row = element("div", "review-row"); const example = destination.role === "daily_activity" && state.vaultConnection?.mode === "mounted" ? `${dailyDestination()} · managed by deployment` : preview.examples[destination.role]; row.append(element("strong", "", destinationRoles[destination.role].title), element("div", "destination-path", example)); list.append(row); }); root.append(list);
+      if (preview.existing_folders.length) root.append(element("h3", "", "Existing folders reused"), element("div", "review-paths", preview.existing_folders.join("\n")));
+      if (preview.missing_folders.length) root.append(element("h3", "", preview.can_create_folders ? "Missing folders to create" : "Missing folders (configuration only in mounted mode)"), element("div", "review-paths", preview.missing_folders.join("\n")));
+      root.append(element("p", "subtle", "No Markdown files will be moved, renamed, copied, overwritten, or deleted."));
     }
 
-    async function undoLastSetup() {
-      const setup = JSON.parse(localStorage.getItem("log-inbox-last-setup") || "null"); if (!setup || !state.vaultHandle) return;
-      if (!confirm(`Undo ${setup.label}? Only unchanged files created by that setup will be removed.`)) return;
-      let preserved = 0;
-      for (const entry of [...setup.files].reverse()) {
-        const parts = entry.path.split("/"); const filename = parts.pop(); const parent = await vaultDirectoryAt(parts.join("/")); const current = await readVaultText(parent, filename);
-        if (current && contentRevision(current) === entry.revision) await parent.removeEntry(filename); else preserved += 1;
-      }
-      for (const path of [...setup.directories].sort((a, b) => b.length - a.length)) { const parts = path.split("/"); const name = parts.pop(); try { await (await vaultDirectoryAt(parts.join("/"))).removeEntry(name); } catch (_) {} }
-      localStorage.removeItem("log-inbox-last-setup"); await syncVaultHandle(state.vaultHandle); showNotice(preserved ? `Undo completed; ${preserved} changed file(s) were preserved.` : "Setup undone.");
+    async function createMissingFolders(paths, created) { for (const path of paths) { let parent = state.vaultHandle; let current = ""; for (const part of path.split("/").filter(Boolean)) { current = current ? `${current}/${part}` : part; if (!await pathExists(parent, part, "directory") && !created.includes(current)) created.push(current); parent = await directoryChild(parent, part, true); } } }
+    async function rollbackFolders(paths) { for (const path of [...paths].sort((a, b) => b.split("/").length - a.split("/").length)) { const parts = path.split("/"); const name = parts.pop(); try { await (await vaultDirectoryAt(parts.join("/"))).removeEntry(name); } catch (_) {} } }
+    async function applyKnowledgeStructure() {
+      const preview = state.structurePreview; if (!preview) return; const button = document.querySelector("#structure-apply"); const status = document.querySelector("#structure-apply-status"); const draft = cloneDestinations(state.structureDraft); let created = []; let saved = false; button.disabled = true; status.className = "status"; status.textContent = "Applying…";
+      try {
+        if (preview.missing_folders.length && preview.can_create_folders) { if (!state.vaultHandle || !await ensureVaultPermission(state.vaultHandle, true)) throw new Error("Reconnect the writable vault before creating folders"); await createMissingFolders(preview.missing_folders, created); await syncVaultHandle(state.vaultHandle); state.structureDraft = draft; const check = await fetch("/api/knowledge/structure/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(structurePayload(state.knowledge.vault.revision)) }); const checked = await check.json(); if (!check.ok) throw new Error(checked.error || "The vault changed; review the structure again"); if (checked.missing_folders.length) throw new Error("The vault changed and destination folders are missing; review again"); state.structurePreview = checked; }
+        const response = await fetch("/api/knowledge/structure", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(structurePayload(state.knowledge.vault.revision)) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || "Structure could not be saved");
+        saved = true; state.structurePreview = null; document.querySelector("#structure-review-dialog").close(); await loadKnowledge(); resetStructureDraft(); showNotice(created.length ? `Structure saved and ${created.length} missing folder${created.length === 1 ? "" : "s"} created.` : "Knowledge structure saved.");
+      } catch (error) { if (!saved && created.length) { await rollbackFolders(created); try { await syncVaultHandle(state.vaultHandle); } catch (_) {} state.structureDraft = draft; } if (!saved) { state.structurePreview = null; document.querySelector("#structure-review-dialog").close(); const pageStatus = document.querySelector("#structure-status"); pageStatus.className = "status error"; pageStatus.textContent = `${error.message} Review the draft again.`; renderKnowledge(); } else { status.className = "status error"; status.textContent = `Structure saved, but refresh failed: ${error.message}`; } }
+      finally { button.disabled = false; }
     }
 
-    async function addStarterStructure() {
-      const content = (title) => `---\nlog_inbox_managed: true\n---\n\n# ${title}\n`;
-      await applyStructure(["Projects", "Systems", "Technologies"].map((title) => ({ path: `${title}/${title}.md`, contents: content(title) })), "Developer starter");
-    }
-
-    async function addTemplateStructure() {
-      if (!window.showDirectoryPicker) throw new Error("This browser cannot choose a template folder");
-      const template = await window.showDirectoryPicker({ mode: "read", id: "log-inbox-template" }); const files = await collectVaultFiles(template, "", [], false);
-      await applyStructure(files, `Template ${template.name}`);
-    }
+    function exportStructureTemplate() { const manifest = { schema_version: 1, name: "Log Inbox knowledge structure", destinations: cloneDestinations(state.structureDraft) }; const url = URL.createObjectURL(new Blob([JSON.stringify(manifest, null, 2) + "\n"], { type: "application/json" })); const link = document.createElement("a"); link.href = url; link.download = "log-inbox-structure.json"; document.body.append(link); link.click(); link.remove(); URL.revokeObjectURL(url); }
+    async function importStructureTemplate(file) { if (file.size > 100000) throw new Error("Structure templates must be smaller than 100 KB"); const manifest = JSON.parse(await file.text()); const roles = Array.isArray(manifest.destinations) ? manifest.destinations.map((item) => item.role) : []; if (manifest.schema_version !== 1 || roles.length !== Object.keys(destinationRoles).length || new Set(roles).size !== roles.length || roles.some((role) => !destinationRoles[role])) throw new Error("Choose a complete Log Inbox structure template with schema_version 1"); state.structureDraft = cloneDestinations(Object.keys(destinationRoles).map((role) => manifest.destinations.find((item) => item.role === role))); state.structurePreview = null; renderKnowledge(); }
 
     async function vaultDirectoryAt(relative, create = false) {
       let directory = state.vaultHandle;
@@ -1269,18 +1143,20 @@
       } catch (error) { status.className = "status error"; status.textContent = error.message; }
       finally { button.disabled = false; }
     });
-    document.querySelector("#browse-vault").addEventListener("click", openVaultBrowser);
-    document.querySelector("#vault-close").addEventListener("click", () => document.querySelector("#vault-dialog").close());
-    document.querySelector("#vault-search").addEventListener("input", renderVaultBrowser);
-    document.querySelector("#vault-path-template").addEventListener("input", renderVaultBrowser);
-    document.querySelector("#vault-use-folder").addEventListener("click", async (event) => { event.currentTarget.disabled = true; try { await saveDestinationDraft(); } catch (error) { document.querySelector("#vault-action-status").className = "status error"; document.querySelector("#vault-action-status").textContent = error.message; } finally { event.currentTarget.disabled = false; } });
-    document.querySelector("#vault-create-folder").addEventListener("click", async () => { try { await createDestinationFolder(); } catch (error) { document.querySelector("#vault-action-status").className = "status error"; document.querySelector("#vault-action-status").textContent = error.message; } });
-    document.querySelector("#vault-connect").addEventListener("click", async () => { const status = document.querySelector("#vault-action-status"); try { status.textContent = "Connecting…"; await connectVault(); status.textContent = "Connected"; } catch (error) { status.className = "status error"; status.textContent = error.message; } });
-    document.querySelector("#vault-rescan").addEventListener("click", async () => { const status = document.querySelector("#vault-action-status"); try { status.textContent = "Scanning…"; await syncVaultHandle(state.vaultHandle, true); status.textContent = "Up to date"; } catch (error) { status.className = "status error"; status.textContent = error.message; } });
-    document.querySelector("#vault-starter").addEventListener("click", async () => { try { await addStarterStructure(); } catch (error) { document.querySelector("#vault-action-status").textContent = error.message; } });
-    document.querySelector("#vault-template").addEventListener("click", async () => { try { await addTemplateStructure(); } catch (error) { if (error.name !== "AbortError") document.querySelector("#vault-action-status").textContent = error.message; } });
-    document.querySelector("#vault-undo").addEventListener("click", async () => { try { await undoLastSetup(); } catch (error) { document.querySelector("#vault-action-status").textContent = error.message; } });
-    document.querySelector("#vault-disconnect").addEventListener("click", async () => { if (!confirm("Disconnect this browser vault and return to the mounted vault? No files will be changed.")) return; await fetch("/api/vault/browser/catalog", { method: "DELETE" }); state.vaultHandle = null; state.vaultConnection = null; await loadVaultConnection(); await loadLinking(); await loadKnowledge(); renderVaultBrowser(); });
+    document.querySelector("#structure-detected").addEventListener("click", () => resetStructureDraft(detectedStructure()));
+    document.querySelector("#structure-baseline").addEventListener("click", () => resetStructureDraft(baselineStructure()));
+    document.querySelector("#structure-blank").addEventListener("click", () => resetStructureDraft(blankStructure()));
+    document.querySelector("#structure-reset").addEventListener("click", () => resetStructureDraft());
+    document.querySelector("#structure-review").addEventListener("click", async () => { const status = document.querySelector("#structure-status"); try { status.textContent = "Checking…"; await previewStructure(); status.textContent = ""; } catch (error) { status.className = "status error"; status.textContent = error.message; } });
+    document.querySelector("#structure-export").addEventListener("click", exportStructureTemplate);
+    document.querySelector("#structure-import-button").addEventListener("click", () => document.querySelector("#structure-import").click());
+    document.querySelector("#structure-import").addEventListener("change", async (event) => { const status = document.querySelector("#structure-status"); try { if (event.target.files[0]) await importStructureTemplate(event.target.files[0]); status.textContent = "Template loaded as an unsaved draft"; } catch (error) { status.className = "status error"; status.textContent = error.message; } finally { event.target.value = ""; } });
+    document.querySelector("#folder-close").addEventListener("click", () => document.querySelector("#folder-dialog").close());
+    document.querySelector("#folder-search").addEventListener("input", renderFolderResults);
+    document.querySelector("#folder-show-all").addEventListener("change", renderFolderResults);
+    document.querySelector("#structure-review-close").addEventListener("click", () => document.querySelector("#structure-review-dialog").close());
+    document.querySelector("#structure-review-cancel").addEventListener("click", () => document.querySelector("#structure-review-dialog").close());
+    document.querySelector("#structure-apply").addEventListener("click", applyKnowledgeStructure);
     document.querySelector("#link-close").addEventListener("click", () => document.querySelector("#link-dialog").close());
     document.querySelector("#note-search").addEventListener("input", renderNoteResults);
     document.querySelector("#link-search").addEventListener("input", renderLinking);

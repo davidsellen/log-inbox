@@ -7,7 +7,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post, put},
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use log_inbox_core::{
     models::{
         DailyConsolidationJob, IgnoredLinkIdentity, LinkSelector, LogEventInput, LogQuery,
@@ -199,8 +199,10 @@ struct BrowserVaultSyncInput {
     vault_id: String,
     name: String,
     files: Vec<BrowserVaultFile>,
+    #[serde(default, alias = "tree_paths")]
+    markdown_paths: Vec<String>,
     #[serde(default)]
-    tree_paths: Vec<String>,
+    folder_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,12 +215,20 @@ struct KnowledgeDestination {
 }
 
 #[derive(Debug, Deserialize)]
-struct KnowledgeDestinationInput {
+struct KnowledgeDestinationDraft {
+    role: String,
     base_path: String,
     path_template: String,
     #[serde(default = "default_true")]
     enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnowledgeStructureInput {
+    destinations: Vec<KnowledgeDestinationDraft>,
     catalog_revision: String,
+    #[serde(default)]
+    example_date: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -308,9 +318,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/vault/connection", get(vault_connection))
         .route("/api/knowledge", get(knowledge_data))
         .route(
-            "/api/knowledge/destinations/{role}",
-            put(save_knowledge_destination),
+            "/api/knowledge/structure/preview",
+            post(preview_knowledge_structure),
         )
+        .route("/api/knowledge/structure", put(save_knowledge_structure))
         .route(
             "/api/vault/browser/catalog",
             put(sync_browser_vault).delete(disconnect_browser_vault),
@@ -611,7 +622,8 @@ fn validate_path_template(role: &str, value: &str) -> Result<String, ApiError> {
 fn vault_folders(catalog: &vault_context::VaultCatalog) -> Vec<String> {
     let mut folders = BTreeSet::new();
     folders.insert(String::new());
-    for path in &catalog.tree_paths {
+    folders.extend(catalog.folder_paths.iter().cloned());
+    for path in &catalog.markdown_paths {
         let mut current = String::new();
         for part in path
             .split('/')
@@ -632,6 +644,148 @@ fn vault_folders(catalog: &vault_context::VaultCatalog) -> Vec<String> {
         }
     }
     folders.into_iter().collect()
+}
+
+fn normalize_knowledge_structure(
+    input: &KnowledgeStructureInput,
+) -> Result<Vec<KnowledgeDestination>, ApiError> {
+    if input.destinations.len() != KNOWLEDGE_ROLES.len() {
+        return Err(ApiError::bad_request(
+            "the structure must contain each knowledge destination exactly once",
+        ));
+    }
+    let mut seen = HashSet::new();
+    let mut destinations = Vec::with_capacity(input.destinations.len());
+    for draft in &input.destinations {
+        if !KNOWLEDGE_ROLES.contains(&draft.role.as_str()) || !seen.insert(draft.role.as_str()) {
+            return Err(ApiError::bad_request(
+                "the structure contains an unknown or duplicate destination",
+            ));
+        }
+        destinations.push(KnowledgeDestination {
+            role: draft.role.clone(),
+            base_path: normalized_destination_path(&draft.base_path)?,
+            path_template: if !draft.enabled && draft.path_template.trim().is_empty() {
+                String::new()
+            } else {
+                validate_path_template(&draft.role, &draft.path_template)?
+            },
+            write_mode: destination_write_mode(&draft.role).unwrap().to_owned(),
+            enabled: draft.enabled,
+        });
+    }
+    Ok(destinations)
+}
+
+fn required_static_folders(destination: &KnowledgeDestination) -> Vec<String> {
+    if !destination.enabled {
+        return Vec::new();
+    }
+    let mut required = Vec::new();
+    let mut current = String::new();
+    for part in destination
+        .base_path
+        .split('/')
+        .filter(|part| !part.is_empty())
+    {
+        current = if current.is_empty() {
+            part.to_owned()
+        } else {
+            format!("{current}/{part}")
+        };
+        required.push(current.clone());
+    }
+    for part in destination
+        .path_template
+        .split('/')
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        if part.contains('{') || part.contains('}') || part.is_empty() {
+            break;
+        }
+        current = if current.is_empty() {
+            part.to_owned()
+        } else {
+            format!("{current}/{part}")
+        };
+        required.push(current.clone());
+    }
+    required
+}
+
+fn resolve_destination_example(destination: &KnowledgeDestination, date: NaiveDate) -> String {
+    if !destination.enabled {
+        return "Disabled".to_owned();
+    }
+    if destination.role == "feature_recaps" {
+        return "Mapped canonical feature or system note".to_owned();
+    }
+    let month_name = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ][date.month0() as usize];
+    let resolved = destination
+        .path_template
+        .replace("{year}", &date.year().to_string())
+        .replace("{month}", &format!("{:02}", date.month()))
+        .replace("{month_name}", month_name)
+        .replace("{day}", &date.day().to_string())
+        .replace("{date}", &date.format("%Y-%m-%d").to_string())
+        .replace("{slug}", "decision-title");
+    let path = [destination.base_path.as_str(), resolved.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    if destination.role == "decision_records" && destination.base_path.is_empty() {
+        format!("<mapped subject>/{path}")
+    } else if path.is_empty() {
+        "Vault root".to_owned()
+    } else {
+        path
+    }
+}
+
+fn knowledge_structure_preview_value(
+    catalog: &vault_context::VaultCatalog,
+    destinations: &[KnowledgeDestination],
+    example_date: NaiveDate,
+    can_create_folders: bool,
+) -> Value {
+    let folders = vault_folders(catalog).into_iter().collect::<HashSet<_>>();
+    let mut reused = BTreeSet::new();
+    let mut missing = BTreeSet::new();
+    for destination in destinations {
+        for path in required_static_folders(destination) {
+            if folders.contains(&path) {
+                reused.insert(path);
+            } else {
+                missing.insert(path);
+            }
+        }
+    }
+    let examples = destinations
+        .iter()
+        .map(|destination| {
+            (
+                destination.role.clone(),
+                resolve_destination_example(destination, example_date),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    json!({
+        "destinations": destinations,
+        "examples": examples,
+        "existing_folders": reused,
+        "missing_folders": missing,
+        "can_create_folders": can_create_folders,
+        "catalog_revision": catalog.revision,
+    })
 }
 
 fn folder_label(path: &str) -> String {
@@ -712,7 +866,7 @@ async fn knowledge_data(State(state): State<AppState>) -> Result<Json<Value>, Ap
         .cloned()
         .collect::<Vec<_>>();
     Ok(Json(json!({
-        "vault": { "id": catalog.vault_id, "name": catalog.root, "revision": catalog.revision, "total_markdown_files": catalog.tree_paths.len(), "linkable_notes": catalog.notes.len() },
+        "vault": { "id": catalog.vault_id, "name": catalog.root, "revision": catalog.revision, "total_markdown_files": catalog.markdown_paths.len(), "linkable_notes": catalog.notes.len() },
         "destinations": destinations,
         "suggestions": suggestions,
         "folders": folders,
@@ -720,38 +874,47 @@ async fn knowledge_data(State(state): State<AppState>) -> Result<Json<Value>, Ap
     })))
 }
 
-async fn save_knowledge_destination(
+async fn preview_knowledge_structure(
     State(state): State<AppState>,
-    AxumPath(role): AxumPath<String>,
-    Json(input): Json<KnowledgeDestinationInput>,
-) -> Result<Json<KnowledgeDestination>, ApiError> {
-    if !KNOWLEDGE_ROLES.contains(&role.as_str()) {
-        return Err(ApiError::bad_request("unknown knowledge destination role"));
-    }
+    Json(input): Json<KnowledgeStructureInput>,
+) -> Result<Json<Value>, ApiError> {
     let catalog = state.vault_context.catalog().map_err(ApiError::internal)?;
     if input.catalog_revision != catalog.revision {
         return Err(ApiError::conflict(
-            "the vault changed; rescan and choose the destination again",
+            "the vault changed; rescan and review the structure again",
         ));
     }
-    let destination = KnowledgeDestination {
-        role: role.clone(),
-        base_path: normalized_destination_path(&input.base_path)?,
-        path_template: validate_path_template(&role, &input.path_template)?,
-        write_mode: destination_write_mode(&role).unwrap().to_owned(),
-        enabled: input.enabled,
+    let destinations = normalize_knowledge_structure(&input)?;
+    let example_date = match input.example_date.as_deref() {
+        Some(value) => NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .map_err(|_| ApiError::bad_request("example date must use YYYY-MM-DD"))?,
+        None => Utc::now().date_naive(),
     };
+    let can_create_folders = state
+        .vault_context
+        .browser_catalog()
+        .map_err(ApiError::internal)?
+        .is_some();
+    Ok(Json(knowledge_structure_preview_value(
+        &catalog,
+        &destinations,
+        example_date,
+        can_create_folders,
+    )))
+}
+
+async fn save_knowledge_structure(
+    State(state): State<AppState>,
+    Json(input): Json<KnowledgeStructureInput>,
+) -> Result<Json<Value>, ApiError> {
+    let catalog = state.vault_context.catalog().map_err(ApiError::internal)?;
+    if input.catalog_revision != catalog.revision {
+        return Err(ApiError::conflict(
+            "the vault changed; rescan and review the structure again",
+        ));
+    }
+    let destinations = normalize_knowledge_structure(&input)?;
     let key = destination_preference_key(&catalog.vault_id);
-    let preferences = state
-        .store
-        .get_preferences()
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let mut destinations = preferences
-        .get(&key)
-        .and_then(|value| serde_json::from_str::<Vec<KnowledgeDestination>>(value).ok())
-        .unwrap_or_default();
-    destinations.retain(|existing| existing.role != role);
-    destinations.push(destination.clone());
     state
         .store
         .set_preferences(&BTreeMap::from([(
@@ -760,7 +923,7 @@ async fn save_knowledge_destination(
                 .map_err(|error| ApiError::internal(error.to_string()))?,
         )]))
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    Ok(Json(destination))
+    Ok(Json(json!({ "destinations": destinations })))
 }
 
 async fn sync_browser_vault(
@@ -782,9 +945,14 @@ async fn sync_browser_vault(
             "vault scan is limited to 500 Markdown files",
         ));
     }
-    if input.tree_paths.len() > 2_000 {
+    if input.markdown_paths.len() > 2_000 {
         return Err(ApiError::bad_request(
-            "vault tree is limited to 2000 Markdown paths",
+            "vault scan is limited to 2000 Markdown paths",
+        ));
+    }
+    if input.folder_paths.len() > 2_000 {
+        return Err(ApiError::bad_request(
+            "vault scan is limited to 2000 folder paths",
         ));
     }
     let mut files = Vec::with_capacity(input.files.len());
@@ -815,9 +983,9 @@ async fn sync_browser_vault(
         }
         files.push((normalized_path, file.contents));
     }
-    let mut tree_paths = Vec::with_capacity(input.tree_paths.len());
-    let mut seen_tree_paths = HashSet::new();
-    for value in input.tree_paths {
+    let mut markdown_paths = Vec::with_capacity(input.markdown_paths.len());
+    let mut seen_markdown_paths = HashSet::new();
+    for value in input.markdown_paths {
         let path = PathBuf::from(value.trim());
         if path.as_os_str().is_empty()
             || path.is_absolute()
@@ -827,20 +995,43 @@ async fn sync_browser_vault(
                 .any(|component| !matches!(component, std::path::Component::Normal(_)))
         {
             return Err(ApiError::bad_request(
-                "vault tree paths must be relative Markdown paths",
+                "vault catalog paths must be relative Markdown paths",
             ));
         }
         let normalized_path = path.to_string_lossy().replace('\\', "/");
-        if !seen_tree_paths.insert(normalized_path.to_ascii_lowercase()) {
+        if !seen_markdown_paths.insert(normalized_path.to_ascii_lowercase()) {
             return Err(ApiError::conflict(format!(
-                "vault tree contains a duplicate or case-colliding path: {normalized_path}"
+                "vault catalog contains a duplicate or case-colliding Markdown path: {normalized_path}"
             )));
         }
-        tree_paths.push(normalized_path);
+        markdown_paths.push(normalized_path);
     }
-    if tree_paths.is_empty() {
-        tree_paths.extend(files.iter().map(|(path, _)| path.clone()));
+    if markdown_paths.is_empty() {
+        markdown_paths.extend(files.iter().map(|(path, _)| path.clone()));
     }
+    let mut folder_paths = vec![String::new()];
+    let mut seen_folder_paths = HashSet::from([String::new()]);
+    for value in input.folder_paths {
+        let path = PathBuf::from(value.trim());
+        if path.as_os_str().is_empty()
+            || path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(ApiError::bad_request(
+                "vault folder paths must remain relative",
+            ));
+        }
+        let normalized_path = path.to_string_lossy().replace('\\', "/");
+        if !seen_folder_paths.insert(normalized_path.to_ascii_lowercase()) {
+            return Err(ApiError::conflict(format!(
+                "vault scan contains a duplicate or case-colliding folder: {normalized_path}"
+            )));
+        }
+        folder_paths.push(normalized_path);
+    }
+    folder_paths.sort();
     let vault_id = if input.vault_id.trim().is_empty() {
         format!("browser-legacy:{}", input.name.trim())
     } else {
@@ -848,7 +1039,13 @@ async fn sync_browser_vault(
     };
     let catalog = state
         .vault_context
-        .catalog_from_browser_files(&vault_id, input.name.trim(), &files, tree_paths)
+        .catalog_from_browser_files(
+            &vault_id,
+            input.name.trim(),
+            &files,
+            markdown_paths,
+            folder_paths,
+        )
         .map_err(ApiError::bad_request)?;
     state
         .store
@@ -2048,5 +2245,87 @@ mod knowledge_destination_tests {
             validate_path_template("daily_activity", "{year}/{month_name}/Daily {day}.md").is_ok()
         );
         assert!(validate_path_template("daily_activity", "{quarter}/Daily.md").is_err());
+    }
+
+    #[test]
+    fn previews_only_missing_static_folders() {
+        let input = KnowledgeStructureInput {
+            destinations: vec![
+                KnowledgeDestinationDraft {
+                    role: "daily_activity".to_owned(),
+                    base_path: "Work Log".to_owned(),
+                    path_template: "Archive/{year}/Daily {day}.md".to_owned(),
+                    enabled: true,
+                },
+                KnowledgeDestinationDraft {
+                    role: "product_knowledge".to_owned(),
+                    base_path: "Products/Platform".to_owned(),
+                    path_template: String::new(),
+                    enabled: true,
+                },
+                KnowledgeDestinationDraft {
+                    role: "engineering_knowledge".to_owned(),
+                    base_path: "Engineering".to_owned(),
+                    path_template: String::new(),
+                    enabled: true,
+                },
+                KnowledgeDestinationDraft {
+                    role: "decision_records".to_owned(),
+                    base_path: String::new(),
+                    path_template: "Decisions/{date} {slug}.md".to_owned(),
+                    enabled: false,
+                },
+                KnowledgeDestinationDraft {
+                    role: "feature_recaps".to_owned(),
+                    base_path: String::new(),
+                    path_template: String::new(),
+                    enabled: false,
+                },
+            ],
+            catalog_revision: "revision".to_owned(),
+            example_date: Some("2026-09-09".to_owned()),
+        };
+        let Ok(destinations) = normalize_knowledge_structure(&input) else {
+            panic!("valid structure");
+        };
+        let catalog = vault_context::VaultCatalog {
+            vault_id: "test".to_owned(),
+            configured: true,
+            root: Some("Vault".to_owned()),
+            revision: "revision".to_owned(),
+            notes: Vec::new(),
+            markdown_paths: Vec::new(),
+            folder_paths: vec![String::new(), "Work Log".to_owned(), "Products".to_owned()],
+        };
+        let preview = knowledge_structure_preview_value(
+            &catalog,
+            &destinations,
+            NaiveDate::from_ymd_opt(2026, 9, 9).unwrap(),
+            true,
+        );
+        assert_eq!(preview["existing_folders"], json!(["Products", "Work Log"]));
+        assert_eq!(
+            preview["missing_folders"],
+            json!(["Engineering", "Products/Platform", "Work Log/Archive"])
+        );
+        assert_eq!(
+            preview["examples"]["daily_activity"],
+            "Work Log/Archive/2026/Daily 9.md"
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_or_duplicate_structures() {
+        let input = KnowledgeStructureInput {
+            destinations: vec![KnowledgeDestinationDraft {
+                role: "daily_activity".to_owned(),
+                base_path: "Work Log".to_owned(),
+                path_template: "Daily.md".to_owned(),
+                enabled: true,
+            }],
+            catalog_revision: "revision".to_owned(),
+            example_date: None,
+        };
+        assert!(normalize_knowledge_structure(&input).is_err());
     }
 }

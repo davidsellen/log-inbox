@@ -39,8 +39,10 @@ pub struct VaultCatalog {
     pub root: Option<String>,
     pub revision: String,
     pub notes: Vec<VaultNote>,
+    #[serde(default, alias = "tree_paths")]
+    pub markdown_paths: Vec<String>,
     #[serde(default)]
-    pub tree_paths: Vec<String>,
+    pub folder_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,7 +147,8 @@ impl VaultContextProvider {
         vault_id: &str,
         name: &str,
         files: &[(String, String)],
-        tree_paths: Vec<String>,
+        markdown_paths: Vec<String>,
+        folder_paths: Vec<String>,
     ) -> Result<VaultCatalog, String> {
         let mut notes = files
             .iter()
@@ -170,9 +173,10 @@ impl VaultContextProvider {
             vault_id: vault_id.to_owned(),
             configured: true,
             root: Some(name.to_owned()),
-            revision: catalog_revision(&notes),
+            revision: catalog_revision(&notes, &folder_paths),
             notes,
-            tree_paths,
+            markdown_paths,
+            folder_paths,
         })
     }
 
@@ -189,11 +193,14 @@ impl VaultContextProvider {
         let mut tree_files = Vec::new();
         collect_markdown(root, root, &[], &mut tree_files)?;
         tree_files.sort();
-        let tree_paths = tree_files
+        let markdown_paths = tree_files
             .iter()
             .filter_map(|path| path.strip_prefix(root).ok())
             .map(|path| path.to_string_lossy().replace('\\', "/"))
             .collect();
+        let mut folder_paths = vec![String::new()];
+        collect_folders(root, root, &mut folder_paths)?;
+        folder_paths.sort();
         let mut notes = files
             .into_iter()
             .map(|path| read_note(root, &path))
@@ -203,9 +210,10 @@ impl VaultContextProvider {
             vault_id: format!("mounted:{}", root.display()),
             configured: true,
             root: Some(root.display().to_string()),
-            revision: catalog_revision(&notes),
+            revision: catalog_revision(&notes, &folder_paths),
             notes,
-            tree_paths,
+            markdown_paths,
+            folder_paths,
         })
     }
 
@@ -375,7 +383,8 @@ impl VaultContextProvider {
                 root: None,
                 revision: "unconfigured".to_owned(),
                 notes: Vec::new(),
-                tree_paths: Vec::new(),
+                markdown_paths: Vec::new(),
+                folder_paths: vec![String::new()],
             });
         };
         let contents = fs::read_to_string(path)
@@ -397,8 +406,9 @@ impl VaultContextProvider {
             vault_id: format!("legacy:{}", path.display()),
             configured: true,
             root: path.parent().map(|value| value.display().to_string()),
-            revision: catalog_revision(&notes),
-            tree_paths: notes.iter().map(|note| note.path.clone()).collect(),
+            revision: catalog_revision(&notes, &[String::new()]),
+            markdown_paths: notes.iter().map(|note| note.path.clone()).collect(),
+            folder_paths: vec![String::new()],
             notes,
         })
     }
@@ -468,6 +478,29 @@ fn collect_markdown(
         {
             output.push(path);
         }
+    }
+    Ok(())
+}
+
+fn collect_folders(root: &Path, directory: &Path, folders: &mut Vec<String>) -> Result<(), String> {
+    let entries = fs::read_dir(directory)
+        .map_err(|error| format!("reading vault folder {}: {error}", directory.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("reading vault folder entry: {error}"))?;
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("reading vault folder type: {error}"))?;
+        if !kind.is_dir() || entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| format!("resolving vault folder {}: {error}", path.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        folders.push(relative);
+        collect_folders(root, &path, folders)?;
     }
     Ok(())
 }
@@ -655,8 +688,10 @@ fn env_path(name: &str) -> Option<PathBuf> {
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
 }
-fn catalog_revision(notes: &[VaultNote]) -> String {
-    stable_hash(&serde_json::to_vec(notes).unwrap_or_default())
+fn catalog_revision(notes: &[VaultNote], folder_paths: &[String]) -> String {
+    let mut bytes = serde_json::to_vec(notes).unwrap_or_default();
+    bytes.extend_from_slice(&serde_json::to_vec(folder_paths).unwrap_or_default());
+    stable_hash(&bytes)
 }
 fn context_revision(catalog: &str, rules: &[VaultLinkRule]) -> String {
     let mut bytes = catalog.as_bytes().to_vec();
@@ -780,13 +815,15 @@ mod tests {
                     "Projects/Customer Portal.md".to_owned(),
                     "Private/Secret.md".to_owned(),
                 ],
+                vec![String::new(), "Projects".to_owned(), "Private".to_owned()],
             )
             .expect("browser catalog builds");
 
         assert_eq!(catalog.root.as_deref(), Some("My vault"));
         assert_eq!(catalog.vault_id, "browser-test");
         assert_eq!(catalog.notes.len(), 1);
-        assert_eq!(catalog.tree_paths.len(), 2);
+        assert_eq!(catalog.markdown_paths.len(), 2);
+        assert_eq!(catalog.folder_paths.len(), 3);
         assert_eq!(catalog.notes[0].aliases, ["portal-api"]);
         assert_eq!(catalog.notes[0].wikilink, "[[Customer Portal]]");
     }

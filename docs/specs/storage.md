@@ -45,4 +45,4 @@ Accepted redacted content is stored completely. Ingestion rejects values above t
 
 `vault_link_rules` stores user-owned selectors and canonical note IDs. Selectors are encoded as structured JSON so one rule can combine multiple fields while note names and folder conventions remain outside the application schema.
 
-Vault-scoped semantic destinations are stored as versioned JSON preferences keyed by stable vault ID. They contain role, user-owned base path, constrained path template, write mode, and enabled state. Catalog revisions protect saves from stale folder selections; revisions are not used as vault identity.
+Vault-scoped semantic destinations are stored together as versioned JSON preferences keyed by stable vault ID. They contain role, user-owned base path, constrained path template, write mode, and enabled state. Complete structures are validated and replaced atomically. Catalog revisions include note and folder state to protect saves from stale selections; revisions are not used as vault identity. Imported and exported templates contain configuration only and never Markdown contents.
