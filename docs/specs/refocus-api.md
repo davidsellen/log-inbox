@@ -56,3 +56,13 @@ The server resolves the active workspace and calendar date, freezes the day dest
 Requires `draft:generate`, the session cookie, an allowed Host/Origin, and the matching `X-CSRF-Token`. The server serializes generation per owner process, freezes the day, rejects a truncated evidence set, creates an immutable evidence snapshot, and stores a schema-validated immutable proposal revision. An identical evidence/manual snapshot returns the existing current revision instead of calling the model again.
 
 Automated evidence always uses the strict structured model contract, even if an ingest producer claims `entry_kind=manual`. Manual-only days create a reviewable revision without an LLM. Model absence, oversized input, provider failure, invalid JSON, schema mismatch, missing evidence, or unsafe grouping returns `422 Unprocessable Entity`; raw log text is never substituted as a candidate. Generation changes SQLite review state only. It does not create a folder or Markdown file.
+
+## Review evidence
+
+### `PUT /api/v2/daily/{YYYY-MM-DD}/evidence/{event_id}`
+
+Requires `review:write` and CSRF. Body names the exact `expected_revision_id`, a disposition (`include`, `omit`, `duplicate_of`, or `superseded_by`), an optional related event ID, and an optional bounded reason. Duplicate/superseded decisions require a different event from the same snapshot; include/omit decisions cannot name one. A stale revision ID returns `409 Conflict`.
+
+### `DELETE /api/v2/daily/{YYYY-MM-DD}/evidence/{event_id}`
+
+Requires `review:write` and CSRF. Body contains the exact `expected_revision_id`. It reopens the evidence by clearing its disposition and related decision fields. Both review routes return the complete ordered snapshot decision list. They do not rewrite the immutable candidate revision or Markdown.

@@ -121,6 +121,19 @@ struct ManualDailyEntryRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct EvidenceDecisionRequest {
+    expected_revision_id: String,
+    disposition: String,
+    related_event_id: Option<String>,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpectedRevisionRequest {
+    expected_revision_id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
     #[serde(default, rename = "jsonrpc")]
     _jsonrpc: Option<String>,
@@ -402,6 +415,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v2/daily/{date}/manual",
             post(refocus_create_manual_entry),
         )
+        .route(
+            "/api/v2/daily/{date}/evidence/{event_id}",
+            put(refocus_decide_daily_evidence).delete(refocus_reopen_daily_evidence),
+        )
         .route("/favicon.ico", get(favicon))
         .route("/api/dashboard", get(dashboard_data))
         .route("/api/logs/manual/options", get(manual_log_options))
@@ -613,6 +630,13 @@ async fn refocus_daily_day(
             .map_err(|error| ApiError::internal(error.to_string()))?,
         None => None,
     };
+    let current_snapshot_evidence = match current_snapshot.as_ref() {
+        Some(snapshot) => state
+            .store
+            .snapshot_evidence(&snapshot.id)
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+        None => Vec::new(),
+    };
     let live_event_ids = evidence
         .events
         .iter()
@@ -665,6 +689,7 @@ async fn refocus_daily_day(
         "manual_entries": manual_entries,
         "current_revision": current_revision,
         "current_snapshot": current_snapshot,
+        "current_snapshot_evidence": current_snapshot_evidence,
         "candidate_freshness": candidate_freshness
     })))
 }
@@ -844,6 +869,83 @@ async fn refocus_generate_daily(
         )
         .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(revision))
+}
+
+async fn refocus_decide_daily_evidence(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((date, event_id)): AxumPath<(String, String)>,
+    Json(input): Json<EvidenceDecisionRequest>,
+) -> Result<Json<Vec<log_inbox_core::models::SnapshotEvidence>>, ApiError> {
+    authorize_refocus(&state, &headers, "review:write", true)?;
+    let snapshot = current_snapshot_for_review(&state, &date, &input.expected_revision_id)?;
+    state
+        .store
+        .decide_snapshot_evidence(
+            &snapshot.id,
+            &event_id,
+            &input.disposition,
+            input.related_event_id.as_deref(),
+            "owner",
+            input.reason.as_deref(),
+        )
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let evidence = state
+        .store
+        .snapshot_evidence(&snapshot.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(evidence))
+}
+
+async fn refocus_reopen_daily_evidence(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((date, event_id)): AxumPath<(String, String)>,
+    Json(input): Json<ExpectedRevisionRequest>,
+) -> Result<Json<Vec<log_inbox_core::models::SnapshotEvidence>>, ApiError> {
+    authorize_refocus(&state, &headers, "review:write", true)?;
+    let snapshot = current_snapshot_for_review(&state, &date, &input.expected_revision_id)?;
+    state
+        .store
+        .reopen_snapshot_evidence(&snapshot.id, &event_id)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let evidence = state
+        .store
+        .snapshot_evidence(&snapshot.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(evidence))
+}
+
+fn current_snapshot_for_review(
+    state: &AppState,
+    date: &str,
+    expected_revision_id: &str,
+) -> Result<log_inbox_core::models::EvidenceSnapshot, ApiError> {
+    let local_date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let profile = state
+        .store
+        .active_workspace_profile()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::conflict("review and activate a workspace profile first"))?;
+    let current = state
+        .store
+        .current_proposal_revision(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::conflict("generate a candidate before reviewing evidence"))?;
+    if current.id != expected_revision_id {
+        return Err(ApiError::conflict(
+            "the Daily candidate changed; reload and try again",
+        ));
+    }
+    let snapshot_id = current
+        .snapshot_id
+        .ok_or_else(|| ApiError::conflict("manual-only candidates have no automated evidence"))?;
+    state
+        .store
+        .evidence_snapshot(&snapshot_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::internal("the current evidence snapshot is missing"))
 }
 
 fn effective_daily_window(

@@ -2,7 +2,7 @@ use crate::{
     daily::resolve_day,
     models::{
         DailyDay, DailyRevisionContent, DailyWorkstream, EvidenceSnapshot, ManualDailyEntry,
-        ProposalRevision,
+        ProposalRevision, SnapshotEvidence,
     },
     store::Store,
 };
@@ -319,8 +319,20 @@ impl Store {
         );
         anyhow::ensure!(!actor.trim().is_empty(), "decision actor is required");
         anyhow::ensure!(
+            reason.is_none_or(|value| value.len() <= 2048),
+            "decision reason is too large"
+        );
+        anyhow::ensure!(
             matches!(disposition, "include" | "omit") || related_event_id.is_some(),
             "related evidence is required for duplicate or superseded decisions"
+        );
+        anyhow::ensure!(
+            !matches!(disposition, "include" | "omit") || related_event_id.is_none(),
+            "include or omit decisions cannot name related evidence"
+        );
+        anyhow::ensure!(
+            related_event_id != Some(event_id),
+            "evidence cannot refer to itself"
         );
         let conn = self.connect()?;
         if let Some(related_event_id) = related_event_id {
@@ -337,6 +349,26 @@ impl Store {
         )?;
         anyhow::ensure!(changed == 1, "snapshot evidence was not found");
         Ok(())
+    }
+
+    pub fn reopen_snapshot_evidence(&self, snapshot_id: &str, event_id: &str) -> Result<()> {
+        let changed = self.connect()?.execute(
+            "UPDATE evidence_snapshot_events SET disposition = NULL, related_event_id = NULL, decision_actor = NULL, decision_reason = NULL, decided_at = NULL WHERE snapshot_id = ?1 AND event_id = ?2",
+            params![snapshot_id, event_id],
+        )?;
+        anyhow::ensure!(changed == 1, "snapshot evidence was not found");
+        Ok(())
+    }
+
+    pub fn snapshot_evidence(&self, snapshot_id: &str) -> Result<Vec<SnapshotEvidence>> {
+        let conn = self.connect()?;
+        let mut statement = conn.prepare(
+            "SELECT event_id, position, event_digest, disposition, related_event_id, decision_actor, decision_reason, decided_at FROM evidence_snapshot_events WHERE snapshot_id = ?1 ORDER BY position",
+        )?;
+        statement
+            .query_map(params![snapshot_id], snapshot_evidence_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn evidence_snapshot(&self, id: &str) -> Result<Option<EvidenceSnapshot>> {
@@ -541,6 +573,30 @@ fn manual_entry_from_row(row: &Row<'_>) -> rusqlite::Result<ManualDailyEntry> {
         updated_at: parse_time(&updated_at).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, error.into())
         })?,
+    })
+}
+
+fn snapshot_evidence_from_row(row: &Row<'_>) -> rusqlite::Result<SnapshotEvidence> {
+    let decided_at: Option<String> = row.get(7)?;
+    Ok(SnapshotEvidence {
+        event_id: row.get(0)?,
+        position: row.get(1)?,
+        event_digest: row.get(2)?,
+        disposition: row.get(3)?,
+        related_event_id: row.get(4)?,
+        decision_actor: row.get(5)?,
+        decision_reason: row.get(6)?,
+        decided_at: decided_at
+            .map(|value| {
+                parse_time(&value).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -800,6 +856,43 @@ mod tests {
         store
             .decide_snapshot_evidence(&snapshot.id, &event_ids[0], "include", None, "owner", None)
             .expect("evidence decision stores");
+        assert!(
+            store
+                .decide_snapshot_evidence(
+                    &snapshot.id,
+                    &event_ids[1],
+                    "duplicate_of",
+                    Some(&event_ids[1]),
+                    "owner",
+                    None,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("cannot refer to itself")
+        );
+        store
+            .decide_snapshot_evidence(
+                &snapshot.id,
+                &event_ids[1],
+                "duplicate_of",
+                Some(&event_ids[0]),
+                "owner",
+                Some("Same validation evidence"),
+            )
+            .expect("related decision stores");
+        let decisions = store
+            .snapshot_evidence(&snapshot.id)
+            .expect("snapshot decisions read");
+        assert_eq!(decisions[0].disposition.as_deref(), Some("include"));
+        assert_eq!(decisions[1].disposition.as_deref(), Some("duplicate_of"));
+        store
+            .reopen_snapshot_evidence(&snapshot.id, &event_ids[1])
+            .expect("evidence reopens");
+        assert!(
+            store.snapshot_evidence(&snapshot.id).unwrap()[1]
+                .disposition
+                .is_none()
+        );
 
         let first_revision = store
             .create_proposal_revision(

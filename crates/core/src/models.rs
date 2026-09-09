@@ -179,6 +179,18 @@ pub struct EvidenceSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotEvidence {
+    pub event_id: String,
+    pub position: u64,
+    pub event_digest: String,
+    pub disposition: Option<String>,
+    pub related_event_id: Option<String>,
+    pub decision_actor: Option<String>,
+    pub decision_reason: Option<String>,
+    pub decided_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManualDailyEntry {
     pub id: String,
     pub workspace_id: String,
