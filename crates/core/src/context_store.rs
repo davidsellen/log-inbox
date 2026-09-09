@@ -381,6 +381,53 @@ impl Store {
         Ok(saved)
     }
 
+    pub fn transition_migration_item(
+        &self,
+        item: &MigrationItem,
+        expected_status: &str,
+    ) -> Result<MigrationItem> {
+        validate_id(&item.operation_id)?;
+        validate_item_kind(&item.item_kind)?;
+        validate_digest(&item.source_digest)?;
+        validate_migration_item_status(expected_status)?;
+        validate_migration_item_status(&item.status)?;
+        let details_json = serde_json::to_string(&item.details)?;
+        let conn = self.connect()?;
+        let changed = conn.execute(
+            r#"UPDATE migration_items
+               SET status = ?1, details_json = ?2, updated_at = ?3
+               WHERE operation_id = ?4 AND item_kind = ?5 AND source_identity = ?6
+                 AND source_digest = ?7 AND status = ?8"#,
+            params![
+                item.status,
+                details_json,
+                Utc::now().to_rfc3339(),
+                item.operation_id,
+                item.item_kind,
+                item.source_identity,
+                item.source_digest,
+                expected_status,
+            ],
+        )?;
+        let current = conn
+            .query_row(
+                "SELECT operation_id, item_kind, source_identity, source_digest, status, details_json, updated_at FROM migration_items WHERE operation_id = ?1 AND item_kind = ?2 AND source_identity = ?3",
+                params![item.operation_id, item.item_kind, item.source_identity],
+                migration_item_from_row,
+            )
+            .optional()?
+            .context("migration item not found")?;
+        anyhow::ensure!(
+            current.source_digest == item.source_digest,
+            "migration source changed for an existing identity"
+        );
+        anyhow::ensure!(
+            changed == 1 || current.status == item.status,
+            "migration item is not in the expected state"
+        );
+        Ok(current)
+    }
+
     pub fn list_context_mappings(&self, workspace_id: &str) -> Result<Vec<ContextMapping>> {
         let conn = self.connect()?;
         let mut statement = conn.prepare(
@@ -910,6 +957,22 @@ mod tests {
                 )
                 .unwrap(),
             Some(preserved)
+        );
+        let imported_item = MigrationItem {
+            status: "imported".to_owned(),
+            details: serde_json::json!({"imported": true}),
+            ..item.clone()
+        };
+        let transitioned = store
+            .transition_migration_item(&imported_item, "inventoried")
+            .unwrap();
+        assert_eq!(transitioned.status, "imported");
+        assert_eq!(
+            store
+                .transition_migration_item(&imported_item, "inventoried")
+                .unwrap()
+                .status,
+            "imported"
         );
 
         assert!(

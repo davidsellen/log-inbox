@@ -520,7 +520,10 @@ fn build_router(state: AppState) -> Router {
                 "/api/v2/settings/workspace",
                 put(refocus_save_workspace_settings),
             )
-            .route("/api/v2/migration/cutover", get(refocus_cutover_report))
+            .route(
+                "/api/v2/migration/cutover",
+                get(refocus_cutover_report).post(refocus_commit_cutover),
+            )
             .route("/api/v2/daily/{date}", get(refocus_daily_day))
             .route(
                 "/api/v2/daily/{date}/apply-preview",
@@ -749,6 +752,24 @@ async fn refocus_cutover_report(
     )
     .map(Json)
     .map_err(|error| ApiError::internal(error.to_string()))
+}
+
+async fn refocus_commit_cutover(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<migration::CutoverCommitRequest>,
+) -> Result<Json<migration::CutoverCommitResult>, ApiError> {
+    authorize_refocus(&state, &headers, "settings:write", true)?;
+    let (profile, workspace) = active_refocus_context(&state)?;
+    migration::commit_cutover(
+        &state.store,
+        &profile,
+        &workspace,
+        state.legacy_proposal_dir.as_deref(),
+        &request,
+    )
+    .map(Json)
+    .map_err(|error| ApiError::conflict(error.to_string()))
 }
 
 async fn refocus_preview_workspace_settings(

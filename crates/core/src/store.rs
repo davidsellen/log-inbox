@@ -35,6 +35,10 @@ pub struct Store {
 }
 
 impl Store {
+    pub fn database_path(&self) -> &Path {
+        &self.db_path
+    }
+
     pub fn open(db_path: PathBuf) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
             fs::create_dir_all(parent)
@@ -1059,10 +1063,7 @@ impl Store {
         .map_err(Into::into)
     }
 
-    pub(crate) fn migration_operation(
-        &self,
-        operation_id: &str,
-    ) -> Result<Option<MigrationJournalEntry>> {
+    pub fn migration_operation(&self, operation_id: &str) -> Result<Option<MigrationJournalEntry>> {
         let conn = self.connect()?;
         conn.query_row(
             "SELECT operation_id, migration_name, source_identity, status, details_json, started_at, completed_at FROM migration_journal WHERE operation_id = ?1",
