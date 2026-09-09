@@ -1576,6 +1576,12 @@ mod tests {
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());
 
+        let restored = Store::open(backup_path.clone()).expect("backup restores as a store");
+        let restored_events = restored.all_events().expect("restored events read");
+        assert_eq!(restored_events.len(), 1);
+        assert_eq!(restored_events[0].message, "backup evidence");
+        drop(restored);
+
         fs::remove_file(backup_path).expect("test backup removed");
     }
 
