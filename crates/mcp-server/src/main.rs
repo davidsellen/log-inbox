@@ -35,6 +35,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod auto_stage;
 mod daily_consolidation;
+mod daily_writer;
 mod llm;
 mod proposal_inbox;
 mod vault_context;
@@ -487,6 +488,10 @@ fn build_router(state: AppState) -> Router {
                 put(refocus_save_workspace_settings),
             )
             .route("/api/v2/daily/{date}", get(refocus_daily_day))
+            .route(
+                "/api/v2/daily/{date}/apply-preview",
+                get(refocus_daily_apply_preview),
+            )
             .route(
                 "/api/v2/daily/{date}/generate",
                 post(refocus_generate_daily),
@@ -945,6 +950,163 @@ async fn refocus_daily_day(
         "current_snapshot_evidence": current_snapshot_evidence,
         "candidate_freshness": candidate_freshness,
         "preview_markdown": preview_markdown
+    })))
+}
+
+async fn refocus_daily_apply_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(date): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "logs:read", false)?;
+    let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let profile = active_refocus_workspace(&state)?;
+    let workspace = state
+        .workspace
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("workspace root is not configured"))?;
+    let day = state
+        .store
+        .daily_day(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::conflict("generate a Daily candidate before previewing Apply"))?;
+    let revision = state
+        .store
+        .current_proposal_revision(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::conflict("generate a Daily candidate before previewing Apply"))?;
+    if day.current_revision_id.as_deref() != Some(revision.id.as_str()) {
+        return Err(ApiError::conflict(
+            "the Daily candidate changed; reload before previewing Apply",
+        ));
+    }
+    let content = serde_json::from_value::<DailyRevisionContent>(revision.content.clone())
+        .map_err(|error| ApiError::internal(format!("invalid stored Daily candidate: {error}")))?;
+    let manual_entries = state
+        .store
+        .manual_daily_entries(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let snapshot = match revision.snapshot_id.as_deref() {
+        Some(snapshot_id) => Some(
+            state
+                .store
+                .evidence_snapshot(snapshot_id)
+                .map_err(|error| ApiError::internal(error.to_string()))?
+                .ok_or_else(|| ApiError::internal("the current evidence snapshot is missing"))?,
+        ),
+        None => None,
+    };
+    let snapshot_evidence = match snapshot.as_ref() {
+        Some(snapshot) => state
+            .store
+            .snapshot_evidence(&snapshot.id)
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+        None => Vec::new(),
+    };
+    if snapshot_evidence
+        .iter()
+        .any(|item| item.disposition.is_none())
+    {
+        return Err(ApiError::conflict(
+            "review every automated evidence item before previewing Apply",
+        ));
+    }
+
+    let live = state
+        .store
+        .get_events_between(day.start_utc, day.end_utc, 500)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if live.truncated {
+        return Err(ApiError::unprocessable(
+            "Daily evidence exceeds the supported 500-event Apply limit.",
+        ));
+    }
+    let live_event_ids = live
+        .events
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect::<Vec<_>>();
+    let snapshot_event_ids = snapshot
+        .as_ref()
+        .map(|snapshot| {
+            snapshot
+                .event_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let live_manual_ids = manual_entries
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<Vec<_>>();
+    if live_event_ids != snapshot_event_ids
+        || !content
+            .manual_entry_ids
+            .iter()
+            .map(String::as_str)
+            .eq(live_manual_ids)
+    {
+        return Err(ApiError::conflict(
+            "new Daily evidence or manual notes are available; regenerate before Apply",
+        ));
+    }
+
+    let target = workspace
+        .resolve_markdown_path(
+            std::path::Path::new(&day.destination_path),
+            MarkdownPathMode::MayCreate,
+        )
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let target_exists = target.exists();
+    let (initial_content, template_used) = if target_exists {
+        (
+            Some(std::fs::read(&target).map_err(|error| {
+                ApiError::internal(format!("reading Daily target failed: {error}"))
+            })?),
+            None,
+        )
+    } else if let Some(template_path) = profile.template_path.as_deref() {
+        let template = workspace
+            .resolve_markdown_path(
+                std::path::Path::new(template_path),
+                MarkdownPathMode::ExistingFile,
+            )
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        (
+            Some(std::fs::read(&template).map_err(|error| {
+                ApiError::internal(format!("reading Daily template failed: {error}"))
+            })?),
+            Some(template_path.to_owned()),
+        )
+    } else {
+        (None, None)
+    };
+    let markdown =
+        llm::render_daily_revision_preview(&content, &manual_entries, &snapshot_evidence);
+    let plan = daily_writer::plan_managed_block(
+        initial_content.as_deref(),
+        &day.block_id,
+        &markdown,
+        &format!("Daily log {local_date}"),
+    )
+    .map_err(ApiError::conflict)?;
+    let updated_content_hash = daily_writer::digest(&plan.updated_content);
+    Ok(Json(json!({
+        "workspace_id": profile.id,
+        "local_date": local_date,
+        "destination_path": day.destination_path,
+        "revision_id": revision.id,
+        "revision_content_hash": revision.content_hash,
+        "block_id": day.block_id,
+        "will_create_note": !target_exists,
+        "template_used": template_used,
+        "previous_block": plan.previous_block,
+        "next_block": plan.next_block,
+        "expected_old_block_hash": plan.expected_old_block_hash,
+        "intended_new_block_hash": plan.intended_new_block_hash,
+        "updated_content_hash": updated_content_hash
     })))
 }
 
@@ -3444,6 +3606,139 @@ mod knowledge_destination_tests {
             response_json(updated).await["active_profile"]["id"],
             profile_id
         );
+    }
+
+    #[tokio::test]
+    async fn apply_preview_is_exact_read_only_and_rejects_stale_manual_evidence() {
+        let state = test_state(true);
+        state
+            .store
+            .set_owner_secret_hash(&hash_owner_secret("owner-secret-for-tests").unwrap())
+            .unwrap();
+        let workspace_root = state
+            .workspace
+            .as_ref()
+            .unwrap()
+            .canonical_root()
+            .to_owned();
+        let app = build_router(state);
+        let login = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/auth/login",
+            json!({"owner_secret": "owner-secret-for-tests"}),
+            None,
+            None,
+        )
+        .await;
+        let cookie = login
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let csrf = response_json(login).await["csrf_token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let settings = json!({
+            "timezone": "UTC",
+            "daily_root": "Work Log",
+            "daily_pattern": "{year}/{month_name}/Daily {date}.md",
+            "template_path": null,
+            "link_style": "markdown"
+        });
+        let preview = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/settings/workspace/preview",
+            settings,
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        let preview = response_json(preview).await;
+        let saved = json_response(
+            app.clone(),
+            "PUT",
+            "/api/v2/settings/workspace",
+            json!({
+                "settings": preview["settings"],
+                "preview_digest": preview["preview_digest"],
+                "expected_profile_id": null,
+                "expected_updated_at": null
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(saved.status(), StatusCode::OK);
+
+        let manual = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/daily/2026-09-09/manual",
+            json!({"text": "Reviewed the safe Apply boundary.", "references": []}),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(manual.status(), StatusCode::CREATED);
+        let generated = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/daily/2026-09-09/generate",
+            json!({}),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(generated.status(), StatusCode::OK);
+
+        let apply_preview = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/daily/2026-09-09/apply-preview",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(apply_preview.status(), StatusCode::OK);
+        let apply_preview = response_json(apply_preview).await;
+        assert_eq!(apply_preview["will_create_note"], true);
+        assert!(
+            apply_preview["next_block"]
+                .as_str()
+                .unwrap()
+                .contains("Reviewed the safe Apply boundary.")
+        );
+        assert!(!workspace_root.join("Work Log").exists());
+
+        let newer_manual = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/daily/2026-09-09/manual",
+            json!({"text": "This makes the candidate stale.", "references": []}),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(newer_manual.status(), StatusCode::CREATED);
+        let stale = json_response(
+            app,
+            "GET",
+            "/api/v2/daily/2026-09-09/apply-preview",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
     }
 
     #[test]
