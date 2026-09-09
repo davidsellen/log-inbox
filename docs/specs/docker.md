@@ -19,6 +19,7 @@ Docker Compose is the default way to run the system locally.
 - Serves the local dashboard at `/` and dashboard JSON under `/api`.
 - Mounts `LOG_INBOX_PROPOSAL_HOST_DIR` at `LOG_INBOX_PROPOSAL_DIR` for atomic Markdown delivery.
 - Runs automatic staging when `LOG_INBOX_AUTO_STAGE_INTERVAL_SECONDS` is greater than zero.
+- Mounts the single refocused Markdown workspace read/write at `LOG_INBOX_WORKSPACE_DIR`; set `LOG_INBOX_WORKSPACE_HOST_DIR` to the existing host vault before enabling refocus.
 
 ### ollama
 
@@ -40,6 +41,7 @@ Docker Compose is the default way to run the system locally.
 - `LOG_INBOX_PROPOSAL_HOST_DIR` is a host bind mount, normally a `pending/` folder inside any Markdown vault.
 - `LOG_INBOX_VAULT_CONTEXT_HOST_FILE` is a read-only user configuration file for daily-note formatting and product-note aliases.
 - `LOG_INBOX_VAULT_HOST_DIR` mounts the user's Markdown vault read-only for dashboard catalog discovery. `LOG_INBOX_VAULT_EXCLUDE_PREFIXES` omits generated, daily, or editor-owned folders from canonical targets.
+- `LOG_INBOX_WORKSPACE_HOST_DIR` is the single refocused workspace mount. The browser reviews its timezone and Daily convention, but cannot select a folder from another machine or outside the container's mounts.
 - The dashboard's browser-folder mode requires no vault mount. Mounted discovery remains the advanced option for unsupported browsers and unattended operation.
 - `LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS` bounds active model HTTP work and defaults to 300 seconds; time waiting behind another model request is excluded.
 

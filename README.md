@@ -96,7 +96,9 @@ Open the MCP service root in a browser:
 http://127.0.0.1:8788/
 ```
 
-The dashboard provides quick manual work logging, a Markdown proposal reader, Apply and Discard actions, a durable and cancellable LLM-backed daily consolidation preview, persisted non-secret agent and consolidation preferences, and generated Windows-ready `AGENTS.md` instructions. Manual entries can reuse existing vault-note links and are preserved verbatim under **My notes**, separately from model-summarized automated activity. Refreshing the page restores consolidation status from SQLite. Generated instructions read the API key from `LOG_INBOX_API_KEY` at execution time; the key is never entered into or copied by the dashboard. See the [dashboard specification](docs/specs/dashboard.md) for the review and cleanup lifecycle.
+The refocused dashboard is feature-gated during its coordinated writer cutover. With `LOG_INBOX_REFOCUS_ENABLED=1`, it provides the authenticated one-day review workflow: manual notes, structured automated activity, evidence decisions, exact destination, and deterministic final preview. Set `LOG_INBOX_WORKSPACE_HOST_DIR` to the existing Markdown vault mounted by the service. The browser configures its Daily convention but does not browse or mount a client-side folder. No Markdown is written until the safe Apply milestone is enabled.
+
+With the gate disabled, the legacy proposal Queue and its existing Apply/Discard workflow remain available. Refocused and legacy routes/workers never run together. See the [dashboard specification](docs/specs/dashboard.md) for both lifecycle descriptions.
 
 When the stack is hosted behind a VM address, use that address with port `8788`, for example `http://10.0.2.2:8788/`.
 

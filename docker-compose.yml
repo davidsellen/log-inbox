@@ -53,6 +53,7 @@ services:
       LOG_INBOX_LLM_MODEL: "${LOG_INBOX_LLM_MODEL:-granite3.3:2b}"
       LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS: "${LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS:-300}"
       LOG_INBOX_PUBLIC_INGEST_URL: "${LOG_INBOX_PUBLIC_INGEST_URL:-http://127.0.0.1:8787}"
+      LOG_INBOX_WORKSPACE_DIR: "${LOG_INBOX_WORKSPACE_DIR:-/workspace}"
       LOG_INBOX_PROPOSAL_DIR: "${LOG_INBOX_PROPOSAL_DIR:-/vault-inbox}"
       LOG_INBOX_DAILY_NOTES_DIR: "${LOG_INBOX_DAILY_NOTES_DIR:-/vault-daily}"
       LOG_INBOX_DAILY_NOTES_DISPLAY_PATH: "${LOG_INBOX_DAILY_NOTES_DISPLAY_PATH:-${LOG_INBOX_DAILY_NOTES_HOST_DIR:-./data/daily-notes}}"
@@ -67,6 +68,7 @@ services:
       - "${LOG_INBOX_BIND:-127.0.0.1}:${LOG_INBOX_MCP_PORT:-8788}:8788"
     volumes:
       - log-inbox-data:/data
+      - "${LOG_INBOX_WORKSPACE_HOST_DIR:-./data/vault}:${LOG_INBOX_WORKSPACE_DIR:-/workspace}"
       - "${LOG_INBOX_PROPOSAL_HOST_DIR:-./data/vault-inbox}:${LOG_INBOX_PROPOSAL_DIR:-/vault-inbox}"
       - "${LOG_INBOX_DAILY_NOTES_HOST_DIR:-./data/daily-notes}:${LOG_INBOX_DAILY_NOTES_DIR:-/vault-daily}"
       - "${LOG_INBOX_VAULT_CONTEXT_HOST_FILE:-./config/vault-context.json}:${LOG_INBOX_VAULT_CONTEXT_FILE:-/config/vault-context.json}:ro"

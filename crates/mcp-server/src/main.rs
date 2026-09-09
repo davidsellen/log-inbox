@@ -15,13 +15,15 @@ use log_inbox_core::{
     daily::{render_daily_path, resolve_day},
     models::{
         DailyConsolidationJob, DailyRevisionContent, IgnoredLinkIdentity, LinkSelector,
-        LogEventInput, LogQuery, ProposalRevision, VaultLinkRule,
+        LogEventInput, LogQuery, ProposalRevision, VaultLinkRule, WorkspaceProfile,
     },
     settings::Settings,
     store::Store,
+    workspace::{InspectedWorkspace, MarkdownPathMode},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     env,
@@ -48,6 +50,7 @@ struct AppState {
     apply_lock: Arc<Mutex<()>>,
     daily_generation_lock: Arc<tokio::sync::Mutex<()>>,
     refocus: Option<RefocusConfig>,
+    workspace: Option<InspectedWorkspace>,
 }
 
 #[derive(Clone)]
@@ -138,6 +141,25 @@ struct EditDailyCandidateRequest {
 struct GenerateDailyRequest {
     #[serde(default)]
     replace_edited: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceSettingsDraft {
+    timezone: String,
+    daily_root: String,
+    daily_pattern: String,
+    template_path: Option<String>,
+    link_style: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveWorkspaceSettingsRequest {
+    settings: WorkspaceSettingsDraft,
+    preview_digest: String,
+    expected_profile_id: Option<String>,
+    expected_updated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -351,6 +373,15 @@ async fn main() -> anyhow::Result<()> {
     let store = Store::open(settings.database_path())?;
     let refocus = RefocusConfig::from_env(&store)?;
     let refocus_enabled = refocus.is_some();
+    let workspace = if refocus_enabled {
+        let configured_root = env::var_os("LOG_INBOX_WORKSPACE_DIR")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/workspace"));
+        Some(InspectedWorkspace::inspect(&configured_root)?)
+    } else {
+        None
+    };
     if !refocus_enabled {
         daily_consolidation::migrate_prompt_preference(&store)?;
         store.recover_daily_consolidations()?;
@@ -396,6 +427,7 @@ async fn main() -> anyhow::Result<()> {
         apply_lock: Arc::new(Mutex::new(())),
         daily_generation_lock: Arc::new(tokio::sync::Mutex::new(())),
         refocus,
+        workspace,
     };
 
     if !refocus_enabled {
@@ -442,6 +474,18 @@ fn build_router(state: AppState) -> Router {
         app.route("/api/v2/auth/login", post(refocus_login))
             .route("/api/v2/auth/session", get(refocus_session))
             .route("/api/v2/auth/logout", post(refocus_logout))
+            .route(
+                "/api/v2/settings/workspace",
+                get(refocus_workspace_settings),
+            )
+            .route(
+                "/api/v2/settings/workspace/preview",
+                post(refocus_preview_workspace_settings),
+            )
+            .route(
+                "/api/v2/settings/workspace",
+                put(refocus_save_workspace_settings),
+            )
             .route("/api/v2/daily/{date}", get(refocus_daily_day))
             .route(
                 "/api/v2/daily/{date}/generate",
@@ -627,6 +671,172 @@ async fn refocus_logout(
     Ok(([(header::SET_COOKIE, cookie)], StatusCode::NO_CONTENT).into_response())
 }
 
+async fn refocus_workspace_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "logs:read", false)?;
+    let workspace = state
+        .workspace
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("workspace root is not configured"))?;
+    let active = state
+        .store
+        .active_workspace_profile()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let binding_matches = active
+        .as_ref()
+        .is_some_and(|profile| profile.root_binding == workspace.root_binding());
+    Ok(Json(json!({
+        "workspace_path": workspace.canonical_root().display().to_string(),
+        "active_profile": active,
+        "binding_matches": binding_matches
+    })))
+}
+
+async fn refocus_preview_workspace_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<WorkspaceSettingsDraft>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "settings:write", true)?;
+    let (settings, destination_example, preview_digest) =
+        preview_workspace_settings(&state, input)?;
+    Ok(Json(json!({
+        "settings": settings,
+        "destination_example": destination_example,
+        "preview_digest": preview_digest,
+        "changes_saved": false
+    })))
+}
+
+async fn refocus_save_workspace_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SaveWorkspaceSettingsRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "settings:write", true)?;
+    let (settings, destination_example, preview_digest) =
+        preview_workspace_settings(&state, input.settings)?;
+    if preview_digest != input.preview_digest {
+        return Err(ApiError::conflict(
+            "workspace settings differ from the reviewed preview",
+        ));
+    }
+    let expected = match (
+        input.expected_profile_id.as_deref(),
+        input.expected_updated_at,
+    ) {
+        (Some(id), Some(updated_at)) => Some((id, updated_at)),
+        (None, None) => None,
+        _ => {
+            return Err(ApiError::bad_request(
+                "expected profile ID and timestamp must be supplied together",
+            ));
+        }
+    };
+    let workspace = state
+        .workspace
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("workspace root is not configured"))?;
+    let profile = state
+        .store
+        .save_active_workspace_profile(
+            workspace.root_binding(),
+            &settings.timezone,
+            &settings.daily_root,
+            &settings.daily_pattern,
+            settings.template_path.as_deref(),
+            &settings.link_style,
+            expected,
+        )
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    Ok(Json(json!({
+        "active_profile": profile,
+        "destination_example": destination_example,
+        "binding_matches": true,
+        "changes_saved": true
+    })))
+}
+
+fn preview_workspace_settings(
+    state: &AppState,
+    input: WorkspaceSettingsDraft,
+) -> Result<(WorkspaceSettingsDraft, String, String), ApiError> {
+    let workspace = state
+        .workspace
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("workspace root is not configured"))?;
+    let settings = WorkspaceSettingsDraft {
+        timezone: input.timezone.trim().to_owned(),
+        daily_root: input.daily_root.trim().trim_matches('/').to_owned(),
+        daily_pattern: input.daily_pattern.trim().to_owned(),
+        template_path: input
+            .template_path
+            .map(|path| path.trim().to_owned())
+            .filter(|path| !path.is_empty()),
+        link_style: input.link_style.trim().to_owned(),
+    };
+    resolve_day(Utc::now().date_naive(), &settings.timezone)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if !matches!(settings.link_style.as_str(), "markdown" | "wikilink") {
+        return Err(ApiError::bad_request(
+            "link style must be markdown or wikilink",
+        ));
+    }
+    let destination_example = render_daily_path(
+        &settings.daily_root,
+        &settings.daily_pattern,
+        Utc::now().date_naive(),
+    )
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    workspace
+        .resolve_markdown_path(
+            std::path::Path::new(&destination_example),
+            MarkdownPathMode::MayCreate,
+        )
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if let Some(template_path) = settings.template_path.as_deref() {
+        workspace
+            .resolve_markdown_path(
+                std::path::Path::new(template_path),
+                MarkdownPathMode::ExistingFile,
+            )
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    }
+    let digest_input = json!({
+        "root_binding": workspace.root_binding(),
+        "settings": settings,
+        "destination_example": destination_example
+    });
+    let preview_digest = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&digest_input)
+                .map_err(|error| ApiError::internal(error.to_string()))?
+        )
+    );
+    Ok((settings, destination_example, preview_digest))
+}
+
+fn active_refocus_workspace(state: &AppState) -> Result<WorkspaceProfile, ApiError> {
+    let workspace = state
+        .workspace
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("workspace root is not configured"))?;
+    let profile = state
+        .store
+        .active_workspace_profile()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::conflict("review and save workspace settings first"))?;
+    if profile.root_binding != workspace.root_binding() {
+        return Err(ApiError::conflict(
+            "the mounted workspace has changed; review and save workspace settings again",
+        ));
+    }
+    Ok(profile)
+}
+
 async fn refocus_daily_day(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -635,11 +845,7 @@ async fn refocus_daily_day(
     authorize_refocus(&state, &headers, "logs:read", false)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
-    let profile = state
-        .store
-        .active_workspace_profile()
-        .map_err(|error| ApiError::internal(error.to_string()))?
-        .ok_or_else(|| ApiError::conflict("review and activate a workspace profile first"))?;
+    let profile = active_refocus_workspace(&state)?;
     let frozen_day = state
         .store
         .daily_day(&profile.id, local_date)
@@ -749,11 +955,7 @@ async fn refocus_create_manual_entry(
     authorize_refocus(&state, &headers, "review:write", true)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
-    let profile = state
-        .store
-        .active_workspace_profile()
-        .map_err(|error| ApiError::internal(error.to_string()))?
-        .ok_or_else(|| ApiError::conflict("review and activate a workspace profile first"))?;
+    let profile = active_refocus_workspace(&state)?;
     let frozen_day = state
         .store
         .daily_day(&profile.id, local_date)
@@ -781,11 +983,7 @@ async fn refocus_generate_daily(
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
     let _generation_guard = state.daily_generation_lock.lock().await;
-    let profile = state
-        .store
-        .active_workspace_profile()
-        .map_err(|error| ApiError::internal(error.to_string()))?
-        .ok_or_else(|| ApiError::conflict("review and activate a workspace profile first"))?;
+    let profile = active_refocus_workspace(&state)?;
     let frozen_day = state
         .store
         .daily_day(&profile.id, local_date)
@@ -1003,11 +1201,7 @@ fn current_snapshot_for_review(
 ) -> Result<log_inbox_core::models::EvidenceSnapshot, ApiError> {
     let local_date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
-    let profile = state
-        .store
-        .active_workspace_profile()
-        .map_err(|error| ApiError::internal(error.to_string()))?
-        .ok_or_else(|| ApiError::conflict("review and activate a workspace profile first"))?;
+    let profile = active_refocus_workspace(state)?;
     let current = state
         .store
         .current_proposal_revision(&profile.id, local_date)
@@ -1037,11 +1231,7 @@ async fn refocus_edit_daily_candidate(
     authorize_refocus(&state, &headers, "review:write", true)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
-    let profile = state
-        .store
-        .active_workspace_profile()
-        .map_err(|error| ApiError::internal(error.to_string()))?
-        .ok_or_else(|| ApiError::conflict("review and activate a workspace profile first"))?;
+    let profile = active_refocus_workspace(&state)?;
     let current = state
         .store
         .current_proposal_revision(&profile.id, local_date)
@@ -3026,6 +3216,11 @@ mod knowledge_destination_tests {
             std::env::temp_dir().join(format!("log-inbox-router-{}.sqlite3", uuid::Uuid::new_v4())),
         )
         .expect("test store opens");
+        let workspace_root = std::env::temp_dir().join(format!(
+            "log-inbox-router-workspace-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&workspace_root).expect("test workspace creates");
         AppState {
             store,
             llm_config: None,
@@ -3039,6 +3234,8 @@ mod knowledge_destination_tests {
                 allowed_hosts: HashSet::from(["localhost:8788".to_owned()]),
                 allowed_origins: HashSet::from(["http://localhost:8788".to_owned()]),
             }),
+            workspace: refocused
+                .then(|| InspectedWorkspace::inspect(&workspace_root).expect("workspace inspects")),
         }
     }
 
@@ -3055,6 +3252,42 @@ mod knowledge_destination_tests {
         .await
         .expect("router responds")
         .status()
+    }
+
+    async fn json_response(
+        app: Router,
+        method: &str,
+        uri: &str,
+        body: Value,
+        cookie: Option<&str>,
+        csrf: Option<&str>,
+    ) -> Response {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::HOST, "localhost:8788")
+            .header(header::ORIGIN, "http://localhost:8788")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(cookie) = cookie {
+            request = request.header(header::COOKIE, cookie);
+        }
+        if let Some(csrf) = csrf {
+            request = request.header("X-CSRF-Token", csrf);
+        }
+        app.oneshot(
+            request
+                .body(Body::from(body.to_string()))
+                .expect("request builds"),
+        )
+        .await
+        .expect("router responds")
+    }
+
+    async fn response_json(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("response body reads");
+        serde_json::from_slice(&bytes).expect("response is JSON")
     }
 
     #[tokio::test]
@@ -3081,6 +3314,133 @@ mod knowledge_destination_tests {
         assert_ne!(
             route_status(legacy, "POST", "/mcp", "{}").await,
             StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_settings_require_csrf_and_preserve_the_active_profile_id() {
+        let state = test_state(true);
+        state
+            .store
+            .set_owner_secret_hash(&hash_owner_secret("owner-secret-for-tests").unwrap())
+            .unwrap();
+        let app = build_router(state);
+        let login = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/auth/login",
+            json!({"owner_secret": "owner-secret-for-tests"}),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(login.status(), StatusCode::OK);
+        let cookie = login
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let csrf = response_json(login).await["csrf_token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let settings = json!({
+            "timezone": "Europe/Stockholm",
+            "daily_root": "Work Log",
+            "daily_pattern": "{year}/{month_name}/Daily {date}.md",
+            "template_path": null,
+            "link_style": "markdown"
+        });
+
+        let rejected = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/settings/workspace/preview",
+            settings.clone(),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+
+        let preview = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/settings/workspace/preview",
+            settings,
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(preview.status(), StatusCode::OK);
+        let preview = response_json(preview).await;
+        let saved = json_response(
+            app.clone(),
+            "PUT",
+            "/api/v2/settings/workspace",
+            json!({
+                "settings": preview["settings"],
+                "preview_digest": preview["preview_digest"],
+                "expected_profile_id": null,
+                "expected_updated_at": null
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(saved.status(), StatusCode::OK);
+        let first = response_json(saved).await;
+        let profile_id = first["active_profile"]["id"].clone();
+
+        let second_preview = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/settings/workspace/preview",
+            json!({
+                "timezone": "UTC",
+                "daily_root": "Journal",
+                "daily_pattern": "{date}.md",
+                "template_path": null,
+                "link_style": "wikilink"
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        let second_preview = response_json(second_preview).await;
+        let settings_read = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/settings/workspace",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        let settings_read = response_json(settings_read).await;
+        let updated = json_response(
+            app,
+            "PUT",
+            "/api/v2/settings/workspace",
+            json!({
+                "settings": second_preview["settings"],
+                "preview_digest": second_preview["preview_digest"],
+                "expected_profile_id": settings_read["active_profile"]["id"],
+                "expected_updated_at": settings_read["active_profile"]["updated_at"]
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(updated.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(updated).await["active_profile"]["id"],
+            profile_id
         );
     }
 

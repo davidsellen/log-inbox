@@ -20,6 +20,22 @@ Requires the session cookie and `logs:read`. Returns the granted scopes and abso
 
 Requires the session cookie, an allowed Host/Origin, and the matching `X-CSRF-Token`. Revokes the server-side session and expires the cookie.
 
+## Workspace settings
+
+The host or Compose configuration mounts one Markdown workspace at `LOG_INBOX_WORKSPACE_DIR` (default `/workspace`). A browser cannot mount a directory from the device on which it happens to be open; the service inspects the server-side mount without writing marker files and derives a replacement-sensitive binding from its canonical identity.
+
+### `GET /api/v2/settings/workspace`
+
+Requires `logs:read`. Returns the configured server path, the active stable profile when present, and whether its reviewed binding still matches the mounted directory.
+
+### `POST /api/v2/settings/workspace/preview`
+
+Requires `settings:write` and CSRF. Validates an IANA timezone, relative daily root, supported date-token pattern, optional existing Markdown template, and link style. It rejects traversal, protected editor/Git locations, symlinks, and non-Markdown targets. The response contains the normalized settings, an example resolved destination, and a digest binding the reviewed values to the current mount. It saves nothing.
+
+### `PUT /api/v2/settings/workspace`
+
+Requires `settings:write`, CSRF, and the exact preview digest. It activates the first workspace profile or updates the active profile in place using its expected ID and timestamp, preserving the stable workspace ID. Existing days retain their frozen timezone and destination. A replaced mount or stale settings editor returns `409 Conflict` and must be reviewed again.
+
 ## Daily read model
 
 ### `GET /api/v2/daily/{YYYY-MM-DD}`
@@ -35,7 +51,7 @@ Requires the session cookie and `logs:read`. The URL contains a calendar date, n
 - server-derived candidate freshness, so late evidence is never presented as part of an older current draft;
 - deterministic `preview_markdown` rendered from the structured current revision, trusted manual entries, and evidence dispositions.
 
-The endpoint never creates a day, snapshot, revision, folder, or Markdown file. Missing workspace review is `409 Conflict`; malformed dates are `400 Bad Request`.
+The endpoint never creates a day, snapshot, revision, folder, or Markdown file. Missing workspace review or a replaced mount is `409 Conflict`; malformed dates are `400 Bad Request`.
 
 ## Manual daily entries
 
