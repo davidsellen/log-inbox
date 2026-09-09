@@ -429,6 +429,28 @@ impl Store {
             .map_err(Into::into)
     }
 
+    pub fn list_unfinished_apply_operations(&self, limit: usize) -> Result<Vec<ApplyOperation>> {
+        let conn = self.connect()?;
+        let mut statement = conn.prepare(
+            r#"SELECT id, workspace_id, local_date, revision_id,
+                      revision_content_hash, destination_path,
+                      expected_old_block_hash, intended_new_block_hash,
+                      recovery_payload, recovery_path, state, failure_reason,
+                      created_at, updated_at
+               FROM apply_operations
+               WHERE state != 'finalized'
+               ORDER BY updated_at, created_at, id
+               LIMIT ?1"#,
+        )?;
+        statement
+            .query_map(
+                params![limit.clamp(1, 500) as i64],
+                apply_operation_from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     pub fn transition_apply_operation(
         &self,
         id: &str,
@@ -478,6 +500,124 @@ impl Store {
         anyhow::ensure!(changed == 1, "apply operation state changed concurrently");
         self.apply_operation(id)?
             .context("apply operation missing after transition")
+    }
+
+    pub fn finalize_apply_operation(
+        &self,
+        id: &str,
+        expected_revision_id: &str,
+        expected_revision_content_hash: &str,
+    ) -> Result<ApplyOperation> {
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        let operation = transaction
+            .query_row(
+                r#"SELECT id, workspace_id, local_date, revision_id,
+                          revision_content_hash, destination_path,
+                          expected_old_block_hash, intended_new_block_hash,
+                          recovery_payload, recovery_path, state, failure_reason,
+                          created_at, updated_at
+                   FROM apply_operations WHERE id = ?1"#,
+                params![id],
+                apply_operation_from_row,
+            )
+            .optional()?
+            .context("apply operation does not exist")?;
+        anyhow::ensure!(
+            operation.revision_id == expected_revision_id
+                && operation.revision_content_hash == expected_revision_content_hash,
+            "apply finalization revision identity does not match"
+        );
+        if operation.state == "finalized" {
+            return Ok(operation);
+        }
+        anyhow::ensure!(
+            operation.state == "written",
+            "only a written apply operation can be finalized"
+        );
+
+        let current_revision_id: Option<String> = transaction.query_row(
+            "SELECT current_revision_id FROM daily_days WHERE workspace_id = ?1 AND local_date = ?2",
+            params![operation.workspace_id, operation.local_date.to_string()],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            current_revision_id.as_deref() == Some(operation.revision_id.as_str()),
+            "daily revision changed before apply finalization"
+        );
+        let (revision_hash, snapshot_id): (String, Option<String>) = transaction.query_row(
+            "SELECT content_hash, snapshot_id FROM proposal_revisions WHERE id = ?1 AND workspace_id = ?2 AND local_date = ?3",
+            params![
+                operation.revision_id,
+                operation.workspace_id,
+                operation.local_date.to_string()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        anyhow::ensure!(
+            revision_hash == operation.revision_content_hash,
+            "stored proposal revision content hash changed"
+        );
+
+        if let Some(snapshot_id) = snapshot_id {
+            let unresolved: u64 = transaction.query_row(
+                "SELECT COUNT(*) FROM evidence_snapshot_events WHERE snapshot_id = ?1 AND disposition IS NULL",
+                params![snapshot_id],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(
+                unresolved == 0,
+                "all snapshot evidence requires a review decision before finalization"
+            );
+            let now = Utc::now().to_rfc3339();
+            transaction.execute(
+                r#"INSERT INTO review_state (event_id, reviewed_at, reviewed_by, note)
+                   SELECT live_event_id, ?1, ?2, ?3
+                   FROM evidence_snapshot_events
+                   WHERE snapshot_id = ?4
+                     AND disposition = 'include'
+                     AND live_event_id IS NOT NULL
+                   ON CONFLICT(event_id) DO UPDATE SET
+                       reviewed_at = excluded.reviewed_at,
+                       reviewed_by = excluded.reviewed_by,
+                       note = excluded.note"#,
+                params![
+                    now,
+                    format!("apply:{}", operation.id),
+                    operation.destination_path,
+                    snapshot_id
+                ],
+            )?;
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let day_changed = transaction.execute(
+            "UPDATE daily_days SET review_status = 'applied', freshness = 'current', updated_at = ?1 WHERE workspace_id = ?2 AND local_date = ?3 AND current_revision_id = ?4",
+            params![
+                now,
+                operation.workspace_id,
+                operation.local_date.to_string(),
+                operation.revision_id
+            ],
+        )?;
+        anyhow::ensure!(
+            day_changed == 1,
+            "daily revision changed during finalization"
+        );
+        let operation_changed = transaction.execute(
+            "UPDATE apply_operations SET state = 'finalized', failure_reason = NULL, updated_at = ?1 WHERE id = ?2 AND state = 'written'",
+            params![now, operation.id],
+        )?;
+        anyhow::ensure!(
+            operation_changed == 1,
+            "apply operation state changed during finalization"
+        );
+        transaction.commit()?;
+        let finalized = self
+            .apply_operation(id)?
+            .context("apply operation missing after finalization")?;
+        debug_assert_eq!(finalized.state, "finalized");
+        Ok(finalized)
     }
 
     pub fn decide_snapshot_evidence(
@@ -717,12 +857,9 @@ fn allowed_apply_transition(current: &str, next: &str) -> bool {
         (current, next),
         ("prepared", "writing" | "failed" | "reconciliation_required")
             | ("writing", "written" | "failed" | "reconciliation_required")
-            | ("written", "finalized" | "reconciliation_required")
+            | ("written", "reconciliation_required")
             | ("failed", "prepared" | "reconciliation_required")
-            | (
-                "reconciliation_required",
-                "prepared" | "written" | "finalized"
-            )
+            | ("reconciliation_required", "prepared" | "written")
     )
 }
 
@@ -1488,7 +1625,7 @@ mod tests {
             .expect("written records");
         assert_eq!(written.state, "written");
         let finalized = store
-            .transition_apply_operation(&input.id, "written", "finalized", None)
+            .finalize_apply_operation(&input.id, &input.revision_id, &input.revision_content_hash)
             .expect("finalized records");
         assert_eq!(finalized.state, "finalized");
         assert!(
@@ -1529,5 +1666,181 @@ mod tests {
             )
             .expect("reconciliation records");
         assert_eq!(reconciliation.state, "reconciliation_required");
+        let unfinished = store
+            .list_unfinished_apply_operations(10)
+            .expect("unfinished operations list");
+        assert_eq!(unfinished.len(), 1);
+        assert_eq!(unfinished[0].id, recovery.id);
+    }
+
+    #[test]
+    fn finalization_is_atomic_for_the_exact_revision_and_included_evidence() {
+        let store = Store::open(std::env::temp_dir().join(format!(
+            "log-inbox-apply-finalization-{}.sqlite3",
+            Uuid::new_v4()
+        )))
+        .expect("store opens");
+        let profile = store
+            .create_pending_workspace_profile(
+                "binding",
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+            )
+            .and_then(|profile| store.activate_workspace_profile(&profile.id))
+            .expect("profile activates");
+        let date = NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+        let day = store
+            .ensure_daily_day(date, "Work Log/2026-09-09.md", None)
+            .expect("day freezes");
+        let mut event_ids = Vec::new();
+        for hour in [1, 2] {
+            event_ids.push(
+                store
+                    .insert_event(LogEventInput {
+                        source: "codex/test".to_owned(),
+                        level: None,
+                        timestamp: Some(day.start_utc + chrono::Duration::hours(hour)),
+                        message: format!("evidence {hour}"),
+                        metadata: None,
+                        fingerprint: None,
+                    })
+                    .expect("event stores")
+                    .id,
+            );
+        }
+        let snapshot = store
+            .create_evidence_snapshot(&profile.id, date, &event_ids)
+            .expect("snapshot stores");
+        store
+            .decide_snapshot_evidence(&snapshot.id, &event_ids[0], "include", None, "owner", None)
+            .expect("include records");
+        store
+            .decide_snapshot_evidence(
+                &snapshot.id,
+                &event_ids[1],
+                "omit",
+                None,
+                "owner",
+                Some("noise"),
+            )
+            .expect("omit records");
+        let revision = store
+            .create_proposal_revision(
+                &profile.id,
+                date,
+                Some(&snapshot.id),
+                "generated",
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "workstreams": [{
+                        "id": "work",
+                        "title": "Work",
+                        "evidence_event_ids": event_ids,
+                        "outcome": [{ "text": "Completed work.", "evidence_event_ids": event_ids }]
+                    }]
+                }),
+            )
+            .expect("revision stores");
+        let input = PrepareApplyOperation {
+            id: "apply_evidence".to_owned(),
+            workspace_id: profile.id.clone(),
+            local_date: date,
+            revision_id: revision.id,
+            revision_content_hash: revision.content_hash,
+            destination_path: day.destination_path,
+            expected_old_block_hash: None,
+            intended_new_block_hash: "b".repeat(64),
+            recovery_payload: Some(Vec::new()),
+            recovery_path: None,
+        };
+        store
+            .prepare_apply_operation(&input)
+            .expect("apply prepares");
+        store
+            .transition_apply_operation(&input.id, "prepared", "writing", None)
+            .and_then(|_| store.transition_apply_operation(&input.id, "writing", "written", None))
+            .expect("write records");
+        let finalized = store
+            .finalize_apply_operation(&input.id, &input.revision_id, &input.revision_content_hash)
+            .expect("finalization succeeds");
+        assert_eq!(finalized.state, "finalized");
+        assert_eq!(
+            store
+                .daily_day(&profile.id, date)
+                .unwrap()
+                .unwrap()
+                .review_status,
+            "applied"
+        );
+        let events = store.get_events_by_ids(&event_ids).expect("events read");
+        assert!(events[0].reviewed);
+        assert!(!events[1].reviewed);
+        assert_eq!(
+            store.snapshot_evidence(&snapshot.id).unwrap()[1]
+                .disposition
+                .as_deref(),
+            Some("omit")
+        );
+        assert_eq!(
+            store
+                .finalize_apply_operation(
+                    &input.id,
+                    &input.revision_id,
+                    &input.revision_content_hash
+                )
+                .expect("finalization retry resolves"),
+            finalized
+        );
+    }
+
+    #[test]
+    fn stale_revisions_cannot_finalize_and_unfinished_operations_are_recoverable() {
+        let (store, input) = apply_operation_fixture();
+        store
+            .prepare_apply_operation(&input)
+            .expect("apply prepares");
+        store
+            .transition_apply_operation(&input.id, "prepared", "writing", None)
+            .and_then(|_| store.transition_apply_operation(&input.id, "writing", "written", None))
+            .expect("write records");
+        store
+            .create_proposal_revision(
+                &input.workspace_id,
+                input.local_date,
+                None,
+                "advanced_markdown",
+                &serde_json::json!("Newer reviewed content"),
+            )
+            .expect("newer revision stores");
+        assert!(
+            store
+                .finalize_apply_operation(
+                    &input.id,
+                    &input.revision_id,
+                    &input.revision_content_hash
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("revision changed")
+        );
+        assert_eq!(
+            store.apply_operation(&input.id).unwrap().unwrap().state,
+            "written"
+        );
+        assert_ne!(
+            store
+                .daily_day(&input.workspace_id, input.local_date)
+                .unwrap()
+                .unwrap()
+                .review_status,
+            "applied"
+        );
+        let unfinished = store.list_unfinished_apply_operations(10).unwrap();
+        assert_eq!(unfinished.len(), 1);
+        assert_eq!(unfinished[0].id, input.id);
+        assert!(store.list_unfinished_apply_operations(0).unwrap().len() <= 1);
     }
 }
