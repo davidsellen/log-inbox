@@ -3552,7 +3552,7 @@ async fn mcp(
                 "version": env!("CARGO_PKG_VERSION")
             }
         })),
-        "tools/list" => Ok(json!({ "tools": tool_definitions() })),
+        "tools/list" => Ok(json!({ "tools": tool_definitions(state.refocus.is_none()) })),
         "tools/call" => call_tool(&state, request.params).await,
         _ => Err(format!("unknown method {}", request.method)),
     };
@@ -3585,6 +3585,13 @@ async fn call_tool(state: &AppState, params: Value) -> Result<Value, String> {
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    if state.refocus.is_some()
+        && matches!(name, "stage_markdown_summary" | "apply_markdown_proposal")
+    {
+        return Err(format!(
+            "unknown tool {name}; refocused mode writes only through reviewed Daily Apply"
+        ));
+    }
 
     match name {
         "list_sources" => {
@@ -3965,8 +3972,8 @@ fn default_true() -> bool {
     true
 }
 
-fn tool_definitions() -> Vec<Value> {
-    vec![
+fn tool_definitions(include_legacy_writes: bool) -> Vec<Value> {
+    let mut tools = vec![
         json!({
             "name": "list_sources",
             "description": "Return known log sources and recent event counts.",
@@ -4078,7 +4085,16 @@ fn tool_definitions() -> Vec<Value> {
                 }
             }
         }),
-    ]
+    ];
+    if !include_legacy_writes {
+        tools.retain(|tool| {
+            !matches!(
+                tool["name"].as_str(),
+                Some("stage_markdown_summary" | "apply_markdown_proposal")
+            )
+        });
+    }
+    tools
 }
 
 #[cfg(test)]
@@ -4167,6 +4183,25 @@ mod knowledge_destination_tests {
 
     #[tokio::test]
     async fn refocus_and_legacy_routes_never_coexist() {
+        let refocused_tools = tool_definitions(false);
+        assert!(!refocused_tools.iter().any(|tool| {
+            matches!(
+                tool["name"].as_str(),
+                Some("stage_markdown_summary" | "apply_markdown_proposal")
+            )
+        }));
+        let legacy_tools = tool_definitions(true);
+        assert!(
+            legacy_tools
+                .iter()
+                .any(|tool| tool["name"] == "stage_markdown_summary")
+        );
+        assert!(
+            legacy_tools
+                .iter()
+                .any(|tool| tool["name"] == "apply_markdown_proposal")
+        );
+
         let refocused = build_router(test_state(true));
         assert_eq!(
             route_status(refocused.clone(), "GET", "/api/dashboard", "").await,
