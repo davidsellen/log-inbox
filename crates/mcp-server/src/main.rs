@@ -47,6 +47,7 @@ struct AppState {
     store: Store,
     llm_config: Option<llm::LlmConfig>,
     legacy_proposal_dir: Option<PathBuf>,
+    legacy_support_files: Vec<(String, PathBuf)>,
     proposal_inbox: Option<proposal_inbox::ProposalInbox>,
     daily_notes_dir: Option<PathBuf>,
     daily_notes_display_path: Option<String>,
@@ -434,6 +435,17 @@ async fn main() -> anyhow::Result<()> {
         legacy_proposal_dir: env::var_os("LOG_INBOX_PROPOSAL_DIR")
             .filter(|path| !path.is_empty())
             .map(PathBuf::from),
+        legacy_support_files: [
+            ("context_file", "LOG_INBOX_VAULT_CONTEXT_FILE"),
+            ("product_index_file", "LOG_INBOX_PRODUCT_INDEX_FILE"),
+        ]
+        .into_iter()
+        .filter_map(|(kind, name)| {
+            env::var_os(name)
+                .filter(|path| !path.is_empty())
+                .map(|path| (kind.to_owned(), PathBuf::from(path)))
+        })
+        .collect(),
         proposal_inbox: (!refocus_enabled)
             .then(proposal_inbox::ProposalInbox::from_env)
             .flatten(),
@@ -746,6 +758,7 @@ async fn refocus_cutover_report(
         &profile,
         &workspace,
         state.legacy_proposal_dir.as_deref(),
+        &state.legacy_support_files,
     )
     .map(Json)
     .map_err(|error| ApiError::internal(error.to_string()))
@@ -763,6 +776,7 @@ async fn refocus_commit_cutover(
         &profile,
         &workspace,
         state.legacy_proposal_dir.as_deref(),
+        &state.legacy_support_files,
         &request,
     )
     .map(Json)
@@ -917,6 +931,7 @@ fn require_cutover_for_daily_mutation(state: &AppState) -> Result<(), ApiError> 
         &profile,
         &workspace,
         state.legacy_proposal_dir.as_deref(),
+        &state.legacy_support_files,
     )
     .map_err(|error| ApiError::internal(error.to_string()))?;
     if report.cutover_status == "completed" || report.items.is_empty() {
@@ -4180,6 +4195,7 @@ mod knowledge_destination_tests {
             store,
             llm_config: None,
             legacy_proposal_dir: None,
+            legacy_support_files: Vec::new(),
             proposal_inbox: None,
             daily_notes_dir: None,
             daily_notes_display_path: None,

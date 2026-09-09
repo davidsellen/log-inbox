@@ -82,6 +82,7 @@ pub(crate) fn inventory_cutover(
     profile: &WorkspaceProfile,
     workspace: &InspectedWorkspace,
     proposal_dir: Option<&Path>,
+    support_files: &[(String, std::path::PathBuf)],
 ) -> anyhow::Result<CutoverReport> {
     anyhow::ensure!(
         profile.root_binding == workspace.root_binding(),
@@ -107,6 +108,7 @@ pub(crate) fn inventory_cutover(
     inventory_preferences(&preferences, &mut items, &mut warnings)?;
     inventory_manual_events(store.all_events()?, &mut items)?;
     inventory_proposals(proposal_dir, &mut items, &mut blockers, &mut warnings)?;
+    inventory_support_files(support_files, &mut items, &mut blockers, &mut warnings)?;
     items.sort_by(|left, right| {
         (&left.kind, &left.source_identity).cmp(&(&right.kind, &right.source_identity))
     });
@@ -158,6 +160,7 @@ pub(crate) fn commit_cutover(
     profile: &WorkspaceProfile,
     workspace: &InspectedWorkspace,
     proposal_dir: Option<&Path>,
+    support_files: &[(String, std::path::PathBuf)],
     request: &CutoverCommitRequest,
 ) -> anyhow::Result<CutoverCommitResult> {
     if let Some(operation) = store.migration_operation(&request.operation_id)? {
@@ -169,7 +172,7 @@ pub(crate) fn commit_cutover(
         return finish_cutover_cleanup(store, proposal_dir, operation);
     }
 
-    let report = inventory_cutover(store, profile, workspace, proposal_dir)?;
+    let report = inventory_cutover(store, profile, workspace, proposal_dir, support_files)?;
     anyhow::ensure!(
         report.operation_id == request.operation_id
             && report.report_digest == request.report_digest,
@@ -201,6 +204,7 @@ pub(crate) fn commit_cutover(
         store,
         profile,
         proposal_dir,
+        support_files,
         &report,
         backup_path.to_string_lossy().as_ref(),
     )?;
@@ -220,6 +224,7 @@ fn prepare_cutover_import(
     store: &Store,
     profile: &WorkspaceProfile,
     proposal_dir: Option<&Path>,
+    support_files: &[(String, std::path::PathBuf)],
     report: &CutoverReport,
     backup_path: &str,
 ) -> anyhow::Result<LegacyCutoverImport> {
@@ -325,6 +330,24 @@ fn prepare_cutover_import(
                         "unparseable"
                     }
                     .to_owned(),
+                    details: report_item.details.clone(),
+                    created_at: Utc::now(),
+                });
+            }
+            "context_file" | "product_index_file" => {
+                let source = support_files
+                    .iter()
+                    .find(|(kind, _)| kind == &report_item.kind)
+                    .map(|(_, path)| path.as_path())
+                    .ok_or_else(|| anyhow::anyhow!("legacy support file disappeared"))?;
+                let contents = read_exact_support_file(source, &report_item.source_digest)?;
+                artifacts.push(LegacyMigrationArtifact {
+                    operation_id: report.operation_id.clone(),
+                    artifact_kind: report_item.kind.clone(),
+                    source_identity: report_item.source_identity.clone(),
+                    source_digest: report_item.source_digest.clone(),
+                    content: contents,
+                    parse_status: "valid".to_owned(),
                     details: report_item.details.clone(),
                     created_at: Utc::now(),
                 });
@@ -775,6 +798,69 @@ fn inventory_proposals(
     Ok(())
 }
 
+fn inventory_support_files(
+    support_files: &[(String, std::path::PathBuf)],
+    items: &mut Vec<CutoverItem>,
+    blockers: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    for (kind, path) in support_files {
+        let label = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("legacy file");
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                warnings.push(format!(
+                    "Configured legacy {kind} is missing and was not imported"
+                ));
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            blockers.push(format!(
+                "Configured legacy {kind} is not a safe regular file"
+            ));
+            continue;
+        }
+        if metadata.len() > MAX_PROPOSAL_BYTES {
+            blockers.push(format!("Configured legacy {kind} exceeds 4 MiB"));
+            continue;
+        }
+        let contents = fs::read(path)?;
+        let digest = sha256(&contents);
+        items.push(CutoverItem {
+            kind: kind.clone(),
+            source_identity: format!("{kind}:{label}"),
+            source_digest: digest,
+            action: "preserve".to_owned(),
+            status: "ready".to_owned(),
+            details: json!({"filename": label, "byte_size": contents.len()}),
+        });
+    }
+    Ok(())
+}
+
+fn read_exact_support_file(path: &Path, expected_digest: &str) -> anyhow::Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "legacy support file is unsafe"
+    );
+    anyhow::ensure!(
+        metadata.len() <= MAX_PROPOSAL_BYTES,
+        "legacy support file exceeds 4 MiB"
+    );
+    let contents = fs::read(path)?;
+    anyhow::ensure!(
+        sha256(&contents) == expected_digest,
+        "legacy support file changed after review"
+    );
+    Ok(contents)
+}
+
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -865,8 +951,9 @@ mod tests {
         .unwrap();
         fs::write(proposals.join("broken.md"), [0xff, 0xfe]).unwrap();
 
-        let first = inventory_cutover(&store, &profile, &workspace, Some(&proposals)).unwrap();
-        let second = inventory_cutover(&store, &profile, &workspace, Some(&proposals)).unwrap();
+        let first = inventory_cutover(&store, &profile, &workspace, Some(&proposals), &[]).unwrap();
+        let second =
+            inventory_cutover(&store, &profile, &workspace, Some(&proposals), &[]).unwrap();
         assert!(first.ready);
         assert_eq!(first.report_digest, second.report_digest);
         assert_eq!(
@@ -945,7 +1032,17 @@ mod tests {
         .unwrap();
         fs::write(proposals.join("broken.md"), [0xff, 0xfe]).unwrap();
 
-        let report = inventory_cutover(&store, &profile, &workspace, Some(&proposals)).unwrap();
+        let support = app_root.join("vault-context.json");
+        fs::write(&support, b"{\"products\":[]}").unwrap();
+        let support_files = vec![("context_file".to_owned(), support)];
+        let report = inventory_cutover(
+            &store,
+            &profile,
+            &workspace,
+            Some(&proposals),
+            &support_files,
+        )
+        .unwrap();
         let valid_item = report
             .items
             .iter()
@@ -962,8 +1059,15 @@ mod tests {
             operation_id: report.operation_id,
             report_digest: report.report_digest,
         };
-        let result = commit_cutover(&store, &profile, &workspace, Some(&proposals), &request)
-            .expect("reviewed cutover commits");
+        let result = commit_cutover(
+            &store,
+            &profile,
+            &workspace,
+            Some(&proposals),
+            &support_files,
+            &request,
+        )
+        .expect("reviewed cutover commits");
         assert_eq!(result.status, "completed");
         assert_eq!(result.cleaned_files, 1);
         assert!(!proposals.join("valid.md").exists());
@@ -1003,8 +1107,15 @@ mod tests {
                 .exists()
         );
 
-        let retried = commit_cutover(&store, &profile, &workspace, Some(&proposals), &request)
-            .expect("completed cutover is idempotent");
+        let retried = commit_cutover(
+            &store,
+            &profile,
+            &workspace,
+            Some(&proposals),
+            &support_files,
+            &request,
+        )
+        .expect("completed cutover is idempotent");
         assert_eq!(retried.cleaned_files, 1);
         fs::remove_dir_all(app_root).unwrap();
         fs::remove_dir_all(root).unwrap();
