@@ -26,6 +26,7 @@ serde_yaml = "0.9.34"
 sha2 = "0.10.9"
 thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tower = { version = "0.5.3", features = ["util"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 uuid = { version = "1.18.1", features = ["v4"] }

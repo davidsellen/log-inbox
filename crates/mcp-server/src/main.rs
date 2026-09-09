@@ -54,7 +54,6 @@ struct AppState {
 struct RefocusConfig {
     allowed_hosts: HashSet<String>,
     allowed_origins: HashSet<String>,
-    secure_cookie: bool,
 }
 
 struct EffectiveDailyWindow {
@@ -87,13 +86,9 @@ impl RefocusConfig {
             "LOG_INBOX_ALLOWED_ORIGINS",
             "http://127.0.0.1:8788,http://localhost:8788",
         );
-        let secure_cookie = allowed_origins
-            .iter()
-            .any(|origin| origin.starts_with("https://"));
         Ok(Some(Self {
             allowed_hosts,
             allowed_origins,
-            secure_cookie,
         }))
     }
 }
@@ -355,10 +350,13 @@ async fn main() -> anyhow::Result<()> {
     let settings = Settings::from_env();
     let store = Store::open(settings.database_path())?;
     let refocus = RefocusConfig::from_env(&store)?;
-    daily_consolidation::migrate_prompt_preference(&store)?;
-    store.recover_daily_consolidations()?;
+    let refocus_enabled = refocus.is_some();
+    if !refocus_enabled {
+        daily_consolidation::migrate_prompt_preference(&store)?;
+        store.recover_daily_consolidations()?;
+    }
     let vault_context = vault_context::VaultContextProvider::from_env();
-    if let Some(saved) = store.get_preferences()?.get("browser_vault_catalog") {
+    if !refocus_enabled && let Some(saved) = store.get_preferences()?.get("browser_vault_catalog") {
         match serde_json::from_str::<vault_context::VaultCatalog>(saved) {
             Ok(mut catalog) => {
                 if catalog.vault_id.is_empty() {
@@ -377,135 +375,156 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         store,
         llm_config: llm::LlmConfig::from_env(),
-        proposal_inbox: proposal_inbox::ProposalInbox::from_env(),
-        daily_notes_dir: env::var_os("LOG_INBOX_DAILY_NOTES_DIR")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from),
-        daily_notes_display_path: env::var("LOG_INBOX_DAILY_NOTES_DISPLAY_PATH")
-            .ok()
-            .filter(|path| !path.trim().is_empty()),
+        proposal_inbox: (!refocus_enabled)
+            .then(proposal_inbox::ProposalInbox::from_env)
+            .flatten(),
+        daily_notes_dir: (!refocus_enabled)
+            .then(|| {
+                env::var_os("LOG_INBOX_DAILY_NOTES_DIR")
+                    .filter(|path| !path.is_empty())
+                    .map(PathBuf::from)
+            })
+            .flatten(),
+        daily_notes_display_path: (!refocus_enabled)
+            .then(|| {
+                env::var("LOG_INBOX_DAILY_NOTES_DISPLAY_PATH")
+                    .ok()
+                    .filter(|path| !path.trim().is_empty())
+            })
+            .flatten(),
         vault_context,
         apply_lock: Arc::new(Mutex::new(())),
         daily_generation_lock: Arc::new(tokio::sync::Mutex::new(())),
         refocus,
     };
 
-    if let (Some(config), Some(inbox)) = (
-        auto_stage::AutoStageConfig::from_env(),
-        state.proposal_inbox.clone(),
-    ) {
-        tracing::info!("automatic Markdown proposal staging enabled");
-        tokio::spawn(auto_stage::run(
-            config,
-            state.store.clone(),
-            state.llm_config.clone(),
-            inbox,
-            state.vault_context.clone(),
-        ));
+    if !refocus_enabled {
+        if let (Some(config), Some(inbox)) = (
+            auto_stage::AutoStageConfig::from_env(),
+            state.proposal_inbox.clone(),
+        ) {
+            tracing::info!("automatic Markdown proposal staging enabled");
+            tokio::spawn(auto_stage::run(
+                config,
+                state.store.clone(),
+                state.llm_config.clone(),
+                inbox,
+                state.vault_context.clone(),
+            ));
+        }
+
+        if let Some(inbox) = state.proposal_inbox.clone() {
+            tokio::spawn(daily_consolidation::run(
+                state.store.clone(),
+                state.llm_config.clone(),
+                inbox,
+                state.vault_context.clone(),
+            ));
+        }
     }
 
-    if let Some(inbox) = state.proposal_inbox.clone() {
-        tokio::spawn(daily_consolidation::run(
-            state.store.clone(),
-            state.llm_config.clone(),
-            inbox,
-            state.vault_context.clone(),
-        ));
-    }
-
-    let app = Router::new()
-        .route("/", get(dashboard_page))
-        .route("/api/v2/auth/login", post(refocus_login))
-        .route("/api/v2/auth/session", get(refocus_session))
-        .route("/api/v2/auth/logout", post(refocus_logout))
-        .route("/api/v2/daily/{date}", get(refocus_daily_day))
-        .route(
-            "/api/v2/daily/{date}/generate",
-            post(refocus_generate_daily),
-        )
-        .route(
-            "/api/v2/daily/{date}/manual",
-            post(refocus_create_manual_entry),
-        )
-        .route(
-            "/api/v2/daily/{date}/evidence/{event_id}",
-            put(refocus_decide_daily_evidence).delete(refocus_reopen_daily_evidence),
-        )
-        .route(
-            "/api/v2/daily/{date}/candidate",
-            put(refocus_edit_daily_candidate),
-        )
-        .route("/favicon.ico", get(favicon))
-        .route("/api/dashboard", get(dashboard_data))
-        .route("/api/logs/manual/options", get(manual_log_options))
-        .route("/api/logs/manual", post(create_manual_log))
-        .route("/api/vault/connection", get(vault_connection))
-        .route("/api/knowledge", get(knowledge_data))
-        .route(
-            "/api/knowledge/structure/preview",
-            post(preview_knowledge_structure),
-        )
-        .route("/api/knowledge/structure", put(save_knowledge_structure))
-        .route(
-            "/api/vault/browser/catalog",
-            put(sync_browser_vault).delete(disconnect_browser_vault),
-        )
-        .route("/api/preferences", put(save_preferences))
-        .route("/api/linking", get(linking_data))
-        .route("/api/linking/scan", post(linking_data))
-        .route("/api/linking/rules", post(create_link_rule))
-        .route("/api/linking/ignored", put(ignore_link_identity))
-        .route(
-            "/api/linking/ignored/{ignored_id}",
-            axum::routing::delete(restore_ignored_identity),
-        )
-        .route(
-            "/api/linking/rules/{rule_id}",
-            put(update_link_rule).delete(delete_link_rule),
-        )
-        .route(
-            "/api/proposals/{proposal_id}",
-            put(update_dashboard_proposal),
-        )
-        .route(
-            "/api/proposals/{proposal_id}/apply",
-            post(apply_dashboard_proposal),
-        )
-        .route(
-            "/api/proposals/{proposal_id}/browser-apply/prepare",
-            post(prepare_browser_apply),
-        )
-        .route(
-            "/api/proposals/{proposal_id}/browser-apply/acknowledge",
-            post(acknowledge_browser_apply),
-        )
-        .route(
-            "/api/proposals/{proposal_id}/discard",
-            post(discard_dashboard_proposal),
-        )
-        .route(
-            "/api/proposals/{proposal_id}/regenerate",
-            post(regenerate_dashboard_proposal),
-        )
-        .route("/api/consolidations/daily", post(consolidate_dashboard_day))
-        .route(
-            "/api/consolidations/{job_id}",
-            get(get_dashboard_consolidation),
-        )
-        .route(
-            "/api/consolidations/{job_id}/cancel",
-            post(cancel_dashboard_consolidation),
-        )
-        .route("/health", get(health))
-        .route("/mcp", post(mcp))
-        .layer(middleware::from_fn(log_request_response))
-        .with_state(state);
+    let app = build_router(state);
 
     let addr: SocketAddr = "0.0.0.0:8788".parse()?;
     tracing::info!(%addr, "starting mcp server");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn build_router(state: AppState) -> Router {
+    let app = Router::new()
+        .route("/", get(dashboard_page))
+        .route("/favicon.ico", get(favicon))
+        .route("/health", get(health));
+
+    let app = if state.refocus.is_some() {
+        app.route("/api/v2/auth/login", post(refocus_login))
+            .route("/api/v2/auth/session", get(refocus_session))
+            .route("/api/v2/auth/logout", post(refocus_logout))
+            .route("/api/v2/daily/{date}", get(refocus_daily_day))
+            .route(
+                "/api/v2/daily/{date}/generate",
+                post(refocus_generate_daily),
+            )
+            .route(
+                "/api/v2/daily/{date}/manual",
+                post(refocus_create_manual_entry),
+            )
+            .route(
+                "/api/v2/daily/{date}/evidence/{event_id}",
+                put(refocus_decide_daily_evidence).delete(refocus_reopen_daily_evidence),
+            )
+            .route(
+                "/api/v2/daily/{date}/candidate",
+                put(refocus_edit_daily_candidate),
+            )
+    } else {
+        app.route("/api/dashboard", get(dashboard_data))
+            .route("/api/logs/manual/options", get(manual_log_options))
+            .route("/api/logs/manual", post(create_manual_log))
+            .route("/api/vault/connection", get(vault_connection))
+            .route("/api/knowledge", get(knowledge_data))
+            .route(
+                "/api/knowledge/structure/preview",
+                post(preview_knowledge_structure),
+            )
+            .route("/api/knowledge/structure", put(save_knowledge_structure))
+            .route(
+                "/api/vault/browser/catalog",
+                put(sync_browser_vault).delete(disconnect_browser_vault),
+            )
+            .route("/api/preferences", put(save_preferences))
+            .route("/api/linking", get(linking_data))
+            .route("/api/linking/scan", post(linking_data))
+            .route("/api/linking/rules", post(create_link_rule))
+            .route("/api/linking/ignored", put(ignore_link_identity))
+            .route(
+                "/api/linking/ignored/{ignored_id}",
+                axum::routing::delete(restore_ignored_identity),
+            )
+            .route(
+                "/api/linking/rules/{rule_id}",
+                put(update_link_rule).delete(delete_link_rule),
+            )
+            .route(
+                "/api/proposals/{proposal_id}",
+                put(update_dashboard_proposal),
+            )
+            .route(
+                "/api/proposals/{proposal_id}/apply",
+                post(apply_dashboard_proposal),
+            )
+            .route(
+                "/api/proposals/{proposal_id}/browser-apply/prepare",
+                post(prepare_browser_apply),
+            )
+            .route(
+                "/api/proposals/{proposal_id}/browser-apply/acknowledge",
+                post(acknowledge_browser_apply),
+            )
+            .route(
+                "/api/proposals/{proposal_id}/discard",
+                post(discard_dashboard_proposal),
+            )
+            .route(
+                "/api/proposals/{proposal_id}/regenerate",
+                post(regenerate_dashboard_proposal),
+            )
+            .route("/api/consolidations/daily", post(consolidate_dashboard_day))
+            .route(
+                "/api/consolidations/{job_id}",
+                get(get_dashboard_consolidation),
+            )
+            .route(
+                "/api/consolidations/{job_id}/cancel",
+                post(cancel_dashboard_consolidation),
+            )
+            .route("/mcp", post(mcp))
+    };
+
+    app.layer(middleware::from_fn(log_request_response))
+        .with_state(state)
 }
 
 async fn log_request_response(request: Request<Body>, next: Next) -> Response {
@@ -561,7 +580,11 @@ async fn refocus_login(
             Duration::hours(8),
         )
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    let secure = if config.secure_cookie { "; Secure" } else { "" };
+    let secure = if request_uses_https(&headers) {
+        "; Secure"
+    } else {
+        ""
+    };
     let cookie = format!(
         "log_inbox_session={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800{secure}",
         credentials.session_token
@@ -594,14 +617,14 @@ async fn refocus_logout(
         .store
         .revoke_dashboard_session(token)
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    Ok((
-        [(
-            header::SET_COOKIE,
-            "log_inbox_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
-        )],
-        StatusCode::NO_CONTENT,
-    )
-        .into_response())
+    let secure = if request_uses_https(&headers) {
+        "; Secure"
+    } else {
+        ""
+    };
+    let cookie =
+        format!("log_inbox_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{secure}");
+    Ok(([(header::SET_COOKIE, cookie)], StatusCode::NO_CONTENT).into_response())
 }
 
 async fn refocus_daily_day(
@@ -1140,6 +1163,13 @@ fn session_cookie(headers: &HeaderMap) -> Option<&str> {
         .split(';')
         .map(str::trim)
         .find_map(|cookie| cookie.strip_prefix("log_inbox_session="))
+}
+
+fn request_uses_https(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|origin| origin.starts_with("https://"))
 }
 
 async fn dashboard_page(State(state): State<AppState>) -> Html<&'static str> {
@@ -2989,13 +3019,76 @@ fn tool_definitions() -> Vec<Value> {
 #[cfg(test)]
 mod knowledge_destination_tests {
     use super::*;
+    use tower::ServiceExt;
+
+    fn test_state(refocused: bool) -> AppState {
+        let store = Store::open(
+            std::env::temp_dir().join(format!("log-inbox-router-{}.sqlite3", uuid::Uuid::new_v4())),
+        )
+        .expect("test store opens");
+        AppState {
+            store,
+            llm_config: None,
+            proposal_inbox: None,
+            daily_notes_dir: None,
+            daily_notes_display_path: None,
+            vault_context: vault_context::VaultContextProvider::from_env(),
+            apply_lock: Arc::new(Mutex::new(())),
+            daily_generation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            refocus: refocused.then(|| RefocusConfig {
+                allowed_hosts: HashSet::from(["localhost:8788".to_owned()]),
+                allowed_origins: HashSet::from(["http://localhost:8788".to_owned()]),
+            }),
+        }
+    }
+
+    async fn route_status(app: Router, method: &str, uri: &str, body: &str) -> StatusCode {
+        app.oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::HOST, "localhost:8788")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_owned()))
+                .expect("request builds"),
+        )
+        .await
+        .expect("router responds")
+        .status()
+    }
+
+    #[tokio::test]
+    async fn refocus_and_legacy_routes_never_coexist() {
+        let refocused = build_router(test_state(true));
+        assert_eq!(
+            route_status(refocused.clone(), "GET", "/api/dashboard", "").await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            route_status(refocused.clone(), "POST", "/mcp", "{}").await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            route_status(refocused, "GET", "/api/v2/auth/session", "").await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let legacy = build_router(test_state(false));
+        assert_eq!(
+            route_status(legacy.clone(), "GET", "/api/v2/auth/session", "").await,
+            StatusCode::NOT_FOUND
+        );
+        assert_ne!(
+            route_status(legacy, "POST", "/mcp", "{}").await,
+            StatusCode::NOT_FOUND
+        );
+    }
 
     #[test]
     fn refocus_boundary_rejects_untrusted_hosts_and_origins() {
         let config = RefocusConfig {
             allowed_hosts: HashSet::from(["localhost:8788".to_owned()]),
             allowed_origins: HashSet::from(["http://localhost:8788".to_owned()]),
-            secure_cookie: false,
         };
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, "localhost:8788".parse().unwrap());
@@ -3018,6 +3111,15 @@ mod knowledge_destination_tests {
                 .unwrap(),
         );
         assert_eq!(session_cookie(&headers), Some("session_test"));
+    }
+
+    #[test]
+    fn cookie_security_follows_the_validated_request_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ORIGIN, "http://localhost:8788".parse().unwrap());
+        assert!(!request_uses_https(&headers));
+        headers.insert(header::ORIGIN, "https://logs.example.test".parse().unwrap());
+        assert!(request_uses_https(&headers));
     }
 
     #[test]

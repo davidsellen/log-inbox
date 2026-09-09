@@ -4,11 +4,13 @@ Status: feature-gated M1 interface. Set `LOG_INBOX_REFOCUS_ENABLED=1` only for d
 
 All routes use exact configured Host/Origin boundaries. Error responses have `{ "error": "..." }`.
 
+Refocused and legacy routes are mutually exclusive. Enabling refocus removes the legacy dashboard, browser-vault APIs, proposal/consolidation writers, and `/mcp` route from the router and does not start legacy staging/consolidation workers. This prevents an unauthenticated legacy path from bypassing the protected v2 workflow. Health and static root assets remain available.
+
 ## Authentication
 
 ### `POST /api/v2/auth/login`
 
-Body: `{ "owner_secret": "..." }`. Requires an allowed Host and Origin. Returns an `HttpOnly`, `SameSite=Strict` session cookie plus an in-memory CSRF token. The cookie is `Secure` for HTTPS configured origins.
+Body: `{ "owner_secret": "..." }`. Requires an allowed Host and Origin. Returns an `HttpOnly`, `SameSite=Strict` session cookie plus an in-memory CSRF token. The cookie is `Secure` when the validated login request uses an HTTPS origin, which keeps explicitly allowed HTTP and HTTPS deployments independent.
 
 ### `GET /api/v2/auth/session`
 
