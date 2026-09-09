@@ -127,7 +127,7 @@ All milestone acceptance criteria below are pending. Deliver small reviewable ch
 M0 is delivered as three behavior-preserving review slices: **M0a Contracts**, **M0b Characterization**, and **M0c Storage and security foundation**. Authentication and workspace identity must land before M1 exposes manual-entry, omission, dismissal, editing, or other new mutation endpoints.
 
 - [x] **M0a:** Specify the day/evidence/revision schema, state transitions, ownership markers and Apply recovery protocol in the [Daily domain contract](specs/daily-domain.md).
-- [ ] Define the single-owner deployment threat model, scopes, workspace binding, date semantics and retention exceptions.
+- [x] Define the [single-owner deployment threat model](specs/threat-model.md), scopes, workspace binding, date semantics and retention exceptions.
 - [x] **M0b:** Add representative golden event/day fixtures and characterize useful existing behavior.
 - [x] Add formatting/Clippy checks and a Chromium/Firefox browser test harness; record actual results instead of assuming the current suite passes.
 - [ ] **M0c:** Add versioned migrations, consistent backup/restore verification, an idempotent migration journal, stable workspace identity, and the authentication/authorization foundation.
