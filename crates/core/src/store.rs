@@ -242,6 +242,82 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+
+        if current < 5 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE daily_days (
+                    workspace_id TEXT NOT NULL,
+                    local_date TEXT NOT NULL,
+                    timezone TEXT NOT NULL,
+                    start_utc TEXT NOT NULL,
+                    end_utc TEXT NOT NULL,
+                    destination_path TEXT NOT NULL,
+                    template_revision TEXT,
+                    block_id TEXT NOT NULL,
+                    generation_status TEXT NOT NULL CHECK(generation_status IN ('none', 'queued', 'running', 'ready', 'failed')),
+                    review_status TEXT NOT NULL CHECK(review_status IN ('unresolved', 'in_review', 'ready_to_apply', 'dismissed', 'applied')),
+                    freshness TEXT NOT NULL CHECK(freshness IN ('current', 'update_available')),
+                    current_revision_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(workspace_id, local_date),
+                    FOREIGN KEY(workspace_id) REFERENCES workspace_profiles(id)
+                );
+
+                CREATE TABLE evidence_snapshots (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    local_date TEXT NOT NULL,
+                    snapshot_digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(workspace_id, local_date, snapshot_digest),
+                    FOREIGN KEY(workspace_id, local_date) REFERENCES daily_days(workspace_id, local_date)
+                );
+
+                CREATE TABLE evidence_snapshot_events (
+                    snapshot_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    event_digest TEXT NOT NULL,
+                    disposition TEXT CHECK(disposition IN ('include', 'omit', 'duplicate_of', 'superseded_by')),
+                    related_event_id TEXT,
+                    decision_actor TEXT,
+                    decision_reason TEXT,
+                    decided_at TEXT,
+                    PRIMARY KEY(snapshot_id, event_id),
+                    UNIQUE(snapshot_id, position),
+                    FOREIGN KEY(snapshot_id) REFERENCES evidence_snapshots(id)
+                );
+
+                CREATE TABLE proposal_revisions (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    local_date TEXT NOT NULL,
+                    snapshot_id TEXT,
+                    revision_number INTEGER NOT NULL,
+                    origin TEXT NOT NULL CHECK(origin IN ('generated', 'structured_edit', 'manual', 'regenerated', 'advanced_markdown')),
+                    content_json TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(workspace_id, local_date, revision_number),
+                    FOREIGN KEY(workspace_id, local_date) REFERENCES daily_days(workspace_id, local_date),
+                    FOREIGN KEY(snapshot_id) REFERENCES evidence_snapshots(id)
+                );
+
+                CREATE INDEX idx_daily_days_status
+                    ON daily_days(workspace_id, review_status, freshness, local_date DESC);
+                CREATE INDEX idx_evidence_snapshots_day
+                    ON evidence_snapshots(workspace_id, local_date, created_at DESC);
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (5, 'immutable daily records', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -1546,10 +1622,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 4);
+        assert_eq!(store.schema_version().expect("version reads"), 5);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 4);
+        assert_eq!(store.schema_version().expect("version remains"), 5);
     }
 
     #[test]
@@ -1571,7 +1647,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 4);
+        assert_eq!(verification.schema_version, 5);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());
@@ -1794,6 +1870,61 @@ mod tests {
                     Duration::minutes(5),
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn stores_immutable_daily_snapshots_and_revisions() {
+        let store = temp_store();
+        let profile = store
+            .create_pending_workspace_profile(
+                "binding-daily",
+                "Europe/Stockholm",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+            )
+            .expect("profile stores");
+        let profile = store
+            .activate_workspace_profile(&profile.id)
+            .expect("profile activates");
+        let conn = store.connect().expect("database opens");
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            r#"INSERT INTO daily_days
+                (workspace_id, local_date, timezone, start_utc, end_utc,
+                 destination_path, block_id, generation_status, review_status,
+                 freshness, created_at, updated_at)
+               VALUES (?1, '2026-09-07', 'Europe/Stockholm',
+                       '2026-09-06T22:00:00Z', '2026-09-07T22:00:00Z',
+                       'Work Log/2026-09-07.md', 'day-2026-09-07', 'ready',
+                       'in_review', 'current', ?2, ?2)"#,
+            params![profile.id, now],
+        )
+        .expect("day stores");
+        conn.execute(
+            "INSERT INTO evidence_snapshots (id, workspace_id, local_date, snapshot_digest, created_at) VALUES ('snapshot-1', ?1, '2026-09-07', 'digest-1', ?2)",
+            params![profile.id, now],
+        )
+        .expect("snapshot stores");
+        conn.execute(
+            "INSERT INTO evidence_snapshot_events (snapshot_id, event_id, position, event_digest, disposition) VALUES ('snapshot-1', 'evt-1', 0, 'event-digest-1', 'include')",
+            [],
+        )
+        .expect("snapshot evidence stores");
+        conn.execute(
+            "INSERT INTO proposal_revisions (id, workspace_id, local_date, snapshot_id, revision_number, origin, content_json, content_hash, created_at) VALUES ('revision-1', ?1, '2026-09-07', 'snapshot-1', 1, 'generated', '{}', 'content-digest-1', ?2)",
+            params![profile.id, now],
+        )
+        .expect("revision stores");
+        assert!(
+            conn.execute(
+                "INSERT INTO proposal_revisions (id, workspace_id, local_date, snapshot_id, revision_number, origin, content_json, content_hash, created_at) VALUES ('revision-2', ?1, '2026-09-07', 'snapshot-1', 1, 'generated', '{}', 'content-digest-2', ?2)",
+                params![profile.id, now],
+            )
+            .is_err(),
+            "revision numbers are immutable and unique within a day"
         );
     }
 
