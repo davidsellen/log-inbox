@@ -445,6 +445,25 @@ mod tests {
             .expect("derived review state does not alter snapshot identity");
         assert_eq!(after_review.id, snapshot.id);
         store
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE log_events SET received_at = ?1 WHERE id = ?2",
+                params![
+                    (Utc::now() - chrono::Duration::days(31)).to_rfc3339(),
+                    event_ids[0]
+                ],
+            )
+            .expect("snapshotted evidence ages");
+        assert_eq!(store.prune_old_events(30).expect("retention runs"), 0);
+        assert_eq!(
+            store
+                .get_events_by_ids(&event_ids[..1])
+                .expect("evidence reads")
+                .len(),
+            1
+        );
+        store
             .decide_snapshot_evidence(&snapshot.id, &event_ids[0], "include", None, "owner", None)
             .expect("evidence decision stores");
 

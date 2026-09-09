@@ -715,7 +715,12 @@ impl Store {
         let cutoff = Utc::now() - Duration::days(retention_days as i64);
         let conn = self.connect()?;
         let changed = conn.execute(
-            "DELETE FROM log_events WHERE timestamp < ?1",
+            r#"DELETE FROM log_events
+               WHERE received_at < ?1
+                 AND NOT EXISTS (
+                     SELECT 1 FROM evidence_snapshot_events snapshot_event
+                     WHERE snapshot_event.event_id = log_events.id
+                 )"#,
             params![cutoff.to_rfc3339()],
         )?;
         Ok(changed)
@@ -1632,6 +1637,35 @@ mod tests {
 
         store.initialize().expect("reinitialization succeeds");
         assert_eq!(store.schema_version().expect("version remains"), 5);
+    }
+
+    #[test]
+    fn retention_uses_receipt_time_for_historical_events() {
+        let store = temp_store();
+        let event = store
+            .insert_event(LogEventInput {
+                source: "manual/dashboard".to_owned(),
+                level: None,
+                timestamp: Some(Utc::now() - Duration::days(90)),
+                message: "A late note for an older day.".to_owned(),
+                metadata: None,
+                fingerprint: None,
+            })
+            .expect("historical event stores");
+
+        assert_eq!(store.prune_old_events(30).expect("retention runs"), 0);
+        assert!(store.get_event(&event.id).expect("event reads").is_some());
+
+        store
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE log_events SET received_at = ?1 WHERE id = ?2",
+                params![(Utc::now() - Duration::days(31)).to_rfc3339(), event.id],
+            )
+            .expect("receipt time ages");
+        assert_eq!(store.prune_old_events(30).expect("retention reruns"), 1);
+        assert!(store.get_event(&event.id).expect("event reads").is_none());
     }
 
     #[test]
