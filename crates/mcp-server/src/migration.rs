@@ -1,4 +1,3 @@
-use crate::{proposal_inbox, vault_context::VaultCatalog};
 use chrono::Utc;
 use log_inbox_core::{
     daily::render_daily_path,
@@ -26,6 +25,53 @@ const LEGACY_PREFERENCE_KEYS: &[&str] = &[
     "extra_instructions",
 ];
 const MAX_PROPOSAL_BYTES: u64 = 4 * 1024 * 1024;
+
+#[derive(Deserialize)]
+struct LegacyProposalFrontmatter {
+    proposal_id: String,
+    target_note: String,
+    #[serde(default)]
+    evidence_event_ids: Vec<String>,
+    #[serde(default)]
+    consolidation_job_id: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct LegacyVaultCatalog {
+    #[serde(default)]
+    vault_id: String,
+    configured: bool,
+    root: Option<String>,
+    revision: String,
+    notes: Vec<LegacyVaultNote>,
+    #[serde(default)]
+    markdown_paths: Vec<String>,
+    #[serde(default)]
+    folder_paths: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct LegacyVaultNote {
+    id: String,
+    title: String,
+    wikilink: String,
+    path: String,
+    group: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    references: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct LegacyProposalInspection {
+    proposal_id: String,
+    target_note: String,
+    evidence_event_ids: Vec<String>,
+    consolidation_job_id: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct CutoverReport {
@@ -91,7 +137,7 @@ pub(crate) fn inventory_cutover(
     let preferences = store.get_preferences()?;
     let browser_catalog = preferences
         .get("browser_vault_catalog")
-        .and_then(|value| serde_json::from_str::<VaultCatalog>(value).ok());
+        .and_then(|value| serde_json::from_str::<LegacyVaultCatalog>(value).ok());
     let mut items = Vec::new();
     let mut blockers = Vec::new();
     let mut warnings = Vec::new();
@@ -537,7 +583,7 @@ fn backup_filename(details: &Value) -> String {
 fn inventory_rules(
     rules: Vec<VaultLinkRule>,
     existing_mappings: &[ContextMapping],
-    catalog: Option<&VaultCatalog>,
+    catalog: Option<&LegacyVaultCatalog>,
     workspace: &InspectedWorkspace,
     items: &mut Vec<CutoverItem>,
     blockers: &mut Vec<String>,
@@ -774,7 +820,7 @@ fn inventory_proposals(
         }
         let contents = fs::read(entry.path())?;
         let digest = sha256(&contents);
-        let inspection = proposal_inbox::inspect_legacy_proposal_bytes(&contents);
+        let inspection = inspect_legacy_proposal_bytes(&contents);
         let (status, details) = match inspection {
             Ok(proposal) => ("ready", serde_json::to_value(proposal)?),
             Err(error) => {
@@ -865,6 +911,41 @@ fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn inspect_legacy_proposal_bytes(contents: &[u8]) -> Result<LegacyProposalInspection, String> {
+    let contents =
+        std::str::from_utf8(contents).map_err(|_| "proposal is not valid UTF-8".to_owned())?;
+    let rest = contents
+        .strip_prefix("---\n")
+        .ok_or_else(|| "proposal is missing YAML frontmatter".to_owned())?;
+    let (yaml, _) = rest
+        .split_once("\n---\n")
+        .ok_or_else(|| "proposal frontmatter is not terminated".to_owned())?;
+    let frontmatter: LegacyProposalFrontmatter = serde_yaml::from_str(yaml)
+        .map_err(|error| format!("parsing proposal frontmatter: {error}"))?;
+    if !frontmatter.proposal_id.starts_with("proposal_")
+        || !frontmatter
+            .proposal_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return Err("invalid proposal ID".to_owned());
+    }
+    if frontmatter.target_note.trim().is_empty()
+        || frontmatter.target_note.contains('/')
+        || frontmatter.target_note.contains('\\')
+        || frontmatter.target_note.contains("..")
+        || frontmatter.target_note.contains('\0')
+    {
+        return Err("proposal target_note must be a plain Markdown filename".to_owned());
+    }
+    Ok(LegacyProposalInspection {
+        proposal_id: frontmatter.proposal_id,
+        target_note: frontmatter.target_note,
+        evidence_event_ids: frontmatter.evidence_event_ids,
+        consolidation_job_id: frontmatter.consolidation_job_id,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -897,12 +978,12 @@ mod tests {
                 None,
             )
             .unwrap();
-        let catalog = VaultCatalog {
+        let catalog = LegacyVaultCatalog {
             vault_id: "legacy-vault".to_owned(),
             configured: true,
             root: Some("Legacy".to_owned()),
             revision: "legacy-revision".to_owned(),
-            notes: vec![crate::vault_context::VaultNote {
+            notes: vec![LegacyVaultNote {
                 id: "product".to_owned(),
                 title: "Product".to_owned(),
                 wikilink: "[[Product]]".to_owned(),
