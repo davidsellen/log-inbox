@@ -6,6 +6,10 @@ Use SQLite for the first implementation unless a simpler JSONL-only prototype is
 
 SQLite gives enough structure for filtering, review state, retention cleanup, and source counts without operating a separate database service.
 
+Schema changes are recorded in `schema_migrations` and applied transactionally in version order. Reopening a database is idempotent. Cross-cutover operations use a separate `migration_journal`; adding the table does not by itself authorize or perform a product migration.
+
+Before a cutover, the service creates a new destination with SQLite's online backup API so the source WAL is included consistently. A backup is accepted only after `PRAGMA integrity_check`, schema-version verification, and event-count comparison. Existing backup files are never overwritten.
+
 ## Tables
 
 ### log_events

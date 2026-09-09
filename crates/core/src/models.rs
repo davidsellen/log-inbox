@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEventInput {
@@ -102,4 +103,12 @@ pub struct IgnoredLinkIdentity {
     pub value: String,
     pub normalized_value: String,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupVerification {
+    pub path: PathBuf,
+    pub schema_version: i64,
+    pub event_count: u64,
+    pub integrity_check: String,
 }

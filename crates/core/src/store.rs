@@ -1,14 +1,20 @@
 use crate::{
     models::{
-        DailyConsolidationJob, IgnoredLinkIdentity, LogEventInput, LogQuery, LogQueryResult,
-        MarkReviewedResult, SourceSummary, StagedEventGroup, StoredLogEvent, VaultLinkRule,
+        BackupVerification, DailyConsolidationJob, IgnoredLinkIdentity, LogEventInput, LogQuery,
+        LogQueryResult, MarkReviewedResult, SourceSummary, StagedEventGroup, StoredLogEvent,
+        VaultLinkRule,
     },
     redaction::{redact_metadata, redact_text},
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::{Connection, OptionalExtension, Row, params};
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use rusqlite::{Connection, OptionalExtension, Row, backup::Backup, params};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    time::Duration as StdDuration,
+};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -39,10 +45,23 @@ impl Store {
     }
 
     pub fn initialize(&self) -> Result<()> {
-        let conn = self.connect()?;
+        let mut conn = self.connect()?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(
             r#"
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            );
+            "#,
+        )?;
+
+        let current = schema_version(&conn)?;
+        if current < 1 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
             CREATE TABLE IF NOT EXISTS log_events (
                 id TEXT PRIMARY KEY,
                 received_at TEXT NOT NULL,
@@ -133,8 +152,76 @@ impl Store {
                 UNIQUE(field, normalized_value)
             );
             "#,
-        )?;
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (1, 'legacy baseline', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
+
+        if current < 2 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE migration_journal (
+                    operation_id TEXT PRIMARY KEY,
+                    migration_name TEXT NOT NULL,
+                    source_identity TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('started', 'completed', 'failed')),
+                    details_json TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (2, 'migration journal', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
+    }
+
+    pub fn schema_version(&self) -> Result<i64> {
+        schema_version(&self.connect()?)
+    }
+
+    pub fn create_verified_backup(&self, destination: &Path) -> Result<BackupVerification> {
+        anyhow::ensure!(
+            !destination.exists(),
+            "backup destination already exists: {}",
+            destination.display()
+        );
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating backup directory {}", parent.display()))?;
+        }
+
+        let source = self.connect()?;
+        let source_event_count = event_count(&source)?;
+        let mut target = Connection::open(destination)
+            .with_context(|| format!("creating backup {}", destination.display()))?;
+        let backup_result = (|| -> Result<()> {
+            let backup = Backup::new(&source, &mut target)?;
+            backup.run_to_completion(128, StdDuration::from_millis(10), None)?;
+            Ok(())
+        })();
+        drop(target);
+        if let Err(error) = backup_result {
+            let _ = fs::remove_file(destination);
+            return Err(error).context("backing up SQLite database");
+        }
+
+        let verification = verify_backup(destination)?;
+        anyhow::ensure!(
+            verification.event_count == source_event_count,
+            "backup event count mismatch: expected {}, found {}",
+            source_event_count,
+            verification.event_count
+        );
+        Ok(verification)
     }
 
     pub fn insert_event(&self, input: LogEventInput) -> Result<StoredLogEvent> {
@@ -863,6 +950,36 @@ impl Store {
     }
 }
 
+fn schema_version(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn event_count(conn: &Connection) -> Result<u64> {
+    conn.query_row("SELECT COUNT(*) FROM log_events", [], |row| row.get(0))
+        .map_err(Into::into)
+}
+
+pub fn verify_backup(path: &Path) -> Result<BackupVerification> {
+    let conn =
+        Connection::open(path).with_context(|| format!("opening backup {}", path.display()))?;
+    let integrity_check: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    anyhow::ensure!(
+        integrity_check == "ok",
+        "backup integrity check failed: {integrity_check}"
+    );
+    Ok(BackupVerification {
+        path: path.to_path_buf(),
+        schema_version: schema_version(&conn)?,
+        event_count: event_count(&conn)?,
+        integrity_check,
+    })
+}
+
 fn validate_event(input: &LogEventInput) -> Result<()> {
     anyhow::ensure!(!input.source.trim().is_empty(), "source is required");
     anyhow::ensure!(!input.message.trim().is_empty(), "message is required");
@@ -960,6 +1077,42 @@ mod tests {
     fn temp_store() -> Store {
         let path = std::env::temp_dir().join(format!("log-inbox-test-{}.sqlite3", Uuid::new_v4()));
         Store::open(path).expect("store opens")
+    }
+
+    #[test]
+    fn applies_versioned_schema_migrations_idempotently() {
+        let store = temp_store();
+        assert_eq!(store.schema_version().expect("version reads"), 2);
+
+        store.initialize().expect("reinitialization succeeds");
+        assert_eq!(store.schema_version().expect("version remains"), 2);
+    }
+
+    #[test]
+    fn creates_and_verifies_a_complete_online_backup() {
+        let store = temp_store();
+        store
+            .insert_event(LogEventInput {
+                source: "codex/test".to_owned(),
+                level: Some("info".to_owned()),
+                timestamp: None,
+                message: "backup evidence".to_owned(),
+                metadata: None,
+                fingerprint: None,
+            })
+            .expect("event stores");
+        let backup_path =
+            std::env::temp_dir().join(format!("log-inbox-backup-test-{}.sqlite3", Uuid::new_v4()));
+
+        let verification = store
+            .create_verified_backup(&backup_path)
+            .expect("backup succeeds");
+        assert_eq!(verification.schema_version, 2);
+        assert_eq!(verification.event_count, 1);
+        assert_eq!(verification.integrity_check, "ok");
+        assert!(store.create_verified_backup(&backup_path).is_err());
+
+        fs::remove_file(backup_path).expect("test backup removed");
     }
 
     #[test]
