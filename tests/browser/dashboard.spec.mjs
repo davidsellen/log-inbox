@@ -204,13 +204,17 @@ function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = 
 
 async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshness = "current" } = {}) {
   const requests = [];
-  await page.addInitScript(() => sessionStorage.setItem("log-inbox-csrf", "csrf_fixture"));
+  let loggedIn = false;
   await page.route("http://daily.log-inbox.test/**", async route => {
     const request = route.request();
     const url = new URL(request.url());
     requests.push({ path: url.pathname, method: request.method(), body: request.postData() ? request.postDataJSON() : null });
     if (url.pathname === "/") return route.fulfill({ status: 200, contentType: "text/html", body: dailyHtml });
-    if (url.pathname === "/api/v2/auth/session") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ authenticated: true }) });
+    if (url.pathname === "/api/v2/auth/login" && request.method() === "POST") {
+      loggedIn = true;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ csrf_token: "csrf_fixture" }) });
+    }
+    if (url.pathname === "/api/v2/auth/session") return route.fulfill({ status: loggedIn ? 200 : 401, contentType: "application/json", body: JSON.stringify(loggedIn ? { authenticated: true } : { error: "Sign in required" }) });
     const match = url.pathname.match(/^\/api\/v2\/daily\/(\d{4}-\d{2}-\d{2})$/);
     if (match && request.method() === "GET") {
       if (dailyStatus !== 200) return route.fulfill({ status: dailyStatus, contentType: "application/json", body: JSON.stringify({ error: "Daily fixture unavailable" }) });
@@ -222,9 +226,16 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
   return requests;
 }
 
+async function openDaily(page, date = "2026-09-08") {
+  await page.goto(`http://daily.log-inbox.test/?date=${date}`);
+  await page.getByLabel("Owner secret").fill("fixture owner secret");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.locator("#daily-app")).toBeVisible();
+}
+
 test("refocused Daily shows one date, destination, notes, and exact preview", async ({ page }) => {
   const requests = await mockDaily(page);
-  await page.goto("http://daily.log-inbox.test/?date=2026-09-08");
+  await openDaily(page);
 
   await expect(page.getByRole("heading", { name: /Tuesday, September 8, 2026/i })).toBeVisible();
   await expect(page.getByText(/Markdown destination: Work Log\/2026\/Sep/)).toBeVisible();
@@ -239,7 +250,7 @@ test("refocused Daily shows one date, destination, notes, and exact preview", as
 
 test("refocused Daily saves structured edits against the visible revision", async ({ page }) => {
   const requests = await mockDaily(page);
-  await page.goto("http://daily.log-inbox.test/?date=2026-09-08");
+  await openDaily(page);
 
   const title = page.getByLabel("Workstream 1 title");
   await title.fill("Daily review experience");
@@ -251,16 +262,29 @@ test("refocused Daily saves structured edits against the visible revision", asyn
   });
 });
 
+test("refocused Daily keeps CSRF authority in memory only", async ({ page }) => {
+  await mockDaily(page);
+  await openDaily(page);
+
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Unlock changes" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "+ Add note" })).toBeDisabled();
+  await expect(page.getByRole("status")).toContainText("Reviewing read-only after reload");
+
+  await page.getByRole("button", { name: "Unlock changes" }).click();
+  await expect(page.getByLabel("Owner secret")).toBeFocused();
+});
+
 test("refocused Daily exposes server failures", async ({ page }) => {
   await mockDaily(page, { dailyStatus: 503 });
-  await page.goto("http://daily.log-inbox.test/?date=2026-09-08");
+  await openDaily(page);
 
   await expect(page.getByRole("status")).toContainText("Daily fixture unavailable");
 });
 
 test("refocused Daily confirms before replacing edits with new evidence", async ({ page }) => {
   const requests = await mockDaily(page, { origin: "structured_edit", freshness: "update_available" });
-  await page.goto("http://daily.log-inbox.test/?date=2026-09-08");
+  await openDaily(page);
 
   page.once("dialog", dialog => dialog.dismiss());
   await page.getByRole("button", { name: "Regenerate" }).click();
