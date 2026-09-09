@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
@@ -148,4 +148,45 @@ pub struct DashboardSession {
     pub idle_expires_at: DateTime<Utc>,
     pub absolute_expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DailyDay {
+    pub workspace_id: String,
+    pub local_date: NaiveDate,
+    pub timezone: String,
+    pub start_utc: DateTime<Utc>,
+    pub end_utc: DateTime<Utc>,
+    pub destination_path: String,
+    pub template_revision: Option<String>,
+    pub block_id: String,
+    pub generation_status: String,
+    pub review_status: String,
+    pub freshness: String,
+    pub current_revision_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceSnapshot {
+    pub id: String,
+    pub workspace_id: String,
+    pub local_date: NaiveDate,
+    pub snapshot_digest: String,
+    pub event_ids: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProposalRevision {
+    pub id: String,
+    pub workspace_id: String,
+    pub local_date: NaiveDate,
+    pub snapshot_id: Option<String>,
+    pub revision_number: u64,
+    pub origin: String,
+    pub content: Value,
+    pub content_hash: String,
+    pub created_at: DateTime<Utc>,
 }

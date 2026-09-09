@@ -1395,7 +1395,7 @@ impl Store {
         .map_err(Into::into)
     }
 
-    fn connect(&self) -> Result<Connection> {
+    pub(crate) fn connect(&self) -> Result<Connection> {
         Connection::open(&self.db_path)
             .with_context(|| format!("opening {}", self.db_path.display()))
     }
