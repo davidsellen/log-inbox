@@ -1,5 +1,5 @@
 use crate::{
-    models::{ContextMapping, IgnoredContextIdentity, LinkSelector},
+    models::{ContextMapping, IgnoredContextIdentity, LinkSelector, MigrationItem},
     store::Store,
 };
 use anyhow::{Context, Result};
@@ -21,6 +21,61 @@ const SELECTOR_FIELDS: &[&str] = &[
 ];
 
 impl Store {
+    pub fn list_migration_items(&self, operation_id: &str) -> Result<Vec<MigrationItem>> {
+        validate_id(operation_id)?;
+        let conn = self.connect()?;
+        let mut statement = conn.prepare(
+            "SELECT operation_id, item_kind, source_identity, source_digest, status, details_json, updated_at FROM migration_items WHERE operation_id = ?1 ORDER BY item_kind, source_identity",
+        )?;
+        statement
+            .query_map(params![operation_id], migration_item_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn save_migration_item(&self, item: &MigrationItem) -> Result<MigrationItem> {
+        validate_id(&item.operation_id)?;
+        validate_item_kind(&item.item_kind)?;
+        anyhow::ensure!(
+            !item.source_identity.trim().is_empty() && item.source_identity.len() <= 4096,
+            "migration source identity is invalid"
+        );
+        validate_digest(&item.source_digest)?;
+        validate_migration_item_status(&item.status)?;
+        let details_json = serde_json::to_string(&item.details)?;
+        anyhow::ensure!(
+            details_json.len() <= 1024 * 1024,
+            "migration item details are too large"
+        );
+        let now = Utc::now().to_rfc3339();
+        self.connect()?.execute(
+            r#"INSERT INTO migration_items
+                (operation_id, item_kind, source_identity, source_digest, status, details_json, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+               ON CONFLICT(operation_id, item_kind, source_identity) DO UPDATE SET
+                 source_digest = excluded.source_digest,
+                 status = excluded.status,
+                 details_json = excluded.details_json,
+                 updated_at = excluded.updated_at"#,
+            params![
+                item.operation_id,
+                item.item_kind,
+                item.source_identity,
+                item.source_digest,
+                item.status,
+                details_json,
+                now,
+            ],
+        )?;
+        self.connect()?
+            .query_row(
+                "SELECT operation_id, item_kind, source_identity, source_digest, status, details_json, updated_at FROM migration_items WHERE operation_id = ?1 AND item_kind = ?2 AND source_identity = ?3",
+                params![item.operation_id, item.item_kind, item.source_identity],
+                migration_item_from_row,
+            )
+            .map_err(Into::into)
+    }
+
     pub fn list_context_mappings(&self, workspace_id: &str) -> Result<Vec<ContextMapping>> {
         let conn = self.connect()?;
         let mut statement = conn.prepare(
@@ -211,14 +266,42 @@ fn validate_source_provenance(identity: Option<&str>, digest: Option<&str>) -> R
         );
     }
     if let Some(digest) = digest {
-        anyhow::ensure!(
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
-            "context source digest must be lowercase SHA-256"
-        );
+        validate_digest(digest)?;
     }
+    Ok(())
+}
+
+fn validate_digest(digest: &str) -> Result<()> {
+    anyhow::ensure!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "source digest must be lowercase SHA-256"
+    );
+    Ok(())
+}
+
+fn validate_item_kind(kind: &str) -> Result<()> {
+    anyhow::ensure!(
+        !kind.is_empty()
+            && kind.len() <= 64
+            && kind
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'),
+        "migration item kind is invalid"
+    );
+    Ok(())
+}
+
+fn validate_migration_item_status(status: &str) -> Result<()> {
+    anyhow::ensure!(
+        matches!(
+            status,
+            "inventoried" | "imported" | "cleanup_pending" | "cleaned" | "preserved" | "error"
+        ),
+        "migration item status is invalid"
+    );
     Ok(())
 }
 
@@ -260,6 +343,21 @@ fn ignored_context_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ignored
         source_identity: row.get(5)?,
         source_digest: row.get(6)?,
         created_at: parse_time(row.get::<_, String>(7)?)?,
+    })
+}
+
+fn migration_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MigrationItem> {
+    let details_json: String = row.get(5)?;
+    Ok(MigrationItem {
+        operation_id: row.get(0)?,
+        item_kind: row.get(1)?,
+        source_identity: row.get(2)?,
+        source_digest: row.get(3)?,
+        status: row.get(4)?,
+        details: serde_json::from_str(&details_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, error.into())
+        })?,
+        updated_at: parse_time(row.get::<_, String>(6)?)?,
     })
 }
 
@@ -346,5 +444,54 @@ mod tests {
             })
             .unwrap();
         assert_eq!(ignored.normalized_value, "noise");
+    }
+
+    #[test]
+    fn journals_migration_items_with_bounded_validated_provenance() {
+        let store = Store::open(std::env::temp_dir().join(format!(
+            "log-inbox-migration-item-{}.sqlite3",
+            Uuid::new_v4()
+        )))
+        .unwrap();
+        store
+            .begin_migration_operation(
+                "migration_test",
+                "refocus-cutover",
+                "legacy-runtime:test",
+                &serde_json::json!({"dry_run": true}),
+            )
+            .unwrap();
+        let item = MigrationItem {
+            operation_id: "migration_test".to_owned(),
+            item_kind: "context_mapping".to_owned(),
+            source_identity: "legacy-rule:rule_1".to_owned(),
+            source_digest: "c".repeat(64),
+            status: "inventoried".to_owned(),
+            details: serde_json::json!({"target": "Products/Log Inbox.md"}),
+            updated_at: Utc::now(),
+        };
+        let saved = store.save_migration_item(&item).unwrap();
+        assert_eq!(saved.source_digest, item.source_digest);
+        assert_eq!(
+            store.list_migration_items("migration_test").unwrap(),
+            vec![saved]
+        );
+
+        assert!(
+            store
+                .save_migration_item(&MigrationItem {
+                    status: "completed".to_owned(),
+                    ..item.clone()
+                })
+                .is_err()
+        );
+        assert!(
+            store
+                .save_migration_item(&MigrationItem {
+                    source_digest: "NOT-A-DIGEST".to_owned(),
+                    ..item
+                })
+                .is_err()
+        );
     }
 }

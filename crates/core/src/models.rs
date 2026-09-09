@@ -164,6 +164,17 @@ pub struct MigrationJournalEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationItem {
+    pub operation_id: String,
+    pub item_kind: String,
+    pub source_identity: String,
+    pub source_digest: String,
+    pub status: String,
+    pub details: Value,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DashboardSession {
     pub token_digest: String,
     pub csrf_digest: String,
