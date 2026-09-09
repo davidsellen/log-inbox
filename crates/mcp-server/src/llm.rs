@@ -1,4 +1,6 @@
-use log_inbox_core::models::StoredLogEvent;
+use log_inbox_core::models::{
+    DailyRevisionContent, ManualDailyEntry, SnapshotEvidence, StoredLogEvent,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
@@ -924,6 +926,124 @@ fn safe_model_markdown_text(value: &str) -> String {
     escaped.replace("://", ":\u{200b}//")
 }
 
+pub fn render_daily_revision_preview(
+    content: &DailyRevisionContent,
+    manual_entries: &[ManualDailyEntry],
+    evidence: &[SnapshotEvidence],
+) -> String {
+    let excluded = evidence
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.disposition.as_deref(),
+                Some("omit" | "duplicate_of" | "superseded_by")
+            )
+        })
+        .map(|item| item.event_id.as_str())
+        .collect::<HashSet<_>>();
+    let selected_manual = content
+        .manual_entry_ids
+        .iter()
+        .filter_map(|id| manual_entries.iter().find(|entry| entry.id == *id))
+        .map(|entry| {
+            let text = entry.text.trim().replace('\n', "\n  ");
+            let references = entry
+                .references
+                .iter()
+                .map(|reference| format!("[Reference](<{reference}>)"))
+                .collect::<Vec<_>>();
+            if references.is_empty() {
+                format!("- {text}")
+            } else {
+                format!("- {text} · {}", references.join(" · "))
+            }
+        })
+        .collect::<Vec<_>>();
+    let workstreams = content
+        .workstreams
+        .iter()
+        .filter_map(|workstream| {
+            let fields = [
+                ("Outcome", &workstream.outcome),
+                ("Decision", &workstream.decision),
+                ("Trade-off", &workstream.trade_off),
+                ("Validation", &workstream.validation),
+                ("Blocker", &workstream.blocker),
+                ("Follow-up", &workstream.follow_up),
+            ];
+            let facts = fields
+                .into_iter()
+                .flat_map(|(label, facts)| {
+                    let excluded = &excluded;
+                    facts
+                        .iter()
+                        .filter(move |fact| {
+                            fact.evidence_event_ids
+                                .iter()
+                                .any(|event_id| !excluded.contains(event_id.as_str()))
+                        })
+                        .map(move |fact| {
+                            format!("- **{label}:** {}", safe_model_markdown_text(&fact.text))
+                        })
+                })
+                .collect::<Vec<_>>();
+            if facts.is_empty() {
+                return None;
+            }
+            let links = workstream
+                .canonical_links
+                .iter()
+                .filter(|link| valid_wikilink(link))
+                .cloned()
+                .collect::<Vec<_>>();
+            Some(format!(
+                "{}\n\n{}",
+                workstream_heading(&safe_model_markdown_text(&workstream.title), &links),
+                facts.join("\n")
+            ))
+        })
+        .collect::<Vec<_>>();
+    let mut sections = Vec::new();
+    if !selected_manual.is_empty() {
+        sections.push(format!("### My notes\n\n{}", selected_manual.join("\n")));
+    }
+    if !workstreams.is_empty() {
+        let body = workstreams.join("\n\n");
+        sections.push(if selected_manual.is_empty() {
+            body
+        } else {
+            format!(
+                "### Automated activity\n\n{}",
+                demote_workstream_headings(&body)
+            )
+        });
+    }
+    if !content.open_questions.is_empty() {
+        let questions = content
+            .open_questions
+            .iter()
+            .map(|question| format!("- {}", safe_model_markdown_text(question)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        sections.push(format!("### Open questions\n\n{questions}"));
+    }
+    sections.join("\n\n")
+}
+
+fn valid_wikilink(link: &str) -> bool {
+    let Some(name) = link
+        .strip_prefix("[[")
+        .and_then(|value| value.strip_suffix("]]"))
+    else {
+        return false;
+    };
+    !name.trim().is_empty()
+        && !name
+            .chars()
+            .any(|character| matches!(character, '\r' | '\n' | '[' | ']'))
+        && name.len() <= 512
+}
+
 fn configured_workstream_links(args: &SuggestMarkdownSummaryArgs) -> Vec<String> {
     args.vault_context
         .get("workstream_links")
@@ -1725,6 +1845,59 @@ mod tests {
         assert!(!escaped.contains("]("));
         assert!(!escaped.contains("://"));
         assert!(escaped.contains("\\#\\# heading"));
+    }
+
+    #[test]
+    fn final_preview_separates_manual_notes_and_hides_omitted_facts() {
+        let now = Utc::now();
+        let content: DailyRevisionContent = serde_json::from_value(json!({
+            "schema_version": 1,
+            "manual_entry_ids": ["manual_1"],
+            "workstreams": [{
+                "id": "task:one",
+                "title": "Navigation [[injection]]",
+                "canonical_links": ["[[Sweet CRM]]", "[[bad\nlink]]"],
+                "evidence_event_ids": ["evt_keep", "evt_omit"],
+                "outcome": [{
+                    "text": "Kept the supported result.",
+                    "evidence_event_ids": ["evt_keep"]
+                }],
+                "follow_up": [{
+                    "text": "This should disappear.",
+                    "evidence_event_ids": ["evt_omit"]
+                }]
+            }]
+        }))
+        .unwrap();
+        let manual = ManualDailyEntry {
+            id: "manual_1".to_owned(),
+            workspace_id: "workspace".to_owned(),
+            local_date: now.date_naive(),
+            text: "My own **Markdown** note.".to_owned(),
+            references: vec!["https://example.test/42".to_owned()],
+            created_at: now,
+            updated_at: now,
+        };
+        let decisions = vec![SnapshotEvidence {
+            event_id: "evt_omit".to_owned(),
+            position: 1,
+            event_digest: "digest".to_owned(),
+            disposition: Some("omit".to_owned()),
+            related_event_id: None,
+            decision_actor: Some("owner".to_owned()),
+            decision_reason: None,
+            decided_at: Some(now),
+        }];
+
+        let preview = render_daily_revision_preview(&content, &[manual], &decisions);
+
+        assert!(preview.contains("### My notes"));
+        assert!(preview.contains("My own **Markdown** note."));
+        assert!(preview.contains("[[Sweet CRM]]"));
+        assert!(preview.contains("Navigation \\[\\[injection\\]\\]"));
+        assert!(preview.contains("Kept the supported result."));
+        assert!(!preview.contains("This should disappear."));
+        assert!(!preview.contains("bad\nlink"));
     }
 
     #[test]

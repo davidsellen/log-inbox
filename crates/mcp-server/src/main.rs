@@ -134,6 +134,12 @@ struct ExpectedRevisionRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct EditDailyCandidateRequest {
+    expected_revision_id: String,
+    content: DailyRevisionContent,
+}
+
+#[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
     #[serde(default, rename = "jsonrpc")]
     _jsonrpc: Option<String>,
@@ -419,6 +425,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v2/daily/{date}/evidence/{event_id}",
             put(refocus_decide_daily_evidence).delete(refocus_reopen_daily_evidence),
         )
+        .route(
+            "/api/v2/daily/{date}/candidate",
+            put(refocus_edit_daily_candidate),
+        )
         .route("/favicon.ico", get(favicon))
         .route("/api/dashboard", get(dashboard_data))
         .route("/api/logs/manual/options", get(manual_log_options))
@@ -646,11 +656,14 @@ async fn refocus_daily_day(
         .iter()
         .map(|entry| entry.id.as_str())
         .collect::<Vec<_>>();
-    let candidate_freshness = current_revision.as_ref().map(|revision| {
-        let stored_manual_ids =
-            serde_json::from_value::<DailyRevisionContent>(revision.content.clone())
-                .map(|content| content.manual_entry_ids)
-                .unwrap_or_default();
+    let current_content = current_revision.as_ref().and_then(|revision| {
+        serde_json::from_value::<DailyRevisionContent>(revision.content.clone()).ok()
+    });
+    let candidate_freshness = current_revision.as_ref().map(|_| {
+        let stored_manual_ids = current_content
+            .as_ref()
+            .map(|content| content.manual_entry_ids.as_slice())
+            .unwrap_or_default();
         let stored_event_ids = current_snapshot
             .as_ref()
             .map(|snapshot| {
@@ -672,6 +685,9 @@ async fn refocus_daily_day(
             "update_available"
         }
     });
+    let preview_markdown = current_content.as_ref().map(|content| {
+        llm::render_daily_revision_preview(content, &manual_entries, &current_snapshot_evidence)
+    });
     Ok(Json(json!({
         "workspace_id": profile.id,
         "local_date": local_date,
@@ -690,7 +706,8 @@ async fn refocus_daily_day(
         "current_revision": current_revision,
         "current_snapshot": current_snapshot,
         "current_snapshot_evidence": current_snapshot_evidence,
-        "candidate_freshness": candidate_freshness
+        "candidate_freshness": candidate_freshness,
+        "preview_markdown": preview_markdown
     })))
 }
 
@@ -946,6 +963,55 @@ fn current_snapshot_for_review(
         .evidence_snapshot(&snapshot_id)
         .map_err(|error| ApiError::internal(error.to_string()))?
         .ok_or_else(|| ApiError::internal("the current evidence snapshot is missing"))
+}
+
+async fn refocus_edit_daily_candidate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(date): AxumPath<String>,
+    Json(input): Json<EditDailyCandidateRequest>,
+) -> Result<Json<ProposalRevision>, ApiError> {
+    authorize_refocus(&state, &headers, "review:write", true)?;
+    let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let profile = state
+        .store
+        .active_workspace_profile()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::conflict("review and activate a workspace profile first"))?;
+    let current = state
+        .store
+        .current_proposal_revision(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::conflict("generate a candidate before editing it"))?;
+    if current.id != input.expected_revision_id {
+        return Err(ApiError::conflict(
+            "the Daily candidate changed; reload and try again",
+        ));
+    }
+    let content = serde_json::to_value(input.content)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let revision = state
+        .store
+        .create_proposal_revision_if_current(
+            &profile.id,
+            local_date,
+            current.snapshot_id.as_deref(),
+            "structured_edit",
+            &content,
+            &input.expected_revision_id,
+        )
+        .map_err(|error| {
+            if error
+                .to_string()
+                .contains("current proposal revision changed")
+            {
+                ApiError::conflict("the Daily candidate changed; reload and try again")
+            } else {
+                ApiError::bad_request(error.to_string())
+            }
+        })?;
+    Ok(Json(revision))
 }
 
 fn effective_daily_window(

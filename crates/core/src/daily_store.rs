@@ -676,6 +676,20 @@ fn validate_workstream_evidence(
             "workstream ID and title are required"
         );
         anyhow::ensure!(
+            workstream.canonical_links.iter().all(|link| {
+                link.strip_prefix("[[")
+                    .and_then(|value| value.strip_suffix("]]"))
+                    .is_some_and(|name| {
+                        !name.trim().is_empty()
+                            && name.len() <= 512
+                            && !name
+                                .chars()
+                                .any(|character| matches!(character, '\r' | '\n' | '[' | ']'))
+                    })
+            }),
+            "canonical links must be bounded wikilinks"
+        );
+        anyhow::ensure!(
             workstream_ids.insert(&workstream.id),
             "workstream IDs must be unique"
         );

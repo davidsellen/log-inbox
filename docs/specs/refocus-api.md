@@ -30,7 +30,8 @@ Requires the session cookie and `logs:read`. The URL contains a calendar date, n
 - bounded automated evidence and truncation state;
 - trusted owner-authored manual entries stored outside ingest;
 - frozen day state, current immutable proposal revision and its evidence snapshot when present;
-- server-derived candidate freshness, so late evidence is never presented as part of an older current draft.
+- server-derived candidate freshness, so late evidence is never presented as part of an older current draft;
+- deterministic `preview_markdown` rendered from the structured current revision, trusted manual entries, and evidence dispositions.
 
 The endpoint never creates a day, snapshot, revision, folder, or Markdown file. Missing workspace review is `409 Conflict`; malformed dates are `400 Bad Request`.
 
@@ -66,3 +67,11 @@ Requires `review:write` and CSRF. Body names the exact `expected_revision_id`, a
 ### `DELETE /api/v2/daily/{YYYY-MM-DD}/evidence/{event_id}`
 
 Requires `review:write` and CSRF. Body contains the exact `expected_revision_id`. It reopens the evidence by clearing its disposition and related decision fields. Both review routes return the complete ordered snapshot decision list. They do not rewrite the immutable candidate revision or Markdown.
+
+## Edit the structured candidate
+
+### `PUT /api/v2/daily/{YYYY-MM-DD}/candidate`
+
+Requires `review:write` and CSRF. Body contains the exact `expected_revision_id` and a complete `DailyRevisionContent` object. The storage boundary validates schema version, manual-entry ownership, unique workstreams, canonical-link shape, complete snapshot coverage, and evidence on every factual item. A successful edit creates a new immutable `structured_edit` revision; compare-and-swap prevents a stale editor from replacing a newer candidate. Arbitrary Markdown is not accepted by this route.
+
+The Daily read model renders the final preview deterministically. Owner-authored manual prose remains verbatim and separate. Model-authored titles, facts, and questions are escaped as plain Markdown text; only validated server-owned canonical links are active. Facts supported solely by omitted, duplicate, or superseded evidence are absent from the preview.
