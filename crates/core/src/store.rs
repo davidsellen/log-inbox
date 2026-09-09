@@ -1,5 +1,5 @@
 use crate::{
-    auth::{SessionCredentials, normalize_scopes, token_digest},
+    auth::{SessionCredentials, normalize_scopes, token_digest, token_matches},
     models::{
         BackupVerification, DailyConsolidationJob, DashboardSession, IgnoredLinkIdentity,
         LogEventInput, LogQuery, LogQueryResult, MarkReviewedResult, MigrationJournalEntry,
@@ -502,7 +502,7 @@ impl Store {
         );
         if let Some(csrf_token) = csrf_token {
             anyhow::ensure!(
-                token_digest(csrf_token) == session.csrf_digest,
+                token_matches(csrf_token, &session.csrf_digest),
                 "CSRF token does not match the dashboard session"
             );
         }

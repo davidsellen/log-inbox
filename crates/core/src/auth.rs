@@ -51,6 +51,20 @@ pub fn token_digest(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 
+pub fn token_matches(token: &str, expected_digest: &str) -> bool {
+    let actual = token_digest(token);
+    if actual.len() != expected_digest.len() {
+        return false;
+    }
+    actual
+        .bytes()
+        .zip(expected_digest.bytes())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
 pub fn normalize_scopes(scopes: &[String]) -> Result<Vec<String>> {
     let mut normalized = scopes
         .iter()
@@ -90,6 +104,14 @@ mod tests {
         assert_ne!(first.csrf_token, first.session_token);
         assert_eq!(token_digest(&first.session_token).len(), 64);
         assert!(!token_digest(&first.session_token).contains(&first.session_token));
+        assert!(token_matches(
+            &first.csrf_token,
+            &token_digest(&first.csrf_token)
+        ));
+        assert!(!token_matches(
+            &second.csrf_token,
+            &token_digest(&first.csrf_token)
+        ));
     }
 
     #[test]

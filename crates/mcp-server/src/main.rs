@@ -2,13 +2,16 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Path as AxumPath, State},
-    http::{Request, StatusCode, header},
+    http::{HeaderMap, Request, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post, put},
 };
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use log_inbox_core::{
+    auth::{
+        DASHBOARD_SCOPES, generate_session_credentials, hash_owner_secret, verify_owner_secret,
+    },
     models::{
         DailyConsolidationJob, IgnoredLinkIdentity, LinkSelector, LogEventInput, LogQuery,
         VaultLinkRule,
@@ -42,6 +45,63 @@ struct AppState {
     daily_notes_display_path: Option<String>,
     vault_context: vault_context::VaultContextProvider,
     apply_lock: Arc<Mutex<()>>,
+    refocus: Option<RefocusConfig>,
+}
+
+#[derive(Clone)]
+struct RefocusConfig {
+    allowed_hosts: HashSet<String>,
+    allowed_origins: HashSet<String>,
+    secure_cookie: bool,
+}
+
+impl RefocusConfig {
+    fn from_env(store: &Store) -> anyhow::Result<Option<Self>> {
+        if env::var("LOG_INBOX_REFOCUS_ENABLED").as_deref() != Ok("1") {
+            return Ok(None);
+        }
+        let owner_secret = env::var("LOG_INBOX_OWNER_SECRET").map_err(|_| {
+            anyhow::anyhow!("LOG_INBOX_OWNER_SECRET is required when refocus is enabled")
+        })?;
+        match store.owner_secret_hash()? {
+            None => store.set_owner_secret_hash(&hash_owner_secret(&owner_secret)?)?,
+            Some(hash) if verify_owner_secret(&owner_secret, &hash) => {}
+            Some(_) if env::var("LOG_INBOX_ROTATE_OWNER_SECRET").as_deref() == Ok("1") => {
+                store.set_owner_secret_hash(&hash_owner_secret(&owner_secret)?)?;
+            }
+            Some(_) => anyhow::bail!(
+                "configured owner secret does not match; set LOG_INBOX_ROTATE_OWNER_SECRET=1 for an explicit rotation"
+            ),
+        }
+        let allowed_hosts = env_list("LOG_INBOX_ALLOWED_HOSTS", "127.0.0.1:8788,localhost:8788");
+        let allowed_origins = env_list(
+            "LOG_INBOX_ALLOWED_ORIGINS",
+            "http://127.0.0.1:8788,http://localhost:8788",
+        );
+        let secure_cookie = allowed_origins
+            .iter()
+            .any(|origin| origin.starts_with("https://"));
+        Ok(Some(Self {
+            allowed_hosts,
+            allowed_origins,
+            secure_cookie,
+        }))
+    }
+}
+
+fn env_list(name: &str, fallback: &str) -> HashSet<String> {
+    env::var(name)
+        .unwrap_or_else(|_| fallback.to_owned())
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    owner_secret: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +313,7 @@ async fn main() -> anyhow::Result<()> {
 
     let settings = Settings::from_env();
     let store = Store::open(settings.database_path())?;
+    let refocus = RefocusConfig::from_env(&store)?;
     daily_consolidation::migrate_prompt_preference(&store)?;
     store.recover_daily_consolidations()?;
     let vault_context = vault_context::VaultContextProvider::from_env();
@@ -284,6 +345,7 @@ async fn main() -> anyhow::Result<()> {
             .filter(|path| !path.trim().is_empty()),
         vault_context,
         apply_lock: Arc::new(Mutex::new(())),
+        refocus,
     };
 
     if let (Some(config), Some(inbox)) = (
@@ -311,6 +373,9 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/", get(dashboard_page))
+        .route("/api/v2/auth/login", post(refocus_login))
+        .route("/api/v2/auth/session", get(refocus_session))
+        .route("/api/v2/auth/logout", post(refocus_logout))
         .route("/favicon.ico", get(favicon))
         .route("/api/dashboard", get(dashboard_data))
         .route("/api/logs/manual/options", get(manual_log_options))
@@ -403,6 +468,144 @@ async fn log_request_response(request: Request<Body>, next: Next) -> Response {
 
 async fn health() -> Json<Value> {
     Json(json!({ "status": "ok" }))
+}
+
+async fn refocus_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<LoginRequest>,
+) -> Result<Response, ApiError> {
+    let config = state
+        .refocus
+        .as_ref()
+        .ok_or_else(|| ApiError::not_found("refocused API is disabled"))?;
+    validate_request_boundary(config, &headers, true)?;
+    let owner_hash = state
+        .store
+        .owner_secret_hash()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::internal("owner authentication is not initialized"))?;
+    if !verify_owner_secret(&input.owner_secret, &owner_hash) {
+        return Err(ApiError::unauthorized("owner secret is not valid"));
+    }
+    let credentials = generate_session_credentials();
+    state
+        .store
+        .create_dashboard_session(
+            &credentials,
+            &DASHBOARD_SCOPES
+                .iter()
+                .map(|scope| (*scope).to_owned())
+                .collect::<Vec<_>>(),
+            Utc::now(),
+            Duration::minutes(30),
+            Duration::hours(8),
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let secure = if config.secure_cookie { "; Secure" } else { "" };
+    let cookie = format!(
+        "log_inbox_session={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800{secure}",
+        credentials.session_token
+    );
+    Ok((
+        [(header::SET_COOKIE, cookie)],
+        Json(json!({ "csrf_token": credentials.csrf_token, "expires_in_seconds": 28800 })),
+    )
+        .into_response())
+}
+
+async fn refocus_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let session = authorize_refocus(&state, &headers, "logs:read", false)?;
+    Ok(Json(
+        json!({ "authenticated": true, "scopes": session.scopes, "absolute_expires_at": session.absolute_expires_at }),
+    ))
+}
+
+async fn refocus_logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize_refocus(&state, &headers, "logs:read", true)?;
+    let token = session_cookie(&headers)
+        .ok_or_else(|| ApiError::unauthorized("dashboard session cookie is missing"))?;
+    state
+        .store
+        .revoke_dashboard_session(token)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok((
+        [(
+            header::SET_COOKIE,
+            "log_inbox_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
+        )],
+        StatusCode::NO_CONTENT,
+    )
+        .into_response())
+}
+
+fn authorize_refocus(
+    state: &AppState,
+    headers: &HeaderMap,
+    scope: &str,
+    require_csrf: bool,
+) -> Result<log_inbox_core::models::DashboardSession, ApiError> {
+    let config = state
+        .refocus
+        .as_ref()
+        .ok_or_else(|| ApiError::not_found("refocused API is disabled"))?;
+    validate_request_boundary(config, headers, require_csrf)?;
+    let token = session_cookie(headers)
+        .ok_or_else(|| ApiError::unauthorized("dashboard session cookie is missing"))?;
+    let csrf = require_csrf
+        .then(|| {
+            headers
+                .get("x-csrf-token")
+                .and_then(|value| value.to_str().ok())
+        })
+        .flatten();
+    if require_csrf && csrf.is_none() {
+        return Err(ApiError::forbidden("CSRF token is required"));
+    }
+    state
+        .store
+        .authenticate_dashboard_session(token, csrf, scope, Utc::now(), Duration::minutes(30))
+        .map_err(|_| ApiError::unauthorized("dashboard session is not authorized"))
+}
+
+fn validate_request_boundary(
+    config: &RefocusConfig,
+    headers: &HeaderMap,
+    require_origin: bool,
+) -> Result<(), ApiError> {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::forbidden("Host header is required"))?;
+    if !config.allowed_hosts.contains(host) {
+        return Err(ApiError::forbidden("request Host is not allowed"));
+    }
+    if require_origin {
+        let origin = headers
+            .get(header::ORIGIN)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| ApiError::forbidden("Origin header is required"))?;
+        if !config.allowed_origins.contains(origin) {
+            return Err(ApiError::forbidden("request Origin is not allowed"));
+        }
+    }
+    Ok(())
+}
+
+fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .map(str::trim)
+        .find_map(|cookie| cookie.strip_prefix("log_inbox_session="))
 }
 
 async fn dashboard_page() -> Html<&'static str> {
@@ -2015,6 +2218,20 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
+
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -2227,6 +2444,36 @@ fn tool_definitions() -> Vec<Value> {
 #[cfg(test)]
 mod knowledge_destination_tests {
     use super::*;
+
+    #[test]
+    fn refocus_boundary_rejects_untrusted_hosts_and_origins() {
+        let config = RefocusConfig {
+            allowed_hosts: HashSet::from(["localhost:8788".to_owned()]),
+            allowed_origins: HashSet::from(["http://localhost:8788".to_owned()]),
+            secure_cookie: false,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "localhost:8788".parse().unwrap());
+        headers.insert(header::ORIGIN, "http://localhost:8788".parse().unwrap());
+        assert!(validate_request_boundary(&config, &headers, true).is_ok());
+        headers.insert(header::ORIGIN, "https://attacker.example".parse().unwrap());
+        assert!(validate_request_boundary(&config, &headers, true).is_err());
+        headers.insert(header::ORIGIN, "http://localhost:8788".parse().unwrap());
+        headers.insert(header::HOST, "attacker.example".parse().unwrap());
+        assert!(validate_request_boundary(&config, &headers, false).is_err());
+    }
+
+    #[test]
+    fn extracts_only_the_named_dashboard_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            "theme=dark; log_inbox_session=session_test; other=value"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(session_cookie(&headers), Some("session_test"));
+    }
 
     #[test]
     fn treats_numbered_and_unnumbered_folder_names_as_user_owned() {
