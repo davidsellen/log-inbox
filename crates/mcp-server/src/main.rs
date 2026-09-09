@@ -777,19 +777,21 @@ fn preview_workspace_settings(
             .filter(|path| !path.is_empty()),
         link_style: input.link_style.trim().to_owned(),
     };
-    resolve_day(Utc::now().date_naive(), &settings.timezone)
+    let timezone = settings
+        .timezone
+        .parse::<chrono_tz::Tz>()
+        .map_err(|_| ApiError::bad_request("timezone must be a valid IANA name"))?;
+    let example_date = Utc::now().with_timezone(&timezone).date_naive();
+    resolve_day(example_date, &settings.timezone)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if !matches!(settings.link_style.as_str(), "markdown" | "wikilink") {
         return Err(ApiError::bad_request(
             "link style must be markdown or wikilink",
         ));
     }
-    let destination_example = render_daily_path(
-        &settings.daily_root,
-        &settings.daily_pattern,
-        Utc::now().date_naive(),
-    )
-    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let destination_example =
+        render_daily_path(&settings.daily_root, &settings.daily_pattern, example_date)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
     workspace
         .resolve_markdown_path(
             std::path::Path::new(&destination_example),
