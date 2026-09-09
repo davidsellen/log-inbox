@@ -54,7 +54,9 @@ The server resolves the active workspace and calendar date, freezes the day dest
 
 ### `POST /api/v2/daily/{YYYY-MM-DD}/generate`
 
-Requires `draft:generate`, the session cookie, an allowed Host/Origin, and the matching `X-CSRF-Token`. The server serializes generation per owner process, freezes the day, rejects a truncated evidence set, creates an immutable evidence snapshot, and stores a schema-validated immutable proposal revision. An identical evidence/manual snapshot returns the existing current revision instead of calling the model again.
+Requires `draft:generate`, the session cookie, an allowed Host/Origin, and the matching `X-CSRF-Token`. The optional body is `{ "replace_edited": false }`. The server serializes generation per owner process, freezes the day, rejects a truncated evidence set, creates an immutable evidence snapshot, and stores a schema-validated immutable proposal revision. An identical evidence/manual snapshot returns the existing current revision instead of calling the model again. New manual entries are attached to the existing structured revision without discarding its edits or calling the model.
+
+When new automated evidence exists and the current revision contains structured edits, the server returns `409 Conflict` unless `replace_edited` is explicitly true. The Daily UI asks for confirmation before sending that authorization. A successful replacement remains a new immutable `regenerated` revision; the edited revision is retained in history.
 
 Automated evidence always uses the strict structured model contract, even if an ingest producer claims `entry_kind=manual`. Manual-only days create a reviewable revision without an LLM. Model absence, oversized input, provider failure, invalid JSON, schema mismatch, missing evidence, or unsafe grouping returns `422 Unprocessable Entity`; raw log text is never substituted as a candidate. Generation changes SQLite review state only. It does not create a folder or Markdown file.
 

@@ -139,6 +139,12 @@ struct EditDailyCandidateRequest {
     content: DailyRevisionContent,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct GenerateDailyRequest {
+    #[serde(default)]
+    replace_edited: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
     #[serde(default, rename = "jsonrpc")]
@@ -746,6 +752,7 @@ async fn refocus_generate_daily(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(date): AxumPath<String>,
+    input: Option<Json<GenerateDailyRequest>>,
 ) -> Result<Json<ProposalRevision>, ApiError> {
     authorize_refocus(&state, &headers, "draft:generate", true)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
@@ -820,17 +827,45 @@ async fn refocus_generate_daily(
         .store
         .create_evidence_snapshot(&profile.id, local_date, &event_ids)
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    if let Some(current) = state
+    let current = state
         .store
         .current_proposal_revision(&profile.id, local_date)
-        .map_err(|error| ApiError::internal(error.to_string()))?
-        .filter(|current| {
-            current.snapshot_id.as_deref() == Some(snapshot.id.as_str())
-                && serde_json::from_value::<DailyRevisionContent>(current.content.clone())
-                    .is_ok_and(|content| content.manual_entry_ids == manual_entry_ids)
-        })
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if let Some(current) = current.as_ref()
+        && current.snapshot_id.as_deref() == Some(snapshot.id.as_str())
     {
-        return Ok(Json(current));
+        let mut content = serde_json::from_value::<DailyRevisionContent>(current.content.clone())
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        if content.manual_entry_ids == manual_entry_ids {
+            return Ok(Json(current.clone()));
+        }
+        content.manual_entry_ids = manual_entry_ids;
+        let content =
+            serde_json::to_value(content).map_err(|error| ApiError::internal(error.to_string()))?;
+        let revised = state
+            .store
+            .create_proposal_revision_if_current(
+                &profile.id,
+                local_date,
+                Some(&snapshot.id),
+                "structured_edit",
+                &content,
+                &current.id,
+            )
+            .map_err(|error| ApiError::conflict(error.to_string()))?;
+        return Ok(Json(revised));
+    }
+    let replace_edited = input
+        .map(|Json(input)| input.replace_edited)
+        .unwrap_or(false);
+    if current
+        .as_ref()
+        .is_some_and(|current| current.origin == "structured_edit")
+        && !replace_edited
+    {
+        return Err(ApiError::conflict(
+            "New evidence is available, but the current candidate has edits. Confirm replacement to regenerate.",
+        ));
     }
 
     state
@@ -875,13 +910,18 @@ async fn refocus_generate_daily(
         "manual_entry_ids": manual_entry_ids,
         "open_questions": draft.open_questions
     });
+    let origin = if current.is_some() {
+        "regenerated"
+    } else {
+        "generated"
+    };
     let revision = state
         .store
         .create_proposal_revision(
             &profile.id,
             local_date,
             Some(&snapshot.id),
-            "generated",
+            origin,
             &content,
         )
         .map_err(|error| ApiError::internal(error.to_string()))?;
@@ -1102,8 +1142,12 @@ fn session_cookie(headers: &HeaderMap) -> Option<&str> {
         .find_map(|cookie| cookie.strip_prefix("log_inbox_session="))
 }
 
-async fn dashboard_page() -> Html<&'static str> {
-    Html(include_str!("../assets/dashboard.html"))
+async fn dashboard_page(State(state): State<AppState>) -> Html<&'static str> {
+    if state.refocus.is_some() {
+        Html(include_str!("../assets/daily.html"))
+    } else {
+        Html(include_str!("../assets/dashboard.html"))
+    }
 }
 
 async fn favicon() -> impl IntoResponse {

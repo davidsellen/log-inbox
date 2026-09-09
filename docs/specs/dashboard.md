@@ -1,6 +1,16 @@
 # Local Dashboard
 
-The MCP service exposes a small local interface for reviewing Markdown proposals and configuring agent-facing behavior. It does not require a separate frontend service.
+The MCP service exposes a small local interface and does not require a separate frontend service.
+
+## Refocused Daily interface
+
+With `LOG_INBOX_REFOCUS_ENABLED=1`, the root page is the authenticated Daily workflow. One server-authoritative calendar date is visible at a time. It shows the frozen Markdown destination, trusted manual notes, the current structured automated candidate, source evidence, and the exact deterministic final preview.
+
+The ordinary flow is: choose a date, optionally add a manual note, generate a candidate, correct structured facts or evidence decisions, and inspect the final preview. Adding a note, generating, saving an edit, and changing an evidence decision update SQLite immediately and produce durable records. None of these actions writes to the Markdown workspace. Apply is intentionally absent until the safe writer and journal land in M2.
+
+An unchanged snapshot returns the current revision. Adding only a manual note preserves structured edits. If late automated evidence arrives after a structured edit, regeneration requires explicit confirmation and creates a new immutable revision. The interface does not require Knowledge setup or expose vault browsing, structure management, or generic note editing.
+
+The sections below describe the legacy dashboard served only while the refocus feature gate is disabled. They are retained as migration background until the coordinated M2 cutover removes the legacy runtime.
 
 ## Queue
 

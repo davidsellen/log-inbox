@@ -140,9 +140,9 @@ Exit gate: contracts and fixtures are reviewable, the backup can be restored, an
 - [x] Implement server-authoritative date navigation and one current candidate with immutable snapshots/revisions.
 - [ ] Tighten grouping/deduplication and preserve unique decision/validation evidence.
 - [x] Implement strict structured generation, adaptive fields, evidence coverage and explicit failures without raw fallback.
-- [ ] Keep manual entries separate; add structured editing, scoped omission/reopen, references and final preview.
-- [ ] Preserve edited drafts and implement detached Advanced Markdown semantics if the override is shipped.
-- [ ] Provide a useful draft with zero Knowledge collections or canonical mappings.
+- [x] Keep manual entries separate; add structured editing, scoped omission/reopen, references and final preview.
+- [x] Preserve edited drafts and require explicit confirmation before regeneration replaces them. Advanced Markdown remains unshipped rather than adding a detached editing mode prematurely.
+- [x] Provide a useful draft with zero Knowledge collections or canonical mappings.
 
 Exit gate: representative days can be reviewed accurately without Knowledge setup; malformed output or missing evidence cannot become an applyable automated draft.
 
