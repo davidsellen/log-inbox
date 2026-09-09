@@ -56,6 +56,13 @@ struct RefocusConfig {
     secure_cookie: bool,
 }
 
+struct EffectiveDailyWindow {
+    timezone: String,
+    start_utc: DateTime<Utc>,
+    end_utc: DateTime<Utc>,
+    destination_path: String,
+}
+
 impl RefocusConfig {
     fn from_env(store: &Store) -> anyhow::Result<Option<Self>> {
         if env::var("LOG_INBOX_REFOCUS_ENABLED").as_deref() != Ok("1") {
@@ -560,20 +567,15 @@ async fn refocus_daily_day(
         .active_workspace_profile()
         .map_err(|error| ApiError::internal(error.to_string()))?
         .ok_or_else(|| ApiError::conflict("review and activate a workspace profile first"))?;
-    let resolved = resolve_day(local_date, &profile.timezone)
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let frozen_day = state
         .store
         .daily_day(&profile.id, local_date)
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    let destination_path = match &frozen_day {
-        Some(day) => day.destination_path.clone(),
-        None => render_daily_path(&profile.daily_root, &profile.daily_pattern, local_date)
-            .map_err(|error| ApiError::bad_request(error.to_string()))?,
-    };
+    let window = effective_daily_window(local_date, &profile, frozen_day.as_ref())
+        .map_err(ApiError::bad_request)?;
     let evidence = state
         .store
-        .get_events_between(resolved.start_utc, resolved.end_utc, 500)
+        .get_events_between(window.start_utc, window.end_utc, 500)
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let event_count = evidence.events.len();
     let current_revision = state
@@ -583,10 +585,10 @@ async fn refocus_daily_day(
     Ok(Json(json!({
         "workspace_id": profile.id,
         "local_date": local_date,
-        "timezone": profile.timezone,
-        "start_utc": resolved.start_utc,
-        "end_utc": resolved.end_utc,
-        "destination_path": destination_path,
+        "timezone": window.timezone,
+        "start_utc": window.start_utc,
+        "end_utc": window.end_utc,
+        "destination_path": window.destination_path,
         "day": frozen_day,
         "evidence": {
             "events": evidence.events,
@@ -596,6 +598,31 @@ async fn refocus_daily_day(
         },
         "current_revision": current_revision
     })))
+}
+
+fn effective_daily_window(
+    local_date: NaiveDate,
+    profile: &log_inbox_core::models::WorkspaceProfile,
+    frozen_day: Option<&log_inbox_core::models::DailyDay>,
+) -> Result<EffectiveDailyWindow, String> {
+    if let Some(day) = frozen_day {
+        return Ok(EffectiveDailyWindow {
+            timezone: day.timezone.clone(),
+            start_utc: day.start_utc,
+            end_utc: day.end_utc,
+            destination_path: day.destination_path.clone(),
+        });
+    }
+    let resolved = resolve_day(local_date, &profile.timezone).map_err(|error| error.to_string())?;
+    let destination_path =
+        render_daily_path(&profile.daily_root, &profile.daily_pattern, local_date)
+            .map_err(|error| error.to_string())?;
+    Ok(EffectiveDailyWindow {
+        timezone: resolved.timezone,
+        start_utc: resolved.start_utc,
+        end_utc: resolved.end_utc,
+        destination_path,
+    })
 }
 
 fn authorize_refocus(
@@ -2526,6 +2553,48 @@ mod knowledge_destination_tests {
                 .unwrap(),
         );
         assert_eq!(session_cookie(&headers), Some("session_test"));
+    }
+
+    #[test]
+    fn frozen_daily_windows_ignore_later_workspace_timezone_changes() {
+        let date = NaiveDate::from_ymd_opt(2026, 3, 29).unwrap();
+        let created_at: DateTime<Utc> = "2026-01-01T00:00:00Z".parse().unwrap();
+        let profile = log_inbox_core::models::WorkspaceProfile {
+            id: "workspace_test".to_owned(),
+            status: "active".to_owned(),
+            root_binding: "root".to_owned(),
+            timezone: "America/New_York".to_owned(),
+            daily_root: "Journal".to_owned(),
+            daily_pattern: "{date}.md".to_owned(),
+            template_path: None,
+            link_style: "markdown".to_owned(),
+            created_at,
+            updated_at: created_at,
+        };
+        let stockholm = resolve_day(date, "Europe/Stockholm").unwrap();
+        let frozen = log_inbox_core::models::DailyDay {
+            workspace_id: profile.id.clone(),
+            local_date: date,
+            timezone: stockholm.timezone.clone(),
+            start_utc: stockholm.start_utc,
+            end_utc: stockholm.end_utc,
+            destination_path: "Old Journal/2026-03-29.md".to_owned(),
+            template_revision: None,
+            block_id: "day_test".to_owned(),
+            generation_status: "ready".to_owned(),
+            review_status: "in_review".to_owned(),
+            freshness: "current".to_owned(),
+            current_revision_id: Some("revision_test".to_owned()),
+            created_at,
+            updated_at: created_at,
+        };
+
+        let effective = effective_daily_window(date, &profile, Some(&frozen)).unwrap();
+
+        assert_eq!(effective.timezone, "Europe/Stockholm");
+        assert_eq!(effective.start_utc, stockholm.start_utc);
+        assert_eq!(effective.end_utc, stockholm.end_utc);
+        assert_eq!(effective.destination_path, frozen.destination_path);
     }
 
     #[test]
