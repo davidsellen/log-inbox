@@ -437,6 +437,31 @@ impl Store {
             .map_err(Into::into)
     }
 
+    pub fn latest_apply_operation(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+    ) -> Result<Option<ApplyOperation>> {
+        self.connect()?
+            .query_row(
+                r#"SELECT id, workspace_id, local_date, revision_id,
+                          revision_content_hash, destination_path,
+                          expected_old_block_hash, intended_new_block_hash,
+                          recovery_payload, recovery_path, state, failure_reason,
+                          created_at, updated_at, expected_target_exists,
+                          expected_original_content_hash, intended_updated_content_hash,
+                          temporary_name
+                   FROM apply_operations
+                   WHERE workspace_id = ?1 AND local_date = ?2
+                   ORDER BY updated_at DESC, created_at DESC, id DESC
+                   LIMIT 1"#,
+                params![workspace_id, local_date.to_string()],
+                apply_operation_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn list_unfinished_apply_operations(&self, limit: usize) -> Result<Vec<ApplyOperation>> {
         self.list_apply_operations_by_states(
             &[

@@ -160,7 +160,7 @@ test("dashboard failures are visible rather than silent", async ({ page }) => {
   await expect(page.locator("#queue")).toContainText("Dashboard fixture unavailable");
 });
 
-function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = "current" } = {}) {
+function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = "current", applyStatus = null } = {}) {
   return {
     workspace_id: "workspace_fixture",
     local_date: date,
@@ -198,13 +198,15 @@ function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = 
     current_snapshot: { id: "snapshot_1", event_ids: ["evt_1"] },
     current_snapshot_evidence: [{ event_id: "evt_1", position: 0, event_digest: "digest", disposition: null }],
     candidate_freshness: freshness,
-    preview_markdown: "### My notes\n\n- Discussed the trade-off with the team.\n\n### Automated activity\n\n#### Daily workflow\n\n- **Outcome:** Built a predictable Daily review."
+    preview_markdown: "### My notes\n\n- Discussed the trade-off with the team.\n\n### Automated activity\n\n#### Daily workflow\n\n- **Outcome:** Built a predictable Daily review.",
+    apply_status: applyStatus
   };
 }
 
-async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshness = "current", workspaceProfile = undefined } = {}) {
+async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshness = "current", workspaceProfile = undefined, applyStatus = null } = {}) {
   const requests = [];
   let loggedIn = false;
+  let currentApplyStatus = applyStatus;
   let activeProfile = workspaceProfile === undefined ? { id: "workspace_fixture", status: "active", root_binding: "binding_fixture", timezone: "Europe/Stockholm", daily_root: "Work Log", daily_pattern: "{year}/{month_name}/Daily log {month_name} {day}.md", template_path: null, link_style: "markdown", created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z" } : workspaceProfile;
   await page.route("http://daily.log-inbox.test/**", async route => {
     const request = route.request();
@@ -223,12 +225,16 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
       activeProfile = { id: activeProfile?.id || "workspace_fixture", status: "active", root_binding: "binding_fixture", ...saved.settings, created_at: activeProfile?.created_at || "2026-09-01T00:00:00Z", updated_at: "2026-09-09T12:00:00Z" };
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ active_profile: activeProfile, destination_example: "Journal/2026-09-08.md", binding_matches: true, changes_saved: true }) });
     }
-    if (url.pathname.endsWith("/apply-preview") && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ workspace_id: "workspace_fixture", local_date: "2026-09-08", destination_path: "Work Log/2026/Sep/Daily log 2026-09-08.md", revision_id: "revision_1", revision_content_hash: "a".repeat(64), block_id: "day_fixture", will_create_note: false, template_used: null, previous_block: "<!-- log-inbox:daily:day_fixture:begin -->\nOld\n<!-- log-inbox:daily:day_fixture:end -->", next_block: "<!-- log-inbox:daily:day_fixture:begin -->\nReviewed Daily\n<!-- log-inbox:daily:day_fixture:end -->", expected_old_block_hash: "b".repeat(64), intended_new_block_hash: "c".repeat(64), updated_content_hash: "d".repeat(64) }) });
+    if (url.pathname.endsWith("/apply-preview") && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ workspace_id: "workspace_fixture", local_date: "2026-09-08", destination_path: "Work Log/2026/Sep/Daily log 2026-09-08.md", revision_id: "revision_1", revision_content_hash: "a".repeat(64), block_id: "day_fixture", will_create_note: false, template_used: null, previous_block: "<!-- log-inbox:daily:day_fixture:begin -->\nOld\n<!-- log-inbox:daily:day_fixture:end -->", next_block: "<!-- log-inbox:daily:day_fixture:begin -->\nReviewed Daily\n<!-- log-inbox:daily:day_fixture:end -->", expected_old_block_hash: "b".repeat(64), intended_new_block_hash: "c".repeat(64), expected_target_exists: true, expected_original_content_hash: "e".repeat(64), updated_content_hash: "d".repeat(64) }) });
+    if (url.pathname.endsWith("/retry") && request.method() === "POST") {
+      currentApplyStatus = { ...currentApplyStatus, state: "finalized", failure_reason: null, can_retry: false };
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ operation: currentApplyStatus }) });
+    }
     if (url.pathname.endsWith("/apply") && request.method() === "POST") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ operation: { state: "finalized" }, destination_path: request.postDataJSON().destination_path, idempotent: false }) });
     const match = url.pathname.match(/^\/api\/v2\/daily\/(\d{4}-\d{2}-\d{2})$/);
     if (match && request.method() === "GET") {
       if (dailyStatus !== 200) return route.fulfill({ status: dailyStatus, contentType: "application/json", body: JSON.stringify({ error: "Daily fixture unavailable" }) });
-      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dailyResponse(match[1], { origin, freshness })) });
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dailyResponse(match[1], { origin, freshness, applyStatus: currentApplyStatus })) });
     }
     if (url.pathname.endsWith("/candidate") && request.method() === "PUT") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ id: "revision_2" }) });
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({}) });
@@ -288,6 +294,8 @@ test("refocused Daily reviews the exact managed block before Apply", async ({ pa
     destination_path: "Work Log/2026/Sep/Daily log 2026-09-08.md",
     expected_old_block_hash: "b".repeat(64),
     intended_new_block_hash: "c".repeat(64),
+    expected_target_exists: true,
+    expected_original_content_hash: "e".repeat(64),
     expected_updated_content_hash: "d".repeat(64)
   });
   await expect(page.getByRole("status")).toContainText("Applied to Work Log/2026/Sep");
@@ -330,6 +338,20 @@ test("refocused Daily exposes server failures", async ({ page }) => {
   await openDaily(page);
 
   await expect(page.getByRole("status")).toContainText("Daily fixture unavailable");
+});
+
+test("refocused Daily keeps interrupted Apply visible and retryable", async ({ page }) => {
+  const requests = await mockDaily(page, { applyStatus: { id: "apply_fixture", state: "reconciliation_required", failure_reason: "The destination changed during Apply.", can_retry: true } });
+  await openDaily(page);
+
+  await expect(page.getByRole("heading", { name: "Apply needs attention" })).toBeVisible();
+  await expect(page.getByText("The destination changed during Apply.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review Apply" })).toBeDisabled();
+  await page.getByRole("button", { name: "Verify and retry" }).click();
+
+  await expect.poll(() => requests.some(request => request.path.endsWith("/apply/apply_fixture/retry"))).toBe(true);
+  await expect(page.getByRole("status")).toContainText("Apply verified and finalized");
+  await expect(page.getByRole("heading", { name: "Apply needs attention" })).toHaveCount(0);
 });
 
 test("refocused Daily confirms before replacing edits with new evidence", async ({ page }) => {

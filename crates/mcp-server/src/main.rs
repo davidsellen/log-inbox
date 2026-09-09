@@ -522,6 +522,10 @@ fn build_router(state: AppState) -> Router {
             )
             .route("/api/v2/daily/{date}/apply", post(refocus_daily_apply))
             .route(
+                "/api/v2/daily/{date}/apply/{operation_id}/retry",
+                post(refocus_retry_daily_apply),
+            )
+            .route(
                 "/api/v2/daily/{date}/generate",
                 post(refocus_generate_daily),
             )
@@ -962,6 +966,12 @@ async fn refocus_daily_day(
     let preview_markdown = current_content.as_ref().map(|content| {
         llm::render_daily_revision_preview(content, &manual_entries, &current_snapshot_evidence)
     });
+    let apply_status = state
+        .store
+        .latest_apply_operation(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .as_ref()
+        .map(public_apply_operation);
     Ok(Json(json!({
         "workspace_id": profile.id,
         "local_date": local_date,
@@ -981,7 +991,8 @@ async fn refocus_daily_day(
         "current_snapshot": current_snapshot,
         "current_snapshot_evidence": current_snapshot_evidence,
         "candidate_freshness": candidate_freshness,
-        "preview_markdown": preview_markdown
+        "preview_markdown": preview_markdown,
+        "apply_status": apply_status
     })))
 }
 
@@ -1101,8 +1112,56 @@ fn public_apply_operation(operation: &ApplyOperation) -> Value {
         "state": operation.state,
         "failure_reason": operation.failure_reason,
         "created_at": operation.created_at,
-        "updated_at": operation.updated_at
+        "updated_at": operation.updated_at,
+        "can_retry": matches!(operation.state.as_str(), "failed" | "reconciliation_required" | "prepared" | "writing" | "written")
     })
+}
+
+async fn refocus_retry_daily_apply(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((date, operation_id)): AxumPath<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "vault:write", true)?;
+    let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let (profile, workspace) = active_refocus_context(&state)?;
+    let _guard = state
+        .apply_lock
+        .lock()
+        .map_err(|_| ApiError::internal("Daily Apply lock is unavailable"))?;
+    let mut operation = state
+        .store
+        .apply_operation(&operation_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Apply operation was not found"))?;
+    if operation.workspace_id != profile.id || operation.local_date != local_date {
+        return Err(ApiError::not_found("Apply operation was not found"));
+    }
+    if operation.state == "finalized" {
+        return Ok(Json(
+            json!({"operation": public_apply_operation(&operation)}),
+        ));
+    }
+    if matches!(
+        operation.state.as_str(),
+        "failed" | "reconciliation_required"
+    ) {
+        operation = state
+            .store
+            .transition_apply_operation(&operation.id, &operation.state, "prepared", None)
+            .map_err(|error| ApiError::conflict(error.to_string()))?;
+    }
+    recover_daily_apply(&state, &workspace, operation.clone())
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    let operation = state
+        .store
+        .apply_operation(&operation.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::internal("Apply operation disappeared"))?;
+    Ok(Json(json!({
+        "operation": public_apply_operation(&operation)
+    })))
 }
 
 fn apply_operation_id(
@@ -4193,7 +4252,7 @@ mod knowledge_destination_tests {
         .await;
         let settings_read = response_json(settings_read).await;
         let updated = json_response(
-            app,
+            app.clone(),
             "PUT",
             "/api/v2/settings/workspace",
             json!({
@@ -4412,7 +4471,7 @@ mod knowledge_destination_tests {
         externally_edited.extend_from_slice(b"\nUser edit after preview.\n");
         std::fs::write(&target, &externally_edited).unwrap();
         let rejected_apply = json_response(
-            app,
+            app.clone(),
             "POST",
             "/api/v2/daily/2026-09-09/apply",
             json!({
