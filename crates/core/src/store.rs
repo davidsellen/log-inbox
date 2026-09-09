@@ -1074,6 +1074,21 @@ impl Store {
         .map_err(Into::into)
     }
 
+    pub fn latest_migration_operation(
+        &self,
+        migration_name: &str,
+        source_identity: &str,
+    ) -> Result<Option<MigrationJournalEntry>> {
+        self.connect()?
+            .query_row(
+                "SELECT operation_id, migration_name, source_identity, status, details_json, started_at, completed_at FROM migration_journal WHERE migration_name = ?1 AND source_identity = ?2 ORDER BY started_at DESC LIMIT 1",
+                params![migration_name, source_identity],
+                migration_journal_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn insert_event(&self, input: LogEventInput) -> Result<StoredLogEvent> {
         validate_event(&input)?;
 

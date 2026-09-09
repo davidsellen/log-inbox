@@ -34,6 +34,8 @@ pub(crate) struct CutoverReport {
     pub workspace_id: String,
     pub root_binding: String,
     pub ready: bool,
+    pub cutover_status: String,
+    pub completed_operation_id: Option<String>,
     pub items: Vec<CutoverItem>,
     pub blockers: Vec<String>,
     pub warnings: Vec<String>,
@@ -118,13 +120,33 @@ pub(crate) fn inventory_cutover(
         blockers: &blockers,
         warnings: &warnings,
     };
-    let report_digest = sha256(&serde_json::to_vec(&body)?);
+    let computed_digest = sha256(&serde_json::to_vec(&body)?);
+    let source_identity = format!("legacy-runtime:{}", workspace.root_binding());
+    let existing = store.latest_migration_operation("refocus-cutover", &source_identity)?;
+    let operation_id = existing
+        .as_ref()
+        .map(|operation| operation.operation_id.clone())
+        .unwrap_or_else(|| format!("refocus_{}", &computed_digest[..24]));
+    let report_digest = existing
+        .as_ref()
+        .and_then(|operation| operation.details["report_digest"].as_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or(computed_digest);
+    let cutover_status = existing
+        .as_ref()
+        .map(|operation| operation.status.clone())
+        .unwrap_or_else(|| "not_started".to_owned());
     Ok(CutoverReport {
-        operation_id: format!("refocus_{}", &report_digest[..24]),
+        operation_id,
         report_digest,
         workspace_id: profile.id.clone(),
         root_binding: workspace.root_binding().to_owned(),
         ready: blockers.is_empty(),
+        cutover_status,
+        completed_operation_id: existing
+            .as_ref()
+            .filter(|operation| operation.status == "completed")
+            .map(|operation| operation.operation_id.clone()),
         items,
         blockers,
         warnings,
