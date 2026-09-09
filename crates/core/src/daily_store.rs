@@ -245,6 +245,48 @@ impl Store {
         origin: &str,
         content: &Value,
     ) -> Result<ProposalRevision> {
+        self.create_proposal_revision_internal(
+            workspace_id,
+            local_date,
+            snapshot_id,
+            origin,
+            content,
+            None,
+        )
+    }
+
+    pub fn create_proposal_revision_if_current(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        snapshot_id: Option<&str>,
+        origin: &str,
+        content: &Value,
+        expected_current_revision_id: &str,
+    ) -> Result<ProposalRevision> {
+        anyhow::ensure!(
+            !expected_current_revision_id.trim().is_empty(),
+            "expected current revision ID is required"
+        );
+        self.create_proposal_revision_internal(
+            workspace_id,
+            local_date,
+            snapshot_id,
+            origin,
+            content,
+            Some(expected_current_revision_id),
+        )
+    }
+
+    fn create_proposal_revision_internal(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        snapshot_id: Option<&str>,
+        origin: &str,
+        content: &Value,
+        expected_current_revision_id: Option<&str>,
+    ) -> Result<ProposalRevision> {
         anyhow::ensure!(
             matches!(
                 origin,
@@ -281,6 +323,20 @@ impl Store {
         let content_hash = digest(content_json.as_bytes());
         let mut conn = self.connect()?;
         let transaction = conn.transaction()?;
+        if let Some(expected) = expected_current_revision_id {
+            let current: Option<String> = transaction
+                .query_row(
+                    "SELECT current_revision_id FROM daily_days WHERE workspace_id = ?1 AND local_date = ?2",
+                    params![workspace_id, local_date.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            anyhow::ensure!(
+                current.as_deref() == Some(expected),
+                "current proposal revision changed"
+            );
+        }
         let revision_number: u64 = transaction.query_row(
             "SELECT COALESCE(MAX(revision_number), 0) + 1 FROM proposal_revisions WHERE workspace_id = ?1 AND local_date = ?2",
             params![workspace_id, local_date.to_string()],
@@ -920,7 +976,7 @@ mod tests {
             )
             .expect("first revision stores");
         let edited = store
-            .create_proposal_revision(
+            .create_proposal_revision_if_current(
                 &profile.id,
                 date,
                 Some(&snapshot.id),
@@ -938,8 +994,23 @@ mod tests {
                         }]
                     }]
                 }),
+                &first_revision.id,
             )
             .expect("edited revision stores");
+        assert!(
+            store
+                .create_proposal_revision_if_current(
+                    &profile.id,
+                    date,
+                    Some(&snapshot.id),
+                    "structured_edit",
+                    &edited.content,
+                    &first_revision.id,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("current proposal revision changed")
+        );
         assert_eq!(first_revision.revision_number, 2);
         assert_eq!(edited.revision_number, 3);
         assert_eq!(
