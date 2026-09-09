@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
+use std::path::{Component, Path};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedDay {
@@ -32,6 +33,51 @@ pub fn resolve_day(local_date: NaiveDate, timezone: &str) -> Result<ResolvedDay>
         start_utc,
         end_utc,
     })
+}
+
+pub fn render_daily_path(root: &str, pattern: &str, local_date: NaiveDate) -> Result<String> {
+    anyhow::ensure!(!pattern.trim().is_empty(), "daily pattern is required");
+    let escaped_open = "\u{E000}";
+    let escaped_close = "\u{E001}";
+    let mut rendered = pattern
+        .replace("{{", escaped_open)
+        .replace("}}", escaped_close);
+    let replacements = [
+        ("{year}", local_date.format("%Y").to_string()),
+        ("{month}", local_date.format("%m").to_string()),
+        ("{month_name}", local_date.format("%b").to_string()),
+        ("{day}", local_date.day().to_string()),
+        ("{date}", local_date.format("%Y-%m-%d").to_string()),
+    ];
+    for (token, value) in replacements {
+        rendered = rendered.replace(token, &value);
+    }
+    anyhow::ensure!(
+        !rendered.contains('{') && !rendered.contains('}'),
+        "daily pattern contains an unsupported token"
+    );
+    rendered = rendered
+        .replace(escaped_open, "{")
+        .replace(escaped_close, "}");
+    let combined = [root.trim_matches('/'), rendered.trim_matches('/')]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    let path = Path::new(&combined);
+    anyhow::ensure!(
+        !combined.is_empty()
+            && !path.is_absolute()
+            && path
+                .components()
+                .all(|component| matches!(component, Component::Normal(_))),
+        "rendered daily path must remain inside the workspace"
+    );
+    anyhow::ensure!(
+        path.extension().and_then(|value| value.to_str()) == Some("md"),
+        "rendered daily path must end in .md"
+    );
+    Ok(combined)
 }
 
 fn first_valid_instant(date: NaiveDate, timezone: Tz) -> Result<DateTime<Utc>> {
@@ -92,5 +138,25 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn renders_a_bounded_daily_markdown_path() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 7).expect("date");
+        assert_eq!(
+            render_daily_path(
+                "Work Log",
+                "{year}/{month_name}/Daily log {month_name} {day}.md",
+                date
+            )
+            .expect("path renders"),
+            "Work Log/2026/Sep/Daily log Sep 7.md"
+        );
+        assert_eq!(
+            render_daily_path("", "Literal {{date}} {date}.md", date).expect("escape renders"),
+            "Literal {date} 2026-09-07.md"
+        );
+        assert!(render_daily_path("", "../{date}.md", date).is_err());
+        assert!(render_daily_path("", "{quarter}.md", date).is_err());
     }
 }

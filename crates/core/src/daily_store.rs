@@ -64,6 +64,20 @@ impl Store {
         .map_err(Into::into)
     }
 
+    pub fn current_proposal_revision(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+    ) -> Result<Option<ProposalRevision>> {
+        let Some(day) = self.daily_day(workspace_id, local_date)? else {
+            return Ok(None);
+        };
+        let Some(revision_id) = day.current_revision_id else {
+            return Ok(None);
+        };
+        self.proposal_revision(&revision_id)
+    }
+
     pub fn create_evidence_snapshot(
         &self,
         workspace_id: &str,

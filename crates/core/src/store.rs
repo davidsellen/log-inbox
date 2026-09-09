@@ -1,5 +1,6 @@
 use crate::{
     auth::{SessionCredentials, normalize_scopes, token_digest, token_matches},
+    daily::render_daily_path,
     models::{
         BackupVerification, DailyConsolidationJob, DashboardSession, IgnoredLinkIdentity,
         LogEventInput, LogQuery, LogQueryResult, MarkReviewedResult, MigrationJournalEntry,
@@ -1415,6 +1416,11 @@ fn validate_workspace_profile(
         .with_context(|| format!("invalid IANA timezone: {timezone}"))?;
     validate_relative_workspace_path(daily_root, true)?;
     validate_relative_workspace_path(daily_pattern, false)?;
+    render_daily_path(
+        daily_root,
+        daily_pattern,
+        chrono::NaiveDate::from_ymd_opt(2000, 1, 2).expect("validation date is valid"),
+    )?;
     if let Some(path) = template_path {
         validate_relative_workspace_path(path, false)?;
     }
