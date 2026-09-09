@@ -5,6 +5,6 @@ services:
       LOG_INBOX_MIGRATION_CONTEXT_FILE: /migration/context/vault-context.json
       LOG_INBOX_MIGRATION_PRODUCT_INDEX_FILE: /migration/context/product-navigation.md
     volumes:
-      - "${LOG_INBOX_PROPOSAL_HOST_DIR:-./data/vault-inbox}:/migration/proposals"
-      - "${LOG_INBOX_VAULT_CONTEXT_HOST_FILE:-./config/vault-context.json}:/migration/context/vault-context.json:ro"
-      - "${LOG_INBOX_PRODUCT_INDEX_HOST_FILE:-./config/product-navigation.md}:/migration/context/product-navigation.md:ro"
+      - "${LOG_INBOX_PROPOSAL_HOST_DIR:?Set the legacy proposal directory}:/migration/proposals"
+      - "${LOG_INBOX_VAULT_CONTEXT_HOST_FILE:?Set the legacy context file}:/migration/context/vault-context.json:ro"
+      - "${LOG_INBOX_PRODUCT_INDEX_HOST_FILE:?Set the legacy product index file}:/migration/context/product-navigation.md:ro"

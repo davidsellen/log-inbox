@@ -1,53 +1,22 @@
-# Markdown Vault Writing Policy
+# Markdown Workspace Policy
 
-The managed knowledge target is a Markdown vault. Obsidian is only one reader/editor for those files. The vault is for durable conclusions, not raw logs.
+The workspace contains user-owned Markdown. Log Inbox owns only the explicitly marked block for one reviewed Daily record.
 
-## Daily Notes
+## Allowed writes
 
-Write a daily-note section only when log review produces a result worth retaining:
+- Resolve the destination from the reviewed workspace profile and frozen day settings.
+- Preview the exact old and new managed block before Apply.
+- Create missing date-derived folders and a note from the frozen reviewed template, or a minimal note when no template is configured.
+- Replace only the single valid Log Inbox block while preserving frontmatter, line endings, permissions, and all surrounding content.
+- Journal the exact approved revision, destination, hashes, temporary identity, and recovery material before mutation.
 
-- confirmed root cause;
-- durable workaround;
-- deployment or environment issue;
-- recurring error pattern;
-- handoff-worthy blocker.
+## Forbidden behavior
 
-## Product Notes
+- No raw log dumps, proposal inbox files, automatic Apply, arbitrary note edits, moves, renames, or deletes.
+- No path traversal, symlink following, protected editor/Git locations, or destinations outside the inspected workspace.
+- No model-selected destination or model-authorized link.
+- No silent overwrite when the file or managed block differs from the reviewed preview.
 
-Update a product or feature note when the log finding changes durable knowledge about setup, behavior, debugging, or operational caveats.
+Canonical product/engineering context is optional and must come from explicit workspace-scoped mappings or later reviewed Knowledge collections. Repository branding alone never establishes a product identity.
 
-## LLM-Assisted Updates
-
-LLM output should be treated as a proposed patch, not a fact source.
-
-Before applying Markdown to the vault, the workflow should:
-
-- read the target note and nearby product index;
-- map repository, source, component, and metadata to canonical notes;
-- summarize only bounded event windows;
-- include event IDs, time ranges, PRs, builds, commits, or source paths that support the summary;
-- avoid writing uncertain conclusions without a qualifier or follow-up;
-- require review for broad product-note changes, secrets, personal data, destructive edits, or unclear ownership.
-
-Automatic writes are acceptable only for narrow daily-log summaries when the source window is bounded, redacted, and clearly connected to the active workstream.
-
-Prefer writing immutable proposal files into a vault inbox over appending directly to a daily note. This lets multiple producers work concurrently without sharing a file. A single consolidator applies reviewed proposals using a temporary-file rename and an idempotency marker, acknowledges the evidence in SQLite, then deletes the consumed proposal.
-
-Canonical product links should come from a user-selected Markdown navigation file or explicit configuration. Never infer a product name merely from repository branding.
-
-## Format
-
-Daily entries should name:
-
-- product or feature note;
-- source system;
-- time window;
-- conclusion;
-- validation or follow-up state.
-
-Avoid:
-
-- raw log dumps;
-- long stack traces;
-- one entry per event;
-- storing secrets or personal data.
+Atomic replacement and optimistic hashes reduce races but cannot guarantee conflict-free writes against an unrelated editor changing the file at the same instant. Conflicts stay visible and require reconciliation.

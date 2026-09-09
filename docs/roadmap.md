@@ -2,7 +2,7 @@
 
 Status: active implementation. Updated 2026-09-09. Baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
 
-This roadmap defines the target direction and delivery order. It does not claim these milestones are implemented or tested. The [README](../README.md) documents the pre-refocus runtime; existing specs are implementation background until revised with their milestone. Where older specs propose automatic Apply, browser filesystem workflows, or pending files in the workspace, this roadmap supersedes that future direction—not the description of what currently runs.
+This roadmap defines the target direction, delivered foundation, and remaining delivery order. The [README](../README.md) and runtime specs describe the active Daily release; milestone checkboxes record implemented and pending work.
 
 ## Product Promise
 
@@ -38,7 +38,7 @@ The baseline already includes repository/work-item or PR grouping, manual/automa
 
 Correct the split mounted read/write paths, the disconnected Structure destinations, browser-specific routing, global mappings/ignored identities, path-derived workspace identity, and per-task staging overlap. Replace valid-JSON/schema-invalid daily fallback with a visible failure; invalid JSON already fails in the inspected implementation. Existing fallback tests must change with the contract.
 
-Source anchors: [grouping and model output](../crates/mcp-server/src/llm.rs), [daily jobs](../crates/mcp-server/src/daily_consolidation.rs), [storage](../crates/core/src/store.rs), [writer](../crates/mcp-server/src/proposal_inbox.rs), [HTTP/MCP routing](../crates/mcp-server/src/main.rs), and [Compose](../docker-compose.yml). Current test pass status is not asserted by this roadmap.
+Source anchors: [grouping and model output](../crates/mcp-server/src/llm.rs), [storage](../crates/core/src/store.rs), [Daily writer](../crates/mcp-server/src/daily_writer.rs), [HTTP routing](../crates/mcp-server/src/main.rs), and [Compose](../docker-compose.yml).
 
 ## Contracts to Settle Before Implementation
 
@@ -153,8 +153,8 @@ Exit gate: representative days can be reviewed accurately without Knowledge setu
 - [x] Implement block diffs, conflict reconciliation, path safety, idempotency, recovery copies and Apply journaling.
 - [x] Implement the migration protocol below, with dry-run reporting and source-preserving failure behavior.
 - [x] Replace Structure destinations with the scoped context/mapping foundation; do not require a rich retrieval UI yet.
-- [ ] Remove browser-vault/browser-Apply APIs, IndexedDB code, per-task staging, obsolete semantic-structure APIs, separate proposal/daily/context/index mounts, and superseded configuration.
-- [ ] Revise runtime docs/specs/examples together; remove obsolete styles and routes without keeping legacy runtime aliases.
+- [x] Remove browser-vault/browser-Apply APIs, IndexedDB code, per-task staging, obsolete semantic-structure APIs, separate proposal/daily/context/index mounts, and superseded configuration.
+- [x] Revise runtime docs/specs/examples together; remove obsolete styles and routes without keeping legacy runtime aliases.
 - [x] Make dashboard Apply the sole initial write interface; remove or disable legacy MCP Apply until its replacement is separately gated.
 
 Exit gate: recovery, idempotency, preserved-content, authorization and containment tests pass on the declared supported storage; Compose/docs describe only the new contract. This is the first usable refocused release.

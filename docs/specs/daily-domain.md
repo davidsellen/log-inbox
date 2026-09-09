@@ -81,7 +81,7 @@ Read-only health and the authenticated dashboard shell do not imply mutation acc
 
 ## Cutover Boundary
 
-The new schema and read-only Daily preview may be built behind a disabled feature gate while the legacy runtime remains available. Before enabling any new Markdown write:
+The coordinated cutover is delivered. Before the Daily writer became the only runtime writer, the migration performed these reviewed steps:
 
 1. Quiesce legacy per-task and daily workers.
 2. Back up and migrate app data with an idempotent journal.
@@ -89,4 +89,4 @@ The new schema and read-only Daily preview may be built behind a disabled featur
 4. Enable the authenticated new writer.
 5. Remove legacy writer routes, browser filesystem state, proposal files, and split write mounts.
 
-Failure before step 4 leaves the legacy runtime and source data intact. No compatibility alias may silently route a legacy write through the new writer.
+The ordinary runtime now contains no legacy routes, workers, browser filesystem state, proposal files, or split mounts. Remaining legacy database records and optional external source files are migration inputs only. A failed or interrupted cutover preserves them and its journal; no compatibility alias can route a legacy write through the Daily writer.

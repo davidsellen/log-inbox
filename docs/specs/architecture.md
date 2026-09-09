@@ -1,74 +1,37 @@
 # Architecture
 
-## Shape
-
 ```text
-host / VM / device / script
-        |
-        | HTTP JSON, JSONL batch, or file forwarder
-        v
-collector container
-        |
-        | append-only durable storage
-        v
-SQLite or JSONL volume
-        |
-        | bounded read/search tools
-        v
-MCP server
-        |
-        | agent tool calls and optional LLM consolidation
-        v
-reviewed Markdown summaries
+trusted producers --HTTP ingest--> collector --SQLite--> Daily service/dashboard
+                                                        | reviewed Apply
+                                                        v
+                                              one Markdown workspace
 ```
 
 ## Responsibilities
 
 ### Collector
 
-- Accept log events from trusted local producers.
-- Normalize timestamps, source names, levels, message text, and metadata.
-- Assign stable event IDs.
-- Persist events before responding success.
-- Avoid summarization or vault writes.
+- Authenticate producers, redact known secret shapes, validate bounds, and durably store the original event and receipt time.
+- Never call the model or access the Markdown workspace.
 
-### Store
+### Shared store
 
-- Keep raw events for short retention.
-- Support source/time/level/query filters.
-- Track reviewed or exported state.
-- Be easy to back up or delete.
+- Hold events, workspace profiles, manual entries, evidence snapshots and decisions, immutable candidate revisions, sessions, migration journals, and Apply recovery state.
+- Keep app state and secrets outside the Markdown workspace.
 
-### MCP Server
+### Daily service
 
-- Expose narrow tools for an agent.
-- Return bounded results with stable IDs.
-- Support search and time-window review.
-- Mark reviewed events after the agent has handled them.
-- Serve the local proposal reader and agent-preference dashboard on the same private port.
+- Authenticate the owner and enforce exact Host, Origin, CSRF, and scope checks.
+- Resolve calendar days and Markdown destinations server-side.
+- Generate and validate structured candidates through one configured model connection.
+- Render exact previews and perform journaled managed-block writes through the inspected workspace capability.
+- Recover interrupted Apply operations without duplicating content.
 
-### Local Dashboard
+### Browser dashboard
 
-- Read pending proposal files through structured server responses.
-- Apply one reviewed proposal through the same serialized path used by MCP.
-- Store non-secret display and instruction preferences in SQLite.
-- Generate copy-ready agent instructions without persisting the API key.
-- Build a bounded whole-day consolidation proposal and return the stored result for preview.
-- Persist consolidation jobs and frozen evidence snapshots so work survives refresh and service restart.
-- Support cooperative cancellation while the worker awaits the LLM.
-- Consume explicitly superseded proposals only after the consolidated proposal is applied.
+- Review one day, add trusted manual notes, edit structured facts, decide evidence, and approve the exact Apply plan.
+- Never receive ingest or model credentials and never mount/browse a client-side folder.
 
-### Agent
+## Deployment boundary
 
-- Send structured lifecycle events, including a daily-note-ready terminal outcome, through ingestion.
-- Preserve host, repository, branch, module, validation, and durable-link context as metadata.
-- Do not write work-log Markdown directly; leave proposal generation, consolidation, review, and application to Log Inbox.
-
-### LLM Consolidation
-
-- Runs after logs are grouped and bounded by source/time/correlation.
-- May run automatically after a configurable inactivity period.
-- Produces proposed summaries, canonical note targets, and Markdown patches.
-- Writes immutable pending files into a vault-mounted inbox and records staged evidence IDs.
-- Must cite event IDs, source windows, and external links used for the conclusion.
-- Should be review-first by default; automatic vault writes are only safe for low-risk local notes with strict policies.
+The ordinary dashboard container receives only the shared app-data volume and one read/write Markdown workspace mount. Legacy proposal/context mounts are available solely through the reviewed migration override. The current release has no MCP route, scheduler, or general knowledge browser; those capabilities follow separate roadmap gates.

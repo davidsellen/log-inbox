@@ -1,65 +1,38 @@
 # Docker Deployment
 
-Docker Compose is the default way to run the system locally.
+Docker Compose runs the local stack.
 
 ## Services
 
-### collector
+- `collector` binds to `127.0.0.1:8787` by default, accepts authenticated events, and writes only to the shared app-data volume.
+- `mcp` is the historical service name for the Daily web service. It binds to `127.0.0.1:8788`, reads shared app data, and mounts exactly one Markdown workspace at `LOG_INBOX_WORKSPACE_DIR`. It currently exposes the dashboard and v2 HTTP API, not an MCP route.
+- `ollama` is private to the Compose network and stores models in `ollama-data`.
+- `ollama-pull` downloads the configured model before the Daily service starts.
 
-- Binds to `127.0.0.1:8787` by default.
-- Receives HTTP log events.
-- Writes to `/data`.
-- Should be reachable from local VMs through an explicitly configured host address or port forward.
+## Ordinary volumes
 
-### mcp
+- `log-inbox-data`: SQLite and application state.
+- `ollama-data`: local model files.
+- `LOG_INBOX_WORKSPACE_HOST_DIR` mounted at `LOG_INBOX_WORKSPACE_DIR`: the existing Markdown workspace used only by reviewed Apply.
 
-- Binds to `127.0.0.1:8788` by default.
-- Reads `/data` and records proposal/review state.
-- Exposes MCP tools for an agent.
-- Serves the local dashboard at `/` and dashboard JSON under `/api`.
-- Mounts `LOG_INBOX_PROPOSAL_HOST_DIR` at `LOG_INBOX_PROPOSAL_DIR` for atomic Markdown delivery.
-- Runs automatic staging when `LOG_INBOX_AUTO_STAGE_INTERVAL_SECONDS` is greater than zero.
-- Mounts the single refocused Markdown workspace read/write at `LOG_INBOX_WORKSPACE_DIR`; set `LOG_INBOX_WORKSPACE_HOST_DIR` to the existing host vault before enabling refocus.
+The browser cannot select a directory from another machine. Set the host workspace path in `.env`, then review its timezone and Daily convention in Settings.
 
-### ollama
-
-- Runs local model inference inside the Compose network.
-- Does not publish port `11434` to the host.
-- Stores downloaded models in `ollama-data`.
-- Defaults to the text-only `granite3.3:2b` model for bounded log consolidation.
-
-### ollama-pull
-
-- Runs once after Ollama becomes healthy.
-- Pulls `LOG_INBOX_LLM_MODEL` when it is not already present.
-- Must complete successfully before the MCP service starts.
-
-## Volumes
-
-- `log-inbox-data` stores SQLite/JSONL data.
-- `ollama-data` stores local model files.
-- `LOG_INBOX_PROPOSAL_HOST_DIR` is a host bind mount, normally a `pending/` folder inside any Markdown vault.
-- `LOG_INBOX_VAULT_CONTEXT_HOST_FILE` is a read-only user configuration file for daily-note formatting and product-note aliases.
-- `LOG_INBOX_VAULT_HOST_DIR` mounts the user's Markdown vault read-only for dashboard catalog discovery. `LOG_INBOX_VAULT_EXCLUDE_PREFIXES` omits generated, daily, or editor-owned folders from canonical targets.
-- `LOG_INBOX_WORKSPACE_HOST_DIR` is the single refocused workspace mount. The browser reviews its timezone and Daily convention, but cannot select a folder from another machine or outside the container's mounts.
-- The dashboard's browser-folder mode requires no vault mount. Mounted discovery remains the advanced option for unsupported browsers and unattended operation.
-- `LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS` bounds active model HTTP work and defaults to 300 seconds; time waiting behind another model request is excluded.
-
-## VM Access
-
-For local virtual machines, prefer one of:
-
-- VM-to-host NAT gateway address, when stable.
-- Explicit port forward from host to collector.
-- Shared folder file drop plus a host-side forwarder.
-
-Do not expose the collector on all interfaces unless the network is trusted and API keys are configured.
-
-## First Run
+## First run
 
 ```bash
 cp .env.example .env
+# Set LOG_INBOX_OWNER_SECRET and LOG_INBOX_WORKSPACE_HOST_DIR.
 docker compose up --build
 ```
 
-The first run downloads the configured local model and can take several minutes. Later starts reuse the model volume.
+The first run may take several minutes while the model downloads. Services publish to loopback by default; use an authenticated secure route for nonlocal access.
+
+## Legacy migration
+
+Only an older installation with proposal/context files should use:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.migrate.yml up --build
+```
+
+The override mounts explicitly configured legacy sources under `/migration`. Review and commit the migration in Settings, then return to ordinary Compose. Those mounts are never document destinations or runtime fallbacks.

@@ -29,11 +29,11 @@ If logs must be accepted from another device:
 - record source identity separately from caller IP;
 - avoid public internet exposure for the first version.
 
-## Refocused dashboard authentication
+## Dashboard authentication
 
-The refocused API is feature-gated and refuses to start when enabled without an owner secret of at least 20 bytes. Login rotates the secret into an Argon2 verifier and issues independently generated session and CSRF credentials. Only credential digests are stored. Sessions carry explicit scopes, have 30-minute idle and eight-hour absolute expiry, and are revoked when the owner secret changes.
+The Daily service refuses to start without an owner secret of at least 20 bytes. Login stores an Argon2 verifier and issues independently generated session and CSRF credentials. Only credential digests are stored. Sessions carry explicit scopes, have 30-minute idle and eight-hour absolute expiry, and are revoked when the owner secret changes.
 
-Allowed Host and Origin values are exact configuration, not suffix matches. Login and logout require both; logout additionally requires the session CSRF token. The feature remains disabled by default until the refocused dashboard and writer are ready for coordinated cutover.
+Allowed Host and Origin values are exact configuration, not suffix matches. Login and logout require both; logout additionally requires the session CSRF token. Secret replacement requires the explicit rotation setting.
 
 ## Vault Safety
 

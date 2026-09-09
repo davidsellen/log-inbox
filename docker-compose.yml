@@ -49,7 +49,6 @@ services:
       - path: .env
         required: false
     environment:
-      LOG_INBOX_REFOCUS_ENABLED: "${LOG_INBOX_REFOCUS_ENABLED:-1}"
       LOG_INBOX_LLM_BASE_URL: "${LOG_INBOX_LLM_BASE_URL:-http://ollama:11434/v1}"
       LOG_INBOX_LLM_MODEL: "${LOG_INBOX_LLM_MODEL:-granite3.3:2b}"
       LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS: "${LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS:-300}"

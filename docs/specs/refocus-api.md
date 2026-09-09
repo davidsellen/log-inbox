@@ -1,10 +1,10 @@
 # Refocused Dashboard API
 
-Status: feature-gated M1 interface. Set `LOG_INBOX_REFOCUS_ENABLED=1` only for development until the coordinated writer cutover is complete.
+Status: active Daily interface.
 
 All routes use exact configured Host/Origin boundaries. Error responses have `{ "error": "..." }`.
 
-Refocused and legacy routes are mutually exclusive. Enabling refocus removes the legacy dashboard, browser-vault APIs, proposal/consolidation writers, and `/mcp` route from the router and does not start legacy staging/consolidation workers. This prevents an unauthenticated legacy path from bypassing the protected v2 workflow. Health and static root assets remain available.
+The server exposes only the authenticated v2 Daily/settings/migration routes, health endpoint, and static root assets. Removed browser-vault, proposal/consolidation, and `/mcp` routes have no runtime aliases.
 
 ## Authentication
 
