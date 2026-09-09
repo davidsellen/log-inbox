@@ -122,6 +122,47 @@
       ],
       "expected_daily_prompt_event_ids": ["evt_task", "evt_session"],
       "target_contract_note": "The replacement groups by repository plus work item, then PR, then task or session, without project-wide fallback."
+    },
+    {
+      "name": "missing repositories and URL query numbers cannot collide",
+      "events": [
+        {
+          "id": "evt_fedora_work_item",
+          "timestamp": "2026-09-07T15:00:00Z",
+          "received_at": "2026-09-07T15:00:01Z",
+          "source": "codex/fedora",
+          "message": "Completed work-item follow-up.",
+          "metadata": {
+            "work_item": "ADO 57950"
+          },
+          "expected_group_key": "source:codex%2Ffedora|work-item:57950"
+        },
+        {
+          "id": "evt_windows_work_item",
+          "timestamp": "2026-09-07T15:01:00Z",
+          "received_at": "2026-09-07T15:01:01Z",
+          "source": "codex/windows",
+          "message": "Completed unrelated work with the same external number.",
+          "metadata": {
+            "work_item": "ADO 57950"
+          },
+          "expected_group_key": "source:codex%2Fwindows|work-item:57950"
+        },
+        {
+          "id": "evt_pr_url",
+          "timestamp": "2026-09-07T15:02:00Z",
+          "received_at": "2026-09-07T15:02:01Z",
+          "source": "codex/fedora",
+          "message": "Validated the pull request.",
+          "metadata": {
+            "repo": "SweetOne",
+            "pull_request": "https://dev.azure.com/org/project/_git/repo/pullrequest/9374?api-version=7.1"
+          },
+          "expected_group_key": "repo:sweetone|pull-request:9374"
+        }
+      ],
+      "expected_daily_prompt_event_ids": ["evt_fedora_work_item", "evt_windows_work_item", "evt_pr_url"],
+      "target_contract_note": "Missing repositories stay namespaced by source, and reference parsing uses the URL path rather than unrelated query-string digits."
     }
   ]
 }

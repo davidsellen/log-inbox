@@ -138,7 +138,7 @@ Exit gate: contracts and fixtures are reviewable, the backup can be restored, an
 
 - [x] Develop the replacement behind a disabled feature gate. Its preview may read legacy evidence, but it cannot mutate review state or Markdown until M0c is complete.
 - [x] Implement server-authoritative date navigation and one current candidate with immutable snapshots/revisions.
-- [ ] Tighten grouping/deduplication and preserve unique decision/validation evidence.
+- [x] Tighten grouping/deduplication and preserve unique decision/validation evidence.
 - [x] Implement strict structured generation, adaptive fields, evidence coverage and explicit failures without raw fallback.
 - [x] Keep manual entries separate; add structured editing, scoped omission/reopen, references and final preview.
 - [x] Preserve edited drafts and require explicit confirmation before regeneration replaces them. Advanced Markdown remains unshipped rather than adding a detached editing mode prematurely.
@@ -148,7 +148,7 @@ Exit gate: representative days can be reviewed accurately without Knowledge setu
 
 ### M2 — Safe Apply and Coordinated Cutover
 
-- [ ] Enforce the M0c authentication, CSRF and scoped sensitive-access foundation for every new mutation and write path.
+- [x] Enforce the M0c authentication, CSRF and scoped sensitive-access foundation for every new mutation and write path; refocused mode excludes legacy routes and workers rather than exposing a parallel bypass.
 - [ ] Resolve all reads/writes from one stable workspace profile and reviewed daily convention/template.
 - [ ] Implement block diffs, conflict reconciliation, path safety, idempotency, recovery copies and Apply journaling.
 - [ ] Implement the migration protocol below, with dry-run reporting and source-preserving failure behavior.

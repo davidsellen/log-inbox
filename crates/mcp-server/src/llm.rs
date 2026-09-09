@@ -38,6 +38,10 @@ const CONTEXT_METADATA_KEYS: &[&str] = &[
     "changed_paths",
     "tests",
     "validation",
+    "decision",
+    "trade_off",
+    "blocker",
+    "follow_up",
     "duration_ms",
     "activity",
     "sender",
@@ -149,8 +153,9 @@ pub fn parse_strict_daily_draft(
     content: &str,
     expected_event_ids: &[String],
 ) -> Result<StructuredDailyDraft, String> {
-    let draft: StructuredDailyDraft = serde_json::from_str(content)
+    let mut draft: StructuredDailyDraft = serde_json::from_str(content)
         .map_err(|error| format!("LLM daily draft did not match the structured schema: {error}"))?;
+    deduplicate_daily_facts(&mut draft);
     if draft.workstreams.is_empty() {
         return Err("LLM daily draft must contain at least one workstream".to_owned());
     }
@@ -199,7 +204,6 @@ pub fn parse_strict_daily_draft(
             .iter()
             .map(String::as_str)
             .collect::<BTreeSet<_>>();
-        let mut fact_evidence = BTreeSet::new();
         for fact in facts {
             if fact.text.trim().is_empty() || fact.evidence_event_ids.is_empty() {
                 return Err(format!(
@@ -214,14 +218,7 @@ pub fn parse_strict_daily_draft(
                         workstream.id
                     ));
                 }
-                fact_evidence.insert(event_id.as_str());
             }
-        }
-        if fact_evidence != workstream_evidence {
-            return Err(format!(
-                "workstream {} contains evidence that supports no factual field",
-                workstream.id
-            ));
         }
         for event_id in &workstream.evidence_event_ids {
             if !expected.contains(event_id) {
@@ -245,6 +242,49 @@ pub fn parse_strict_daily_draft(
         ));
     }
     Ok(draft)
+}
+
+fn deduplicate_daily_facts(draft: &mut StructuredDailyDraft) {
+    for workstream in &mut draft.workstreams {
+        for facts in [
+            &mut workstream.outcome,
+            &mut workstream.decision,
+            &mut workstream.trade_off,
+            &mut workstream.validation,
+            &mut workstream.blocker,
+            &mut workstream.follow_up,
+        ] {
+            deduplicate_fact_field(facts);
+        }
+    }
+}
+
+fn deduplicate_fact_field(facts: &mut Vec<StructuredFact>) {
+    let mut reduced = Vec::<StructuredFact>::new();
+    let mut positions = BTreeMap::<String, usize>::new();
+    for mut fact in facts.drain(..) {
+        let key = fact
+            .text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        let mut seen = HashSet::new();
+        fact.evidence_event_ids
+            .retain(|event_id| seen.insert(event_id.clone()));
+        if let Some(position) = positions.get(&key).copied() {
+            let existing = &mut reduced[position].evidence_event_ids;
+            for event_id in fact.evidence_event_ids {
+                if !existing.contains(&event_id) {
+                    existing.push(event_id);
+                }
+            }
+        } else {
+            positions.insert(key, reduced.len());
+            reduced.push(fact);
+        }
+    }
+    *facts = reduced;
 }
 
 #[derive(Debug, Deserialize)]
@@ -521,7 +561,7 @@ fn build_prompt(
   }],
   "open_questions": []
 }"#,
-            "- Include exactly one workstream for every supplied group_id.\n- Copy each group_id into id exactly and assign every supplied event ID to that group.\n- Every event ID must appear exactly once at workstream level and support at least one factual item; never invent an ID.\n- Every factual item has exactly text and evidence_event_ids. Use the adaptive factual fields and omit unsupported facts. Arrays may be empty, but each workstream needs at least one factual item.\n- Merge repetitive lifecycle transport while retaining distinct outcomes, decisions, trade-offs, validation, blockers, and follow-up.\n- Do not choose links, references, or write Markdown; the server renders reviewed Markdown.",
+            "- Include exactly one workstream for every supplied group_id.\n- Copy each group_id into id exactly and assign every supplied event ID to that group; never invent an ID.\n- Every factual item has exactly text and evidence_event_ids. Transport-only lifecycle events remain represented at workstream level but do not need a boilerplate factual item.\n- Use the adaptive factual fields and omit unsupported facts. Arrays may be empty, but each workstream needs at least one factual item.\n- Merge repetitive lifecycle facts while retaining distinct outcomes, decisions, trade-offs, validation, blockers, and follow-up.\n- Earlier events carrying decision metadata must support a Decision fact; events carrying tests or validation metadata must support a Validation fact.\n- Do not choose links, references, or write Markdown; the server renders reviewed Markdown.",
         )
     } else {
         (
@@ -732,6 +772,7 @@ fn parse_proposal(
             .collect::<Vec<_>>();
         let draft = parse_strict_daily_draft(content, &expected_event_ids)?;
         validate_daily_workstream_groups(&draft, events)?;
+        validate_durable_lifecycle_evidence(&draft, events)?;
         return Ok(SummaryProposal {
             target_note: default_target_note(args),
             link_candidates: allowed_canonical_links(args),
@@ -832,6 +873,69 @@ fn validate_daily_workstream_groups(
         }
     }
     Ok(())
+}
+
+fn validate_durable_lifecycle_evidence(
+    draft: &StructuredDailyDraft,
+    events: &[StoredLogEvent],
+) -> Result<(), String> {
+    let workstreams = draft
+        .workstreams
+        .iter()
+        .map(|workstream| (workstream.id.as_str(), workstream))
+        .collect::<BTreeMap<_, _>>();
+    for event in events {
+        let group_id = event_group_key(event);
+        let workstream = workstreams
+            .get(group_id.as_str())
+            .expect("workstream groups were validated");
+        if (metadata_has_content(&event.metadata, "decision")
+            || metadata_value_is(&event.metadata, "event_type", "decision"))
+            && !field_cites_event(&workstream.decision, &event.id)
+        {
+            return Err(format!(
+                "daily draft omitted decision evidence from {}",
+                event.id
+            ));
+        }
+        if (metadata_has_content(&event.metadata, "validation")
+            || metadata_has_content(&event.metadata, "tests")
+            || metadata_value_is(&event.metadata, "event_type", "validation"))
+            && !field_cites_event(&workstream.validation, &event.id)
+        {
+            return Err(format!(
+                "daily draft omitted validation evidence from {}",
+                event.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn field_cites_event(facts: &[StructuredFact], event_id: &str) -> bool {
+    facts.iter().any(|fact| {
+        fact.evidence_event_ids
+            .iter()
+            .any(|candidate| candidate == event_id)
+    })
+}
+
+fn metadata_value_is(metadata: &Map<String, Value>, key: &str, expected: &str) -> bool {
+    metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+}
+
+fn metadata_has_content(metadata: &Map<String, Value>, key: &str) -> bool {
+    metadata.get(key).is_some_and(|value| match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(_) => true,
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+    })
 }
 
 fn render_strict_daily_markdown(
@@ -1503,6 +1607,134 @@ mod tests {
             .unwrap_err()
             .contains("no factual fields")
         );
+    }
+
+    #[test]
+    fn strict_daily_drafts_merge_duplicate_facts_without_forcing_transport_bullets() {
+        let content = json!({
+            "workstreams": [{
+                "id": "source:codex%2Ftest|task:task-1",
+                "title": "Authentication review",
+                "evidence_event_ids": ["evt_start", "evt_complete", "evt_retry"],
+                "outcome": [
+                    {
+                        "text": "Completed the authentication review.",
+                        "evidence_event_ids": ["evt_complete"]
+                    },
+                    {
+                        "text": "  completed   the authentication review. ",
+                        "evidence_event_ids": ["evt_complete", "evt_retry", "evt_retry"]
+                    }
+                ]
+            }]
+        })
+        .to_string();
+
+        let draft = parse_strict_daily_draft(
+            &content,
+            &[
+                "evt_start".to_owned(),
+                "evt_complete".to_owned(),
+                "evt_retry".to_owned(),
+            ],
+        )
+        .expect("transport evidence may remain represented without creating boilerplate");
+
+        assert_eq!(draft.workstreams[0].outcome.len(), 1);
+        assert_eq!(
+            draft.workstreams[0].outcome[0].evidence_event_ids,
+            ["evt_complete", "evt_retry"]
+        );
+    }
+
+    #[test]
+    fn daily_drafts_must_preserve_earlier_structured_decisions_and_validation() {
+        let now = Utc::now();
+        let make_event = |id: &str, sequence: i64, extra: (&str, Value)| StoredLogEvent {
+            id: id.to_owned(),
+            received_at: now,
+            timestamp: now,
+            source: "codex/test".to_owned(),
+            level: "info".to_owned(),
+            message: id.to_owned(),
+            metadata: Map::from_iter([
+                ("task_id".to_owned(), Value::from("task-1")),
+                ("sequence".to_owned(), Value::from(sequence)),
+                (extra.0.to_owned(), extra.1),
+            ]),
+            fingerprint: None,
+            truncated: false,
+            reviewed: false,
+        };
+        let events = vec![
+            make_event(
+                "evt_decision",
+                1,
+                ("decision", Value::from("Kept the local callback override.")),
+            ),
+            make_event(
+                "evt_validation",
+                2,
+                ("tests", json!(["authentication tests passed"])),
+            ),
+            make_event("evt_complete", 3, ("event_type", Value::from("complete"))),
+        ];
+        let args = SuggestMarkdownSummaryArgs {
+            event_ids: events.iter().map(|event| event.id.clone()).collect(),
+            vault_context: json!({ "daily_note": "Daily log" }),
+            mode: "daily-consolidation".to_owned(),
+            task: None,
+        };
+        let output = |decision: Vec<&str>, validation: Vec<&str>| {
+            json!({
+                "workstreams": [{
+                    "id": "source:codex%2Ftest|task:task-1",
+                    "title": "Authentication review",
+                    "evidence_event_ids": ["evt_decision", "evt_validation", "evt_complete"],
+                    "outcome": [{
+                        "text": "Completed the authentication review.",
+                        "evidence_event_ids": ["evt_complete"]
+                    }],
+                    "decision": decision.into_iter().map(|id| json!({
+                        "text": "Kept the local callback override.",
+                        "evidence_event_ids": [id]
+                    })).collect::<Vec<_>>(),
+                    "validation": validation.into_iter().map(|id| json!({
+                        "text": "Authentication tests passed.",
+                        "evidence_event_ids": [id]
+                    })).collect::<Vec<_>>()
+                }]
+            })
+            .to_string()
+        };
+
+        assert!(
+            parse_proposal(
+                &output(Vec::new(), vec!["evt_validation"]),
+                &args,
+                &events,
+                "test"
+            )
+            .unwrap_err()
+            .contains("omitted decision evidence")
+        );
+        assert!(
+            parse_proposal(
+                &output(vec!["evt_decision"], Vec::new()),
+                &args,
+                &events,
+                "test"
+            )
+            .unwrap_err()
+            .contains("omitted validation evidence")
+        );
+        parse_proposal(
+            &output(vec!["evt_decision"], vec!["evt_validation"]),
+            &args,
+            &events,
+            "test",
+        )
+        .expect("durable earlier facts are preserved in their adaptive fields");
     }
 
     #[tokio::test]
