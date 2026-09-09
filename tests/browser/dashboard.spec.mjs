@@ -202,9 +202,10 @@ function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = 
   };
 }
 
-async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshness = "current" } = {}) {
+async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshness = "current", workspaceProfile = undefined } = {}) {
   const requests = [];
   let loggedIn = false;
+  let activeProfile = workspaceProfile === undefined ? { id: "workspace_fixture", status: "active", root_binding: "binding_fixture", timezone: "Europe/Stockholm", daily_root: "Work Log", daily_pattern: "{year}/{month_name}/Daily log {month_name} {day}.md", template_path: null, link_style: "markdown", created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z" } : workspaceProfile;
   await page.route("http://daily.log-inbox.test/**", async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -215,6 +216,13 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ csrf_token: "csrf_fixture" }) });
     }
     if (url.pathname === "/api/v2/auth/session") return route.fulfill({ status: loggedIn ? 200 : 401, contentType: "application/json", body: JSON.stringify(loggedIn ? { authenticated: true } : { error: "Sign in required" }) });
+    if (url.pathname === "/api/v2/settings/workspace" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ workspace_path: "/workspace", active_profile: activeProfile, binding_matches: Boolean(activeProfile) }) });
+    if (url.pathname === "/api/v2/settings/workspace/preview" && request.method() === "POST") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ settings: request.postDataJSON(), destination_example: "Journal/2026-09-08.md", preview_digest: "preview_fixture", changes_saved: false }) });
+    if (url.pathname === "/api/v2/settings/workspace" && request.method() === "PUT") {
+      const saved = request.postDataJSON();
+      activeProfile = { id: activeProfile?.id || "workspace_fixture", status: "active", root_binding: "binding_fixture", ...saved.settings, created_at: activeProfile?.created_at || "2026-09-01T00:00:00Z", updated_at: "2026-09-09T12:00:00Z" };
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ active_profile: activeProfile, destination_example: "Journal/2026-09-08.md", binding_matches: true, changes_saved: true }) });
+    }
     const match = url.pathname.match(/^\/api\/v2\/daily\/(\d{4}-\d{2}-\d{2})$/);
     if (match && request.method() === "GET") {
       if (dailyStatus !== 200) return route.fulfill({ status: dailyStatus, contentType: "application/json", body: JSON.stringify({ error: "Daily fixture unavailable" }) });
@@ -273,6 +281,25 @@ test("refocused Daily keeps CSRF authority in memory only", async ({ page }) => 
 
   await page.getByRole("button", { name: "Unlock changes" }).click();
   await expect(page.getByLabel("Owner secret")).toBeFocused();
+});
+
+test("refocused Daily previews and saves first-run destination settings", async ({ page }) => {
+  const requests = await mockDaily(page, { workspaceProfile: null });
+  await openDaily(page);
+
+  await expect(page.getByRole("heading", { name: "Daily settings" })).toBeVisible();
+  await page.getByLabel("Daily folder").fill("Journal");
+  await page.getByLabel("File pattern").fill("{year}/{date}.md");
+  await page.getByRole("button", { name: "Preview" }).click();
+  await expect(page.locator("#settings-preview")).toContainText("Nothing has been saved or created");
+  await page.getByRole("button", { name: "Save settings" }).click();
+
+  await expect(page.getByRole("heading", { name: "Daily settings" })).toHaveCount(0);
+  await expect.poll(() => requests.find(request => request.path === "/api/v2/settings/workspace" && request.method === "PUT")?.body).toMatchObject({
+    settings: { daily_root: "Journal", daily_pattern: "{year}/{date}.md" },
+    preview_digest: "preview_fixture",
+    expected_profile_id: null
+  });
 });
 
 test("refocused Daily exposes server failures", async ({ page }) => {

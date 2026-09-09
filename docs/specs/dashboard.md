@@ -8,6 +8,8 @@ With `LOG_INBOX_REFOCUS_ENABLED=1`, the root page is the authenticated Daily wor
 
 The ordinary flow is: choose a date, optionally add a manual note, generate a candidate, correct structured facts or evidence decisions, and inspect the final preview. Adding a note, generating, saving an edit, and changing an evidence decision update SQLite immediately and produce durable records. None of these actions writes to the Markdown workspace. Apply is intentionally absent until the safe writer and journal land in M2.
 
+First run opens **Daily settings** after sign-in. The owner enters the IANA timezone, relative Daily folder, supported date-token filename pattern, optional existing template, and link style. **Preview** validates and shows an example without saving or creating anything; only the subsequent explicit **Save settings** updates the stable workspace profile. Existing frozen days never move when these settings change.
+
 An unchanged snapshot returns the current revision. Adding only a manual note preserves structured edits. If late automated evidence arrives after a structured edit, regeneration requires explicit confirmation and creates a new immutable revision. The interface does not require Knowledge setup or expose vault browsing, structure management, or generic note editing.
 
 The sections below describe the legacy dashboard served only while the refocus feature gate is disabled. They are retained as migration background until the coordinated M2 cutover removes the legacy runtime.
