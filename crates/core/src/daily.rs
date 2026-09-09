@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{
+    DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc,
+};
 use chrono_tz::Tz;
 use std::path::{Component, Path};
 
@@ -33,6 +35,32 @@ pub fn resolve_day(local_date: NaiveDate, timezone: &str) -> Result<ResolvedDay>
         start_utc,
         end_utc,
     })
+}
+
+pub fn resolve_local_time(
+    local_date: NaiveDate,
+    local_time: NaiveTime,
+    timezone: &str,
+) -> Result<DateTime<Utc>> {
+    let timezone = timezone
+        .parse::<Tz>()
+        .with_context(|| format!("invalid IANA timezone: {timezone}"))?;
+    let requested = local_date.and_time(local_time);
+    for minutes in 0..=(24 * 60) {
+        let candidate = requested + Duration::minutes(minutes);
+        anyhow::ensure!(
+            candidate.date() == local_date,
+            "timezone has no valid scheduled instant on local date {local_date}"
+        );
+        match timezone.from_local_datetime(&candidate) {
+            LocalResult::Single(value) => return Ok(value.with_timezone(&Utc)),
+            LocalResult::Ambiguous(first, second) => {
+                return Ok(first.min(second).with_timezone(&Utc));
+            }
+            LocalResult::None => {}
+        }
+    }
+    anyhow::bail!("timezone has no valid scheduled instant on local date {local_date}")
 }
 
 pub fn render_daily_path(root: &str, pattern: &str, local_date: NaiveDate) -> Result<String> {
@@ -138,6 +166,25 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn resolves_ambiguous_and_nonexistent_scheduler_times_deterministically() {
+        let spring = resolve_local_time(
+            NaiveDate::from_ymd_opt(2026, 3, 29).unwrap(),
+            NaiveTime::from_hms_opt(2, 30, 0).unwrap(),
+            "Europe/Stockholm",
+        )
+        .unwrap();
+        assert_eq!(spring.to_rfc3339(), "2026-03-29T01:00:00+00:00");
+
+        let autumn = resolve_local_time(
+            NaiveDate::from_ymd_opt(2026, 10, 25).unwrap(),
+            NaiveTime::from_hms_opt(2, 30, 0).unwrap(),
+            "Europe/Stockholm",
+        )
+        .unwrap();
+        assert_eq!(autumn.to_rfc3339(), "2026-10-25T00:30:00+00:00");
     }
 
     #[test]

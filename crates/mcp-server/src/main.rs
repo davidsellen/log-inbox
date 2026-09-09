@@ -7,12 +7,12 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post, put},
 };
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
 use log_inbox_core::{
     auth::{
         DASHBOARD_SCOPES, generate_session_credentials, hash_owner_secret, verify_owner_secret,
     },
-    daily::{render_daily_path, resolve_day},
+    daily::{render_daily_path, resolve_day, resolve_local_time},
     models::{
         ApplyOperation, DailyDay, DailyRevisionContent, PrepareApplyOperation, ProposalRevision,
         WorkspaceProfile,
@@ -234,6 +234,10 @@ async fn main() -> anyhow::Result<()> {
         workspace,
     };
     recover_daily_applies(&state);
+    let scheduler_state = state.clone();
+    tokio::spawn(async move {
+        run_daily_scheduler(scheduler_state).await;
+    });
 
     let app = build_router(state);
 
@@ -1640,11 +1644,24 @@ async fn refocus_generate_daily(
     input: Option<Json<GenerateDailyRequest>>,
 ) -> Result<Json<ProposalRevision>, ApiError> {
     authorize_refocus(&state, &headers, "draft:generate", true)?;
-    require_cutover_for_daily_mutation(&state)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let replace_edited = input
+        .map(|Json(input)| input.replace_edited)
+        .unwrap_or(false);
+    generate_daily_candidate(&state, local_date, replace_edited)
+        .await
+        .map(Json)
+}
+
+async fn generate_daily_candidate(
+    state: &AppState,
+    local_date: NaiveDate,
+    replace_edited: bool,
+) -> Result<ProposalRevision, ApiError> {
+    require_cutover_for_daily_mutation(state)?;
     let _generation_guard = state.daily_generation_lock.lock().await;
-    let (profile, workspace) = active_refocus_context(&state)?;
+    let (profile, workspace) = active_refocus_context(state)?;
     let frozen_day = state
         .store
         .daily_day(&profile.id, local_date)
@@ -1652,7 +1669,7 @@ async fn refocus_generate_daily(
     let window = effective_daily_window(local_date, &profile, frozen_day.as_ref())
         .map_err(ApiError::bad_request)?;
     ensure_refocus_daily_day(
-        &state,
+        state,
         &profile,
         &workspace,
         local_date,
@@ -1694,13 +1711,13 @@ async fn refocus_generate_daily(
             .map_err(|error| ApiError::internal(error.to_string()))?
             .filter(|current| current.snapshot_id.is_none() && current.content == content)
         {
-            return Ok(Json(current));
+            return Ok(current);
         }
         let revision = state
             .store
             .create_proposal_revision(&profile.id, local_date, None, "manual", &content)
             .map_err(|error| ApiError::internal(error.to_string()))?;
-        return Ok(Json(revision));
+        return Ok(revision);
     }
 
     let event_ids = evidence
@@ -1722,7 +1739,7 @@ async fn refocus_generate_daily(
         let mut content = serde_json::from_value::<DailyRevisionContent>(current.content.clone())
             .map_err(|error| ApiError::internal(error.to_string()))?;
         if content.manual_entry_ids == manual_entry_ids {
-            return Ok(Json(current.clone()));
+            return Ok(current.clone());
         }
         content.manual_entry_ids = manual_entry_ids;
         let content =
@@ -1738,11 +1755,8 @@ async fn refocus_generate_daily(
                 &current.id,
             )
             .map_err(|error| ApiError::conflict(error.to_string()))?;
-        return Ok(Json(revised));
+        return Ok(revised);
     }
-    let replace_edited = input
-        .map(|Json(input)| input.replace_edited)
-        .unwrap_or(false);
     if current
         .as_ref()
         .is_some_and(|current| current.origin == "structured_edit")
@@ -1809,7 +1823,7 @@ async fn refocus_generate_daily(
             &content,
         )
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    Ok(Json(revision))
+    Ok(revision)
 }
 
 async fn refocus_decide_daily_evidence(
@@ -1958,6 +1972,125 @@ fn effective_daily_window(
     })
 }
 
+async fn run_daily_scheduler(state: AppState) {
+    loop {
+        if let Err(error) = reconcile_daily_schedule(&state, Utc::now()).await {
+            tracing::warn!(error = %error.message, "Daily schedule reconciliation failed");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    }
+}
+
+async fn reconcile_daily_schedule(state: &AppState, now: DateTime<Utc>) -> Result<(), ApiError> {
+    let (profile, workspace) = match active_refocus_context(state) {
+        Ok(context) => context,
+        Err(error) if error.status == StatusCode::CONFLICT => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let settings = state
+        .store
+        .daily_automation_settings(&profile.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if !settings.enabled {
+        return Ok(());
+    }
+    let timezone = profile
+        .timezone
+        .parse::<chrono_tz::Tz>()
+        .map_err(|_| ApiError::internal("saved workspace timezone is invalid"))?;
+    let generation_time = NaiveTime::parse_from_str(&settings.generation_time, "%H:%M")
+        .map_err(|_| ApiError::internal("saved generation time is invalid"))?;
+    let today = now.with_timezone(&timezone).date_naive();
+
+    for days_ago in 1..=i64::from(settings.catch_up_days) {
+        let local_date = today
+            .checked_sub_signed(Duration::days(days_ago))
+            .ok_or_else(|| ApiError::internal("catch-up date is outside the supported range"))?;
+        let due_date = local_date
+            .succ_opt()
+            .ok_or_else(|| ApiError::internal("scheduled date has no following day"))?;
+        let due_at = resolve_local_time(due_date, generation_time, &profile.timezone)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        if due_at > now {
+            continue;
+        }
+        let resolved = resolve_day(local_date, &profile.timezone)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let has_automated_evidence = !state
+            .store
+            .get_events_between(resolved.start_utc, resolved.end_utc, 1)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .events
+            .is_empty();
+        let has_manual_entries = if state
+            .store
+            .daily_day(&profile.id, local_date)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .is_some()
+        {
+            !state
+                .store
+                .manual_daily_entries(&profile.id, local_date)
+                .map_err(|error| ApiError::internal(error.to_string()))?
+                .is_empty()
+        } else {
+            false
+        };
+        if !has_automated_evidence && !has_manual_entries {
+            continue;
+        }
+
+        let destination =
+            render_daily_path(&profile.daily_root, &profile.daily_pattern, local_date)
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+        ensure_refocus_daily_day(state, &profile, &workspace, local_date, &destination)?;
+        state
+            .store
+            .enqueue_daily_schedule_run(&profile.id, local_date, due_at)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let Some(_) = state
+            .store
+            .claim_daily_schedule_run(&profile.id, local_date, now)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+        else {
+            continue;
+        };
+        state
+            .store
+            .set_daily_generation_status(&profile.id, local_date, "queued")
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        match generate_daily_candidate(state, local_date, false).await {
+            Ok(_) => {
+                state
+                    .store
+                    .finish_daily_schedule_run(&profile.id, local_date, None, Utc::now())
+                    .map_err(|error| ApiError::internal(error.to_string()))?;
+            }
+            Err(error)
+                if error.status == StatusCode::CONFLICT
+                    && error.message.contains("current candidate has edits") =>
+            {
+                state
+                    .store
+                    .finish_daily_schedule_run(&profile.id, local_date, None, Utc::now())
+                    .map_err(|error| ApiError::internal(error.to_string()))?;
+            }
+            Err(error) => {
+                state
+                    .store
+                    .finish_daily_schedule_run(
+                        &profile.id,
+                        local_date,
+                        Some(&error.message),
+                        Utc::now(),
+                    )
+                    .map_err(|store_error| ApiError::internal(store_error.to_string()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn authorize_refocus(
     state: &AppState,
     headers: &HeaderMap,
@@ -2038,6 +2171,7 @@ async fn favicon() -> impl IntoResponse {
     )
 }
 
+#[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     message: String,
@@ -2435,6 +2569,70 @@ mod knowledge_destination_tests {
         )
         .await;
         assert_eq!(stale.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn scheduler_prepares_only_nonempty_due_days_without_writing_markdown() {
+        let state = test_state();
+        let profile = state
+            .store
+            .save_active_workspace_profile(
+                state.workspace.root_binding(),
+                "Europe/Stockholm",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+                None,
+            )
+            .unwrap();
+        state
+            .store
+            .insert_event(log_inbox_core::models::LogEventInput {
+                timestamp: Some("2026-09-08T10:00:00Z".parse().unwrap()),
+                source: "codex/test".to_owned(),
+                level: Some("info".to_owned()),
+                message: "Completed the scheduler test.".to_owned(),
+                metadata: Some(serde_json::Map::from_iter([(
+                    "task_id".to_owned(),
+                    Value::from("scheduler-test"),
+                )])),
+                fingerprint: None,
+            })
+            .unwrap();
+
+        reconcile_daily_schedule(&state, "2026-09-09T10:00:00Z".parse().unwrap())
+            .await
+            .unwrap();
+
+        let runs = state.store.daily_schedule_runs(&profile.id, 14).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].local_date.to_string(), "2026-09-08");
+        assert_eq!(runs[0].state, "failed");
+        assert!(
+            runs[0]
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("requires a configured LLM")
+        );
+        assert_eq!(
+            state
+                .store
+                .daily_day(&profile.id, NaiveDate::from_ymd_opt(2026, 9, 8).unwrap())
+                .unwrap()
+                .unwrap()
+                .generation_status,
+            "failed"
+        );
+        assert!(
+            state
+                .store
+                .daily_day(&profile.id, NaiveDate::from_ymd_opt(2026, 9, 7).unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert!(!state.workspace.canonical_root().join("Work Log").exists());
     }
 
     #[tokio::test]
