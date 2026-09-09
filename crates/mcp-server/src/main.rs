@@ -72,11 +72,8 @@ struct EffectiveDailyWindow {
 
 impl RefocusConfig {
     fn from_env(store: &Store) -> anyhow::Result<Option<Self>> {
-        if env::var("LOG_INBOX_REFOCUS_ENABLED").as_deref() != Ok("1") {
-            return Ok(None);
-        }
         let owner_secret = env::var("LOG_INBOX_OWNER_SECRET").map_err(|_| {
-            anyhow::anyhow!("LOG_INBOX_OWNER_SECRET is required when refocus is enabled")
+            anyhow::anyhow!("LOG_INBOX_OWNER_SECRET is required and must contain at least 20 bytes")
         })?;
         match store.owner_secret_hash()? {
             None => store.set_owner_secret_hash(&hash_owner_secret(&owner_secret)?)?,
@@ -913,6 +910,23 @@ fn active_refocus_context(
     Ok((profile, workspace))
 }
 
+fn require_cutover_for_daily_mutation(state: &AppState) -> Result<(), ApiError> {
+    let (profile, workspace) = active_refocus_context(state)?;
+    let report = migration::inventory_cutover(
+        &state.store,
+        &profile,
+        &workspace,
+        state.legacy_proposal_dir.as_deref(),
+    )
+    .map_err(|error| ApiError::internal(error.to_string()))?;
+    if report.cutover_status == "completed" || report.items.is_empty() {
+        return Ok(());
+    }
+    Err(ApiError::conflict(
+        "review and complete the legacy-data migration in Settings before changing a Daily candidate or applying Markdown",
+    ))
+}
+
 fn inspect_refocus_workspace(state: &AppState) -> Result<InspectedWorkspace, ApiError> {
     let configured = state
         .workspace
@@ -1045,6 +1059,7 @@ async fn refocus_daily_apply_preview(
     AxumPath(date): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
     authorize_refocus(&state, &headers, "logs:read", false)?;
+    require_cutover_for_daily_mutation(&state)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
     let material = daily_apply_material(&state, local_date)?;
@@ -1076,6 +1091,7 @@ async fn refocus_daily_apply(
     Json(input): Json<ApplyDailyRequest>,
 ) -> Result<Json<Value>, ApiError> {
     authorize_refocus(&state, &headers, "vault:write", true)?;
+    require_cutover_for_daily_mutation(&state)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
     let profile = active_refocus_workspace(&state)?;
@@ -1166,6 +1182,7 @@ async fn refocus_retry_daily_apply(
     AxumPath((date, operation_id)): AxumPath<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     authorize_refocus(&state, &headers, "vault:write", true)?;
+    require_cutover_for_daily_mutation(&state)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
     let (profile, workspace) = active_refocus_context(&state)?;
@@ -1895,6 +1912,7 @@ async fn refocus_generate_daily(
     input: Option<Json<GenerateDailyRequest>>,
 ) -> Result<Json<ProposalRevision>, ApiError> {
     authorize_refocus(&state, &headers, "draft:generate", true)?;
+    require_cutover_for_daily_mutation(&state)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
     let _generation_guard = state.daily_generation_lock.lock().await;
@@ -2074,6 +2092,7 @@ async fn refocus_decide_daily_evidence(
     Json(input): Json<EvidenceDecisionRequest>,
 ) -> Result<Json<Vec<log_inbox_core::models::SnapshotEvidence>>, ApiError> {
     authorize_refocus(&state, &headers, "review:write", true)?;
+    require_cutover_for_daily_mutation(&state)?;
     let snapshot = current_snapshot_for_review(&state, &date, &input.expected_revision_id)?;
     state
         .store
@@ -2100,6 +2119,7 @@ async fn refocus_reopen_daily_evidence(
     Json(input): Json<ExpectedRevisionRequest>,
 ) -> Result<Json<Vec<log_inbox_core::models::SnapshotEvidence>>, ApiError> {
     authorize_refocus(&state, &headers, "review:write", true)?;
+    require_cutover_for_daily_mutation(&state)?;
     let snapshot = current_snapshot_for_review(&state, &date, &input.expected_revision_id)?;
     state
         .store
@@ -2147,6 +2167,7 @@ async fn refocus_edit_daily_candidate(
     Json(input): Json<EditDailyCandidateRequest>,
 ) -> Result<Json<ProposalRevision>, ApiError> {
     authorize_refocus(&state, &headers, "review:write", true)?;
+    require_cutover_for_daily_mutation(&state)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
     let profile = active_refocus_workspace(&state)?;
