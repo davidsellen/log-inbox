@@ -348,6 +348,30 @@ struct ParsedProposal {
     markdown: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct LegacyProposalInspection {
+    pub proposal_id: String,
+    pub target_note: String,
+    pub evidence_event_ids: Vec<String>,
+    pub consolidation_job_id: Option<String>,
+}
+
+pub(crate) fn inspect_legacy_proposal_bytes(
+    contents: &[u8],
+) -> Result<LegacyProposalInspection, String> {
+    let contents =
+        std::str::from_utf8(contents).map_err(|_| "proposal is not valid UTF-8".to_owned())?;
+    let parsed = parse_proposal(contents)?;
+    validate_proposal_id(&parsed.frontmatter.proposal_id)?;
+    validate_note_name(&parsed.frontmatter.target_note)?;
+    Ok(LegacyProposalInspection {
+        proposal_id: parsed.frontmatter.proposal_id,
+        target_note: parsed.frontmatter.target_note,
+        evidence_event_ids: parsed.frontmatter.evidence_event_ids,
+        consolidation_job_id: parsed.frontmatter.consolidation_job_id,
+    })
+}
+
 fn pending_proposal(path: PathBuf) -> Result<PendingProposal, String> {
     let filename = path
         .file_name()

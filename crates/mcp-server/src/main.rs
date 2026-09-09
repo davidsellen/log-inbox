@@ -38,6 +38,7 @@ mod auto_stage;
 mod daily_consolidation;
 mod daily_writer;
 mod llm;
+mod migration;
 mod proposal_inbox;
 mod vault_context;
 
@@ -45,6 +46,7 @@ mod vault_context;
 struct AppState {
     store: Store,
     llm_config: Option<llm::LlmConfig>,
+    legacy_proposal_dir: Option<PathBuf>,
     proposal_inbox: Option<proposal_inbox::ProposalInbox>,
     daily_notes_dir: Option<PathBuf>,
     daily_notes_display_path: Option<String>,
@@ -432,6 +434,9 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         store,
         llm_config: llm::LlmConfig::from_env(),
+        legacy_proposal_dir: env::var_os("LOG_INBOX_PROPOSAL_DIR")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from),
         proposal_inbox: (!refocus_enabled)
             .then(proposal_inbox::ProposalInbox::from_env)
             .flatten(),
@@ -515,6 +520,7 @@ fn build_router(state: AppState) -> Router {
                 "/api/v2/settings/workspace",
                 put(refocus_save_workspace_settings),
             )
+            .route("/api/v2/migration/cutover", get(refocus_cutover_report))
             .route("/api/v2/daily/{date}", get(refocus_daily_day))
             .route(
                 "/api/v2/daily/{date}/apply-preview",
@@ -727,6 +733,22 @@ async fn refocus_workspace_settings(
         "active_profile": active,
         "binding_matches": binding_matches
     })))
+}
+
+async fn refocus_cutover_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<migration::CutoverReport>, ApiError> {
+    authorize_refocus(&state, &headers, "logs:read", false)?;
+    let (profile, workspace) = active_refocus_context(&state)?;
+    migration::inventory_cutover(
+        &state.store,
+        &profile,
+        &workspace,
+        state.legacy_proposal_dir.as_deref(),
+    )
+    .map(Json)
+    .map_err(|error| ApiError::internal(error.to_string()))
 }
 
 async fn refocus_preview_workspace_settings(
@@ -4115,6 +4137,7 @@ mod knowledge_destination_tests {
         AppState {
             store,
             llm_config: None,
+            legacy_proposal_dir: None,
             proposal_inbox: None,
             daily_notes_dir: None,
             daily_notes_display_path: None,
@@ -4213,6 +4236,11 @@ mod knowledge_destination_tests {
         );
         assert_eq!(
             route_status(refocused, "GET", "/api/v2/auth/session", "").await,
+            StatusCode::UNAUTHORIZED
+        );
+        let refocused = build_router(test_state(true));
+        assert_eq!(
+            route_status(refocused, "GET", "/api/v2/migration/cutover", "").await,
             StatusCode::UNAUTHORIZED
         );
 
