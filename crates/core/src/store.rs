@@ -1059,7 +1059,10 @@ impl Store {
         .map_err(Into::into)
     }
 
-    fn migration_operation(&self, operation_id: &str) -> Result<Option<MigrationJournalEntry>> {
+    pub(crate) fn migration_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<MigrationJournalEntry>> {
         let conn = self.connect()?;
         conn.query_row(
             "SELECT operation_id, migration_name, source_identity, status, details_json, started_at, completed_at FROM migration_journal WHERE operation_id = ?1",

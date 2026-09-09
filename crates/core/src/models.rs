@@ -1,7 +1,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEventInput {
@@ -184,6 +184,30 @@ pub struct LegacyMigrationArtifact {
     pub parse_status: String,
     pub details: Value,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LegacyManualEventImport {
+    pub event_id: String,
+    pub local_date: NaiveDate,
+    pub text: String,
+    pub references: Vec<String>,
+    pub source_digest: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LegacyCutoverImport {
+    pub operation_id: String,
+    pub source_identity: String,
+    pub report_digest: String,
+    pub workspace_id: String,
+    pub items: Vec<MigrationItem>,
+    pub mappings: Vec<ContextMapping>,
+    pub ignored: Vec<IgnoredContextIdentity>,
+    pub artifacts: Vec<LegacyMigrationArtifact>,
+    pub manual_events: Vec<LegacyManualEventImport>,
+    pub obsolete_preferences: BTreeMap<String, String>,
+    pub backup_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
