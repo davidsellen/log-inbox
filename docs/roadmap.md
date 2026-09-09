@@ -1,6 +1,6 @@
 # Daily Engineering Knowledge Roadmap
 
-Status: planned refocus. Updated 2026-09-09. Baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
+Status: active implementation. Updated 2026-09-09. Baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
 
 This roadmap defines the target direction and delivery order. It does not claim these milestones are implemented or tested. The [README](../README.md) documents the pre-refocus runtime; existing specs are implementation background until revised with their milestone. Where older specs propose automatic Apply, browser filesystem workflows, or pending files in the workspace, this roadmap supersedes that future direction—not the description of what currently runs.
 
@@ -149,13 +149,13 @@ Exit gate: representative days can be reviewed accurately without Knowledge setu
 ### M2 — Safe Apply and Coordinated Cutover
 
 - [x] Enforce the M0c authentication, CSRF and scoped sensitive-access foundation for every new mutation and write path; refocused mode excludes legacy routes and workers rather than exposing a parallel bypass.
-- [ ] Resolve all reads/writes from one stable workspace profile and reviewed daily convention/template.
-- [ ] Implement block diffs, conflict reconciliation, path safety, idempotency, recovery copies and Apply journaling.
-- [ ] Implement the migration protocol below, with dry-run reporting and source-preserving failure behavior.
-- [ ] Replace Structure destinations with the scoped context/mapping foundation; do not require a rich retrieval UI yet.
+- [x] Resolve all reads/writes from one stable workspace profile and reviewed daily convention/template.
+- [x] Implement block diffs, conflict reconciliation, path safety, idempotency, recovery copies and Apply journaling.
+- [x] Implement the migration protocol below, with dry-run reporting and source-preserving failure behavior.
+- [x] Replace Structure destinations with the scoped context/mapping foundation; do not require a rich retrieval UI yet.
 - [ ] Remove browser-vault/browser-Apply APIs, IndexedDB code, per-task staging, obsolete semantic-structure APIs, separate proposal/daily/context/index mounts, and superseded configuration.
 - [ ] Revise runtime docs/specs/examples together; remove obsolete styles and routes without keeping legacy runtime aliases.
-- [ ] Make dashboard Apply the sole initial write interface; remove or disable legacy MCP Apply until its replacement is separately gated.
+- [x] Make dashboard Apply the sole initial write interface; remove or disable legacy MCP Apply until its replacement is separately gated.
 
 Exit gate: recovery, idempotency, preserved-content, authorization and containment tests pass on the declared supported storage; Compose/docs describe only the new contract. This is the first usable refocused release.
 
