@@ -1,0 +1,10 @@
+services:
+  mcp:
+    environment:
+      LOG_INBOX_MIGRATION_PROPOSAL_DIR: /migration/proposals
+      LOG_INBOX_MIGRATION_CONTEXT_FILE: /migration/context/vault-context.json
+      LOG_INBOX_MIGRATION_PRODUCT_INDEX_FILE: /migration/context/product-navigation.md
+    volumes:
+      - "${LOG_INBOX_PROPOSAL_HOST_DIR:-./data/vault-inbox}:/migration/proposals"
+      - "${LOG_INBOX_VAULT_CONTEXT_HOST_FILE:-./config/vault-context.json}:/migration/context/vault-context.json:ro"
+      - "${LOG_INBOX_PRODUCT_INDEX_HOST_FILE:-./config/product-navigation.md}:/migration/context/product-navigation.md:ro"

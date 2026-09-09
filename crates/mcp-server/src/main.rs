@@ -432,12 +432,12 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         store,
         llm_config: llm::LlmConfig::from_env(),
-        legacy_proposal_dir: env::var_os("LOG_INBOX_PROPOSAL_DIR")
+        legacy_proposal_dir: env::var_os("LOG_INBOX_MIGRATION_PROPOSAL_DIR")
             .filter(|path| !path.is_empty())
             .map(PathBuf::from),
         legacy_support_files: [
-            ("context_file", "LOG_INBOX_VAULT_CONTEXT_FILE"),
-            ("product_index_file", "LOG_INBOX_PRODUCT_INDEX_FILE"),
+            ("context_file", "LOG_INBOX_MIGRATION_CONTEXT_FILE"),
+            ("product_index_file", "LOG_INBOX_MIGRATION_PRODUCT_INDEX_FILE"),
         ]
         .into_iter()
         .filter_map(|(kind, name)| {

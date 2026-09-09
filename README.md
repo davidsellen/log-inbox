@@ -80,7 +80,13 @@ If an older date was missed, select it directly and run the same flow. Automatic
 
 ## Upgrading older installations
 
-After saving workspace settings, Settings shows **Bring forward older Log Inbox data** when legacy state exists. Review the report before completing it. Cutover:
+For an installation that used pending proposal or context files, map those sources only for the migration run:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.migrate.yml up --build
+```
+
+The override accepts the three host paths documented in `.env.migration.example`; the ordinary deployment has only the app-data volume and one Markdown workspace mount. After saving workspace settings, Settings shows **Bring forward older Log Inbox data** when legacy state exists. Review the report before completing it. Cutover:
 
 - creates and verifies a timestamped SQLite backup outside the Markdown workspace;
 - imports valid link mappings, ignored identities, and old manual logs into workspace-scoped records;
@@ -90,6 +96,7 @@ After saving workspace settings, Settings shows **Bring forward older Log Inbox 
 - never rewrites historical Markdown notes, guesses unresolved mappings, or deletes changed/unrecognized files.
 
 The operation is journaled and idempotent. If interrupted, opening Settings exposes the same operation for safe completion.
+After it completes, restart with ordinary `docker compose up --build`; the migration mounts are no longer needed.
 
 ## Configuration
 
