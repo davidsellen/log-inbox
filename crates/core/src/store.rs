@@ -344,6 +344,73 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 7 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                DELETE FROM review_state
+                WHERE event_id NOT IN (SELECT id FROM log_events);
+                DELETE FROM proposal_state
+                WHERE event_id NOT IN (SELECT id FROM log_events);
+                DELETE FROM daily_consolidation_job_events
+                WHERE job_id NOT IN (SELECT id FROM daily_consolidation_jobs)
+                   OR event_id NOT IN (SELECT id FROM log_events);
+
+                CREATE TABLE evidence_snapshot_events_v7 (
+                    snapshot_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    live_event_id TEXT,
+                    position INTEGER NOT NULL,
+                    event_digest TEXT NOT NULL,
+                    disposition TEXT CHECK(disposition IN ('include', 'omit', 'duplicate_of', 'superseded_by')),
+                    related_event_id TEXT,
+                    decision_actor TEXT,
+                    decision_reason TEXT,
+                    decided_at TEXT,
+                    PRIMARY KEY(snapshot_id, event_id),
+                    UNIQUE(snapshot_id, position),
+                    CHECK(live_event_id IS NULL OR live_event_id = event_id),
+                    FOREIGN KEY(snapshot_id) REFERENCES evidence_snapshots(id),
+                    FOREIGN KEY(live_event_id) REFERENCES log_events(id) ON DELETE SET NULL,
+                    FOREIGN KEY(snapshot_id, related_event_id)
+                        REFERENCES evidence_snapshot_events_v7(snapshot_id, event_id)
+                );
+
+                INSERT INTO evidence_snapshot_events_v7
+                    (snapshot_id, event_id, live_event_id, position, event_digest,
+                     disposition, related_event_id, decision_actor, decision_reason, decided_at)
+                SELECT snapshot_id,
+                       event_id,
+                       CASE WHEN EXISTS (SELECT 1 FROM log_events WHERE id = event_id)
+                            THEN event_id ELSE NULL END,
+                       position,
+                       event_digest,
+                       disposition,
+                       related_event_id,
+                       decision_actor,
+                       decision_reason,
+                       decided_at
+                FROM evidence_snapshot_events;
+
+                DROP TABLE evidence_snapshot_events;
+                ALTER TABLE evidence_snapshot_events_v7 RENAME TO evidence_snapshot_events;
+
+                CREATE TRIGGER cleanup_legacy_event_state_before_delete
+                BEFORE DELETE ON log_events
+                BEGIN
+                    DELETE FROM review_state WHERE event_id = OLD.id;
+                    DELETE FROM proposal_state WHERE event_id = OLD.id;
+                    DELETE FROM daily_consolidation_job_events WHERE event_id = OLD.id;
+                END;
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (7, 'enforced foreign key integrity', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
+        ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
 
@@ -740,12 +807,7 @@ impl Store {
         let cutoff = Utc::now() - Duration::days(retention_days as i64);
         let conn = self.connect()?;
         let changed = conn.execute(
-            r#"DELETE FROM log_events
-               WHERE received_at < ?1
-                 AND NOT EXISTS (
-                     SELECT 1 FROM evidence_snapshot_events snapshot_event
-                     WHERE snapshot_event.event_id = log_events.id
-                 )"#,
+            "DELETE FROM log_events WHERE received_at < ?1",
             params![cutoff.to_rfc3339()],
         )?;
         Ok(changed)
@@ -1427,8 +1489,10 @@ impl Store {
     }
 
     pub(crate) fn connect(&self) -> Result<Connection> {
-        Connection::open(&self.db_path)
-            .with_context(|| format!("opening {}", self.db_path.display()))
+        let conn = Connection::open(&self.db_path)
+            .with_context(|| format!("opening {}", self.db_path.display()))?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(conn)
     }
 }
 
@@ -1543,17 +1607,34 @@ fn event_count(conn: &Connection) -> Result<u64> {
 pub fn verify_backup(path: &Path) -> Result<BackupVerification> {
     let conn =
         Connection::open(path).with_context(|| format!("opening backup {}", path.display()))?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
     let integrity_check: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     anyhow::ensure!(
         integrity_check == "ok",
         "backup integrity check failed: {integrity_check}"
     );
+    ensure_foreign_key_integrity(&conn).context("backup foreign key check failed")?;
     Ok(BackupVerification {
         path: path.to_path_buf(),
         schema_version: schema_version(&conn)?,
         event_count: event_count(&conn)?,
         integrity_check,
     })
+}
+
+fn ensure_foreign_key_integrity(conn: &Connection) -> Result<()> {
+    let violation = conn
+        .prepare("PRAGMA foreign_key_check")?
+        .query_row([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .optional()?;
+    anyhow::ensure!(violation.is_none(), "foreign key violation: {violation:?}");
+    Ok(())
 }
 
 fn validate_event(input: &LogEventInput) -> Result<()> {
@@ -1658,10 +1739,27 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 6);
+        assert_eq!(store.schema_version().expect("version reads"), 7);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 6);
+        assert_eq!(store.schema_version().expect("version remains"), 7);
+    }
+
+    #[test]
+    fn enables_and_enforces_foreign_keys_on_every_store_connection() {
+        let store = temp_store();
+        let conn = store.connect().expect("database opens");
+        let enabled: bool = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .expect("foreign key setting reads");
+        assert!(enabled);
+        assert!(
+            conn.execute(
+                "INSERT INTO review_state (event_id, reviewed_at, reviewed_by, note) VALUES ('missing-event', ?1, 'test', 'invalid')",
+                params![Utc::now().to_rfc3339()],
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1712,7 +1810,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 6);
+        assert_eq!(verification.schema_version, 7);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());
@@ -1723,6 +1821,32 @@ mod tests {
         assert_eq!(restored_events[0].message, "backup evidence");
         drop(restored);
 
+        fs::remove_file(backup_path).expect("test backup removed");
+    }
+
+    #[test]
+    fn backup_verification_rejects_foreign_key_violations() {
+        let store = temp_store();
+        let backup_path = std::env::temp_dir().join(format!(
+            "log-inbox-invalid-backup-{}.sqlite3",
+            Uuid::new_v4()
+        ));
+        store
+            .create_verified_backup(&backup_path)
+            .expect("valid backup succeeds");
+
+        let conn = Connection::open(&backup_path).expect("backup opens directly");
+        conn.pragma_update(None, "foreign_keys", "OFF")
+            .expect("test connection disables enforcement");
+        conn.execute(
+            "INSERT INTO review_state (event_id, reviewed_at, reviewed_by, note) VALUES ('missing-event', ?1, 'test', 'invalid')",
+            params![Utc::now().to_rfc3339()],
+        )
+        .expect("foreign keys are connection-local and disabled on the raw connection");
+        drop(conn);
+
+        let error = verify_backup(&backup_path).expect_err("invalid backup is rejected");
+        assert!(error.to_string().contains("foreign key check failed"));
         fs::remove_file(backup_path).expect("test backup removed");
     }
 

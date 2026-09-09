@@ -228,7 +228,7 @@ impl Store {
         )?;
         for (position, (event_id, event_digest)) in event_digests.iter().enumerate() {
             transaction.execute(
-                "INSERT OR IGNORE INTO evidence_snapshot_events (snapshot_id, event_id, position, event_digest) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR IGNORE INTO evidence_snapshot_events (snapshot_id, event_id, live_event_id, position, event_digest) VALUES (?1, ?2, ?2, ?3, ?4)",
                 params![id, event_id, position as i64, event_digest],
             )?;
         }
@@ -915,13 +915,10 @@ mod tests {
                 ],
             )
             .expect("snapshotted evidence ages");
-        assert_eq!(store.prune_old_events(30).expect("retention runs"), 0);
-        assert_eq!(
-            store
-                .get_events_by_ids(&event_ids[..1])
-                .expect("evidence reads")
-                .len(),
-            1
+        assert_eq!(store.prune_old_events(30).expect("retention runs"), 1);
+        assert!(
+            store.get_events_by_ids(&event_ids[..1]).is_err(),
+            "raw evidence expires independently of its immutable snapshot identity"
         );
         store
             .decide_snapshot_evidence(&snapshot.id, &event_ids[0], "include", None, "owner", None)
@@ -1035,5 +1032,72 @@ mod tests {
                 .current_revision_id,
             Some(edited.id)
         );
+    }
+
+    #[test]
+    fn raw_retention_preserves_snapshot_identity_and_clears_its_live_reference() {
+        let store = Store::open(std::env::temp_dir().join(format!(
+            "log-inbox-snapshot-retention-{}.sqlite3",
+            Uuid::new_v4()
+        )))
+        .expect("store opens");
+        let profile = store
+            .create_pending_workspace_profile(
+                "retention-binding",
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+            )
+            .expect("profile stores");
+        let profile = store
+            .activate_workspace_profile(&profile.id)
+            .expect("profile activates");
+        let date = NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+        store
+            .ensure_daily_day(date, "Work Log/2026-09-09.md", None)
+            .expect("day freezes");
+        let event = store
+            .insert_event(LogEventInput {
+                source: "codex/test".to_owned(),
+                level: Some("info".to_owned()),
+                timestamp: Some("2026-09-09T12:00:00Z".parse().unwrap()),
+                message: "retained snapshot evidence".to_owned(),
+                metadata: None,
+                fingerprint: None,
+            })
+            .expect("event stores");
+        let snapshot = store
+            .create_evidence_snapshot(&profile.id, date, std::slice::from_ref(&event.id))
+            .expect("snapshot stores");
+        store
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE log_events SET received_at = ?1 WHERE id = ?2",
+                params![
+                    (Utc::now() - chrono::Duration::days(31)).to_rfc3339(),
+                    event.id
+                ],
+            )
+            .expect("event ages");
+
+        assert_eq!(store.prune_old_events(30).expect("retention runs"), 1);
+        let evidence = store
+            .snapshot_evidence(&snapshot.id)
+            .expect("snapshot evidence remains");
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].event_id, event.id);
+        let live_event_id: Option<String> = store
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT live_event_id FROM evidence_snapshot_events WHERE snapshot_id = ?1 AND event_id = ?2",
+                params![snapshot.id, event.id],
+                |row| row.get(0),
+            )
+            .expect("live reference reads");
+        assert_eq!(live_event_id, None);
     }
 }
