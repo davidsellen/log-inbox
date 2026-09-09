@@ -169,6 +169,16 @@ pub struct DailyDay {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DailyTemplateSnapshot {
+    pub workspace_id: String,
+    pub local_date: NaiveDate,
+    pub template_path: String,
+    pub content: Vec<u8>,
+    pub content_hash: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvidenceSnapshot {
     pub id: String,
     pub workspace_id: String,

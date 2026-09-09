@@ -1,8 +1,9 @@
 use crate::{
     daily::resolve_day,
     models::{
-        ApplyOperation, DailyDay, DailyRevisionContent, DailyWorkstream, EvidenceSnapshot,
-        ManualDailyEntry, PrepareApplyOperation, ProposalRevision, SnapshotEvidence,
+        ApplyOperation, DailyDay, DailyRevisionContent, DailyTemplateSnapshot, DailyWorkstream,
+        EvidenceSnapshot, ManualDailyEntry, PrepareApplyOperation, ProposalRevision,
+        SnapshotEvidence,
     },
     store::Store,
 };
@@ -65,6 +66,106 @@ impl Store {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    pub fn freeze_daily_template(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        template: Option<(&str, &[u8])>,
+    ) -> Result<DailyDay> {
+        let (desired_revision, template_path, template_content) = match template {
+            Some((path, content)) => {
+                validate_relative_path(path)?;
+                anyhow::ensure!(
+                    content.len() <= 4 * 1024 * 1024,
+                    "daily template exceeds the 4 MiB limit"
+                );
+                std::str::from_utf8(content).context("daily template must be valid UTF-8")?;
+                (digest(content), Some(path), Some(content))
+            }
+            None => ("none".to_owned(), None, None),
+        };
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        let current: Option<String> = transaction
+            .query_row(
+                "SELECT template_revision FROM daily_days WHERE workspace_id = ?1 AND local_date = ?2",
+                params![workspace_id, local_date.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .context("daily day does not exist")?;
+        if let Some(current) = current {
+            anyhow::ensure!(
+                current == desired_revision,
+                "daily template choice is already frozen to a different revision"
+            );
+        } else {
+            transaction.execute(
+                "UPDATE daily_days SET template_revision = ?1 WHERE workspace_id = ?2 AND local_date = ?3 AND template_revision IS NULL",
+                params![desired_revision, workspace_id, local_date.to_string()],
+            )?;
+        }
+        match (template_path, template_content) {
+            (Some(path), Some(content)) => {
+                let now = Utc::now().to_rfc3339();
+                transaction.execute(
+                    "INSERT OR IGNORE INTO daily_template_snapshots (workspace_id, local_date, template_path, content, content_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![workspace_id, local_date.to_string(), path, content, desired_revision, now],
+                )?;
+                let stored: (String, Vec<u8>, String) = transaction.query_row(
+                    "SELECT template_path, content, content_hash FROM daily_template_snapshots WHERE workspace_id = ?1 AND local_date = ?2",
+                    params![workspace_id, local_date.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?;
+                anyhow::ensure!(
+                    stored.0 == path && stored.1 == content && stored.2 == desired_revision,
+                    "daily template snapshot differs from the frozen revision"
+                );
+            }
+            (None, None) => {
+                let snapshot_exists: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM daily_template_snapshots WHERE workspace_id = ?1 AND local_date = ?2)",
+                    params![workspace_id, local_date.to_string()],
+                    |row| row.get(0),
+                )?;
+                anyhow::ensure!(
+                    !snapshot_exists,
+                    "a template snapshot already exists for this day"
+                );
+            }
+            _ => unreachable!(),
+        }
+        transaction.commit()?;
+        self.daily_day(workspace_id, local_date)?
+            .context("daily day missing after template freeze")
+    }
+
+    pub fn daily_template_snapshot(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+    ) -> Result<Option<DailyTemplateSnapshot>> {
+        self.connect()?
+            .query_row(
+                "SELECT workspace_id, local_date, template_path, content, content_hash, created_at FROM daily_template_snapshots WHERE workspace_id = ?1 AND local_date = ?2",
+                params![workspace_id, local_date.to_string()],
+                |row| {
+                    let date: String = row.get(1)?;
+                    let created_at: String = row.get(5)?;
+                    Ok(DailyTemplateSnapshot {
+                        workspace_id: row.get(0)?,
+                        local_date: parse_date(&date).map_err(|error| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, error.into()))?,
+                        template_path: row.get(2)?,
+                        content: row.get(3)?,
+                        content_hash: row.get(4)?,
+                        created_at: parse_time(&created_at).map_err(|error| rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, error.into()))?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn current_proposal_revision(
@@ -1278,6 +1379,56 @@ mod tests {
             .expect("existing day resolves");
         assert_eq!(frozen.destination_path, day.destination_path);
         assert_eq!(day.end_utc - day.start_utc, chrono::Duration::hours(23));
+        let frozen = store
+            .freeze_daily_template(
+                &profile.id,
+                date,
+                Some(("Templates/Daily.md", b"# Daily template\n")),
+            )
+            .expect("template freezes");
+        let template_hash = digest(b"# Daily template\n");
+        assert_eq!(
+            frozen.template_revision.as_deref(),
+            Some(template_hash.as_str())
+        );
+        let snapshot = store
+            .daily_template_snapshot(&profile.id, date)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.template_path, "Templates/Daily.md");
+        assert_eq!(snapshot.content, b"# Daily template\n");
+        store
+            .freeze_daily_template(
+                &profile.id,
+                date,
+                Some(("Templates/Daily.md", b"# Daily template\n")),
+            )
+            .expect("same template freeze is idempotent");
+        assert!(
+            store
+                .freeze_daily_template(
+                    &profile.id,
+                    date,
+                    Some(("Templates/Daily.md", b"# Changed\n")),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("already frozen")
+        );
+        let no_template_date = NaiveDate::from_ymd_opt(2026, 3, 30).unwrap();
+        store
+            .ensure_daily_day(no_template_date, "Work Log/2026-03-30.md", None)
+            .unwrap();
+        let no_template = store
+            .freeze_daily_template(&profile.id, no_template_date, None)
+            .unwrap();
+        assert_eq!(no_template.template_revision.as_deref(), Some("none"));
+        assert!(
+            store
+                .daily_template_snapshot(&profile.id, no_template_date)
+                .unwrap()
+                .is_none()
+        );
         assert!(
             store
                 .create_manual_daily_entry(

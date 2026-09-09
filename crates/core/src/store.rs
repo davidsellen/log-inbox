@@ -504,6 +504,35 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 10 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE daily_template_snapshots (
+                    workspace_id TEXT NOT NULL,
+                    local_date TEXT NOT NULL,
+                    template_path TEXT NOT NULL,
+                    content BLOB NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(workspace_id, local_date),
+                    FOREIGN KEY(workspace_id, local_date)
+                        REFERENCES daily_days(workspace_id, local_date) ON DELETE CASCADE
+                );
+
+                CREATE TRIGGER daily_template_snapshots_immutable
+                BEFORE UPDATE ON daily_template_snapshots
+                BEGIN
+                    SELECT RAISE(ABORT, 'daily template snapshots are immutable');
+                END;
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (10, 'frozen daily templates', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -1918,10 +1947,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 9);
+        assert_eq!(store.schema_version().expect("version reads"), 10);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 9);
+        assert_eq!(store.schema_version().expect("version remains"), 10);
     }
 
     #[test]
@@ -1989,7 +2018,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 9);
+        assert_eq!(verification.schema_version, 10);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());

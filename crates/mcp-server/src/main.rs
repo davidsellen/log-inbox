@@ -1720,21 +1720,23 @@ fn daily_apply_material(
     let original_content = original.unwrap_or_default();
     let (initial_content, template_used) = if target_exists {
         (original_content.as_slice(), None)
-    } else if let Some(template_path) = profile.template_path.clone() {
-        workspace
-            .resolve_markdown_path(
-                std::path::Path::new(&template_path),
-                MarkdownPathMode::ExistingFile,
-            )
-            .map_err(|error| ApiError::bad_request(error.to_string()))?;
-        let template_content =
-            daily_writer::read_file(workspace.directory(), std::path::Path::new(&template_path))
-                .map_err(|error| {
-                    ApiError::internal(format!("reading Daily template failed: {error}"))
-                })?
-                .ok_or_else(|| ApiError::conflict("the reviewed Daily template disappeared"))?;
+    } else if day.template_revision.as_deref() == Some("none") {
+        (&[][..], None)
+    } else if let Some(template_revision) = day.template_revision.clone() {
+        let template = state
+            .store
+            .daily_template_snapshot(&profile.id, local_date)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .ok_or_else(|| ApiError::conflict("the frozen Daily template snapshot is missing"))?;
+        if template.content_hash != template_revision
+            || daily_writer::digest(&template.content) != template_revision
+        {
+            return Err(ApiError::conflict(
+                "the frozen Daily template snapshot failed integrity verification",
+            ));
+        }
         let plan = daily_writer::plan_managed_block(
-            Some(&template_content),
+            Some(&template.content),
             &day.block_id,
             &llm::render_daily_revision_preview(&content, &manual_entries, &snapshot_evidence),
             &format!("Daily log {local_date}"),
@@ -1746,12 +1748,14 @@ fn daily_apply_material(
             revision,
             target,
             target_exists,
-            template_used: Some(template_path),
+            template_used: Some(template.template_path),
             original_content,
             plan,
         });
     } else {
-        (&[][..], None)
+        return Err(ApiError::conflict(
+            "this legacy Daily record has no frozen template choice; regenerate it before Apply",
+        ));
     };
     let markdown =
         llm::render_daily_revision_preview(&content, &manual_entries, &snapshot_evidence);
@@ -1774,6 +1778,43 @@ fn daily_apply_material(
     })
 }
 
+fn ensure_refocus_daily_day(
+    state: &AppState,
+    profile: &WorkspaceProfile,
+    workspace: &InspectedWorkspace,
+    local_date: NaiveDate,
+    destination_path: &str,
+) -> Result<DailyDay, ApiError> {
+    state
+        .store
+        .ensure_daily_day(local_date, destination_path, None)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let template = match profile.template_path.as_deref() {
+        Some(path) => {
+            workspace
+                .resolve_markdown_path(Path::new(path), MarkdownPathMode::ExistingFile)
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
+            let content = daily_writer::read_file(workspace.directory(), Path::new(path))
+                .map_err(|error| {
+                    ApiError::internal(format!("reading Daily template failed: {error}"))
+                })?
+                .ok_or_else(|| ApiError::conflict("the reviewed Daily template disappeared"))?;
+            Some((path, content))
+        }
+        None => None,
+    };
+    state
+        .store
+        .freeze_daily_template(
+            &profile.id,
+            local_date,
+            template
+                .as_ref()
+                .map(|(path, content)| (*path, content.as_slice())),
+        )
+        .map_err(|error| ApiError::conflict(error.to_string()))
+}
+
 async fn refocus_create_manual_entry(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1783,17 +1824,20 @@ async fn refocus_create_manual_entry(
     authorize_refocus(&state, &headers, "review:write", true)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
-    let profile = active_refocus_workspace(&state)?;
+    let (profile, workspace) = active_refocus_context(&state)?;
     let frozen_day = state
         .store
         .daily_day(&profile.id, local_date)
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let window = effective_daily_window(local_date, &profile, frozen_day.as_ref())
         .map_err(ApiError::bad_request)?;
-    state
-        .store
-        .ensure_daily_day(local_date, &window.destination_path, None)
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    ensure_refocus_daily_day(
+        &state,
+        &profile,
+        &workspace,
+        local_date,
+        &window.destination_path,
+    )?;
     let entry = state
         .store
         .create_manual_daily_entry(&profile.id, local_date, &input.text, &input.references)
@@ -1811,17 +1855,20 @@ async fn refocus_generate_daily(
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
     let _generation_guard = state.daily_generation_lock.lock().await;
-    let profile = active_refocus_workspace(&state)?;
+    let (profile, workspace) = active_refocus_context(&state)?;
     let frozen_day = state
         .store
         .daily_day(&profile.id, local_date)
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let window = effective_daily_window(local_date, &profile, frozen_day.as_ref())
         .map_err(ApiError::bad_request)?;
-    state
-        .store
-        .ensure_daily_day(local_date, &window.destination_path, None)
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    ensure_refocus_daily_day(
+        &state,
+        &profile,
+        &workspace,
+        local_date,
+        &window.destination_path,
+    )?;
     let evidence = state
         .store
         .get_events_between(window.start_utc, window.end_utc, 500)
