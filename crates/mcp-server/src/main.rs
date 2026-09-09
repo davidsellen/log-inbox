@@ -14,8 +14,8 @@ use log_inbox_core::{
     },
     daily::{render_daily_path, resolve_day},
     models::{
-        DailyConsolidationJob, IgnoredLinkIdentity, LinkSelector, LogEventInput, LogQuery,
-        VaultLinkRule,
+        DailyConsolidationJob, DailyRevisionContent, IgnoredLinkIdentity, LinkSelector,
+        LogEventInput, LogQuery, ProposalRevision, VaultLinkRule,
     },
     settings::Settings,
     store::Store,
@@ -46,6 +46,7 @@ struct AppState {
     daily_notes_display_path: Option<String>,
     vault_context: vault_context::VaultContextProvider,
     apply_lock: Arc<Mutex<()>>,
+    daily_generation_lock: Arc<tokio::sync::Mutex<()>>,
     refocus: Option<RefocusConfig>,
 }
 
@@ -360,6 +361,7 @@ async fn main() -> anyhow::Result<()> {
             .filter(|path| !path.trim().is_empty()),
         vault_context,
         apply_lock: Arc::new(Mutex::new(())),
+        daily_generation_lock: Arc::new(tokio::sync::Mutex::new(())),
         refocus,
     };
 
@@ -392,6 +394,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v2/auth/session", get(refocus_session))
         .route("/api/v2/auth/logout", post(refocus_logout))
         .route("/api/v2/daily/{date}", get(refocus_daily_day))
+        .route(
+            "/api/v2/daily/{date}/generate",
+            post(refocus_generate_daily),
+        )
         .route(
             "/api/v2/daily/{date}/manual",
             post(refocus_create_manual_entry),
@@ -597,6 +603,51 @@ async fn refocus_daily_day(
         .store
         .current_proposal_revision(&profile.id, local_date)
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    let current_snapshot = match current_revision
+        .as_ref()
+        .and_then(|revision| revision.snapshot_id.as_deref())
+    {
+        Some(snapshot_id) => state
+            .store
+            .evidence_snapshot(snapshot_id)
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+        None => None,
+    };
+    let live_event_ids = evidence
+        .events
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect::<Vec<_>>();
+    let live_manual_ids = manual_entries
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<Vec<_>>();
+    let candidate_freshness = current_revision.as_ref().map(|revision| {
+        let stored_manual_ids =
+            serde_json::from_value::<DailyRevisionContent>(revision.content.clone())
+                .map(|content| content.manual_entry_ids)
+                .unwrap_or_default();
+        let stored_event_ids = current_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .event_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if stored_event_ids == live_event_ids
+            && stored_manual_ids
+                .iter()
+                .map(String::as_str)
+                .eq(live_manual_ids)
+        {
+            "current"
+        } else {
+            "update_available"
+        }
+    });
     Ok(Json(json!({
         "workspace_id": profile.id,
         "local_date": local_date,
@@ -612,7 +663,9 @@ async fn refocus_daily_day(
             "limit": evidence.limit
         },
         "manual_entries": manual_entries,
-        "current_revision": current_revision
+        "current_revision": current_revision,
+        "current_snapshot": current_snapshot,
+        "candidate_freshness": candidate_freshness
     })))
 }
 
@@ -645,6 +698,152 @@ async fn refocus_create_manual_entry(
         .create_manual_daily_entry(&profile.id, local_date, &input.text, &input.references)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     Ok((StatusCode::CREATED, Json(entry)))
+}
+
+async fn refocus_generate_daily(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(date): AxumPath<String>,
+) -> Result<Json<ProposalRevision>, ApiError> {
+    authorize_refocus(&state, &headers, "draft:generate", true)?;
+    let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let _generation_guard = state.daily_generation_lock.lock().await;
+    let profile = state
+        .store
+        .active_workspace_profile()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::conflict("review and activate a workspace profile first"))?;
+    let frozen_day = state
+        .store
+        .daily_day(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let window = effective_daily_window(local_date, &profile, frozen_day.as_ref())
+        .map_err(ApiError::bad_request)?;
+    state
+        .store
+        .ensure_daily_day(local_date, &window.destination_path, None)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let evidence = state
+        .store
+        .get_events_between(window.start_utc, window.end_utc, 500)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if evidence.truncated {
+        return Err(ApiError::unprocessable(
+            "Daily evidence exceeds the supported 500-event preview limit.",
+        ));
+    }
+    let manual_entry_ids = state
+        .store
+        .manual_daily_entries(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+
+    if evidence.events.is_empty() {
+        if manual_entry_ids.is_empty() {
+            return Err(ApiError::conflict(
+                "This day has no evidence or manual notes.",
+            ));
+        }
+        let content = serde_json::to_value(DailyRevisionContent {
+            schema_version: 1,
+            workstreams: Vec::new(),
+            manual_entry_ids,
+            open_questions: Vec::new(),
+        })
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+        if let Some(current) = state
+            .store
+            .current_proposal_revision(&profile.id, local_date)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .filter(|current| current.snapshot_id.is_none() && current.content == content)
+        {
+            return Ok(Json(current));
+        }
+        let revision = state
+            .store
+            .create_proposal_revision(&profile.id, local_date, None, "manual", &content)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        return Ok(Json(revision));
+    }
+
+    let event_ids = evidence
+        .events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>();
+    let snapshot = state
+        .store
+        .create_evidence_snapshot(&profile.id, local_date, &event_ids)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if let Some(current) = state
+        .store
+        .current_proposal_revision(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .filter(|current| {
+            current.snapshot_id.as_deref() == Some(snapshot.id.as_str())
+                && serde_json::from_value::<DailyRevisionContent>(current.content.clone())
+                    .is_ok_and(|content| content.manual_entry_ids == manual_entry_ids)
+        })
+    {
+        return Ok(Json(current));
+    }
+
+    state
+        .store
+        .set_daily_generation_status(&profile.id, local_date, "running")
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let args = llm::SuggestMarkdownSummaryArgs {
+        event_ids,
+        vault_context: json!({
+            "daily_note": window.destination_path,
+            "candidate_notes": [],
+            "workstream_links": {}
+        }),
+        mode: "daily-consolidation".to_owned(),
+        task: Some(
+            "Create a concise, evidence-backed daily engineering record. Preserve distinct outcomes, decisions, trade-offs, validation, blockers, and follow-up."
+                .to_owned(),
+        ),
+    };
+    let proposal = match llm::generate_automated_daily_summary(
+        state.llm_config.as_ref(),
+        args,
+        evidence.events,
+    )
+    .await
+    {
+        Ok(proposal) => proposal,
+        Err(error) => {
+            state
+                .store
+                .set_daily_generation_status(&profile.id, local_date, "failed")
+                .map_err(|store_error| ApiError::internal(store_error.to_string()))?;
+            return Err(ApiError::unprocessable(error));
+        }
+    };
+    let draft = proposal
+        .structured_draft
+        .ok_or_else(|| ApiError::internal("daily generator omitted structured content"))?;
+    let content = json!({
+        "schema_version": 1,
+        "workstreams": draft.workstreams,
+        "manual_entry_ids": manual_entry_ids,
+        "open_questions": draft.open_questions
+    });
+    let revision = state
+        .store
+        .create_proposal_revision(
+            &profile.id,
+            local_date,
+            Some(&snapshot.id),
+            "generated",
+            &content,
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(revision))
 }
 
 fn effective_daily_window(
@@ -2376,6 +2575,13 @@ impl ApiError {
     fn conflict(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
+
+    fn unprocessable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
             message: message.into(),
         }
     }

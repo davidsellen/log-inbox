@@ -614,6 +614,7 @@ mod tests {
             supersedes_proposal_ids: vec!["proposal_previous".to_owned()],
             consolidation_job_id: Some("consolidation_test".to_owned()),
             link_context_revision: "catalog-1".to_owned(),
+            structured_draft: None,
         }
     }
 

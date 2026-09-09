@@ -208,6 +208,8 @@ pub struct DailyWorkstream {
     pub title: String,
     pub evidence_event_ids: Vec<String>,
     #[serde(default)]
+    pub canonical_links: Vec<String>,
+    #[serde(default)]
     pub outcome: Vec<DailyFact>,
     #[serde(default)]
     pub decision: Vec<DailyFact>,

@@ -136,10 +136,10 @@ Exit gate: contracts and fixtures are reviewable, the backup can be restored, an
 
 ### M1 — Trustworthy Daily Preview
 
-- [ ] Develop the replacement behind a disabled feature gate. Its preview may read legacy evidence, but it cannot mutate review state or Markdown until M0c is complete.
-- [ ] Implement server-authoritative date navigation and one current candidate with immutable snapshots/revisions.
+- [x] Develop the replacement behind a disabled feature gate. Its preview may read legacy evidence, but it cannot mutate review state or Markdown until M0c is complete.
+- [x] Implement server-authoritative date navigation and one current candidate with immutable snapshots/revisions.
 - [ ] Tighten grouping/deduplication and preserve unique decision/validation evidence.
-- [ ] Implement strict structured generation, adaptive fields, evidence coverage and explicit failures without raw fallback.
+- [x] Implement strict structured generation, adaptive fields, evidence coverage and explicit failures without raw fallback.
 - [ ] Keep manual entries separate; add structured editing, scoped omission/reopen, references and final preview.
 - [ ] Preserve edited drafts and implement detached Advanced Markdown semantics if the override is shipped.
 - [ ] Provide a useful draft with zero Knowledge collections or canonical mappings.

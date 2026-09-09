@@ -81,6 +81,24 @@ impl Store {
         self.proposal_revision(&revision_id)
     }
 
+    pub fn set_daily_generation_status(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        status: &str,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            matches!(status, "none" | "queued" | "running" | "ready" | "failed"),
+            "invalid daily generation status"
+        );
+        let changed = self.connect()?.execute(
+            "UPDATE daily_days SET generation_status = ?1, updated_at = ?2 WHERE workspace_id = ?3 AND local_date = ?4",
+            params![status, Utc::now().to_rfc3339(), workspace_id, local_date.to_string()],
+        )?;
+        anyhow::ensure!(changed == 1, "daily day was not found");
+        Ok(())
+    }
+
     pub fn create_manual_daily_entry(
         &self,
         workspace_id: &str,
@@ -321,7 +339,7 @@ impl Store {
         Ok(())
     }
 
-    fn evidence_snapshot(&self, id: &str) -> Result<Option<EvidenceSnapshot>> {
+    pub fn evidence_snapshot(&self, id: &str) -> Result<Option<EvidenceSnapshot>> {
         let conn = self.connect()?;
         let header = conn.query_row(
             "SELECT id, workspace_id, local_date, snapshot_digest, created_at FROM evidence_snapshots WHERE id = ?1",
@@ -722,6 +740,22 @@ mod tests {
         let snapshot = store
             .create_evidence_snapshot(&profile.id, date, &event_ids)
             .expect("snapshot stores");
+        assert!(
+            store
+                .create_proposal_revision(
+                    &profile.id,
+                    date,
+                    Some(&snapshot.id),
+                    "generated",
+                    &serde_json::json!({
+                        "schema_version": 1,
+                        "workstreams": []
+                    }),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("requires a workstream")
+        );
         let repeated = store
             .create_evidence_snapshot(&profile.id, date, &event_ids)
             .expect("snapshot is idempotent");
@@ -733,6 +767,17 @@ mod tests {
             .create_evidence_snapshot(&profile.id, date, &event_ids)
             .expect("derived review state does not alter snapshot identity");
         assert_eq!(after_review.id, snapshot.id);
+        store
+            .set_daily_generation_status(&profile.id, date, "failed")
+            .expect("generation failure records");
+        assert_eq!(
+            store
+                .daily_day(&profile.id, date)
+                .unwrap()
+                .unwrap()
+                .generation_status,
+            "failed"
+        );
         store
             .connect()
             .unwrap()
