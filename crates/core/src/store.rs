@@ -631,6 +631,46 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 13 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE daily_automation_settings (
+                    workspace_id TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+                    generation_time TEXT NOT NULL,
+                    catch_up_days INTEGER NOT NULL CHECK(catch_up_days BETWEEN 1 AND 90),
+                    raw_retention_days INTEGER NOT NULL CHECK(raw_retention_days BETWEEN 1 AND 3650),
+                    audit_retention_days INTEGER NOT NULL CHECK(audit_retention_days BETWEEN 1 AND 3650),
+                    recovery_retention_days INTEGER NOT NULL CHECK(recovery_retention_days BETWEEN 1 AND 3650),
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(workspace_id) REFERENCES workspace_profiles(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE daily_schedule_runs (
+                    workspace_id TEXT NOT NULL,
+                    local_date TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('pending', 'claimed', 'completed', 'failed', 'dismissed')),
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at TEXT NOT NULL,
+                    claimed_at TEXT,
+                    completed_at TEXT,
+                    last_error TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(workspace_id, local_date),
+                    FOREIGN KEY(workspace_id) REFERENCES workspace_profiles(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX idx_daily_schedule_runs_due
+                    ON daily_schedule_runs(state, next_attempt_at);
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (13, 'daily automation schedule', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -2060,10 +2100,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 12);
+        assert_eq!(store.schema_version().expect("version reads"), 13);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 12);
+        assert_eq!(store.schema_version().expect("version remains"), 13);
     }
 
     #[test]
@@ -2131,7 +2171,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 12);
+        assert_eq!(verification.schema_version, 13);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());

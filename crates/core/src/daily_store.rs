@@ -1,14 +1,14 @@
 use crate::{
     daily::resolve_day,
     models::{
-        ApplyOperation, DailyDay, DailyRevisionContent, DailyTemplateSnapshot, DailyWorkstream,
-        EvidenceSnapshot, ManualDailyEntry, PrepareApplyOperation, ProposalRevision,
-        SnapshotEvidence,
+        ApplyOperation, DailyAutomationSettings, DailyDay, DailyRevisionContent, DailyScheduleRun,
+        DailyTemplateSnapshot, DailyWorkstream, EvidenceSnapshot, ManualDailyEntry,
+        PrepareApplyOperation, ProposalRevision, SnapshotEvidence,
     },
     store::Store,
 };
 use anyhow::{Context, Result};
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
 use rusqlite::{OptionalExtension, Row, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -16,6 +16,232 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 impl Store {
+    pub fn daily_automation_settings(&self, workspace_id: &str) -> Result<DailyAutomationSettings> {
+        let stored = self
+            .connect()?
+            .query_row(
+                "SELECT workspace_id, enabled, generation_time, catch_up_days, raw_retention_days, audit_retention_days, recovery_retention_days, updated_at FROM daily_automation_settings WHERE workspace_id = ?1",
+                params![workspace_id],
+                daily_automation_settings_from_row,
+            )
+            .optional()?;
+        Ok(stored.unwrap_or_else(|| DailyAutomationSettings {
+            workspace_id: workspace_id.to_owned(),
+            enabled: true,
+            generation_time: "00:15".to_owned(),
+            catch_up_days: 7,
+            raw_retention_days: 30,
+            audit_retention_days: 30,
+            recovery_retention_days: 30,
+            updated_at: DateTime::<Utc>::UNIX_EPOCH,
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_daily_automation_settings(
+        &self,
+        workspace_id: &str,
+        enabled: bool,
+        generation_time: &str,
+        catch_up_days: u16,
+        raw_retention_days: u16,
+        audit_retention_days: u16,
+        recovery_retention_days: u16,
+        expected_updated_at: Option<DateTime<Utc>>,
+    ) -> Result<DailyAutomationSettings> {
+        NaiveTime::parse_from_str(generation_time, "%H:%M")
+            .context("generation time must use HH:MM")?;
+        anyhow::ensure!(
+            (1..=90).contains(&catch_up_days),
+            "catch-up days must be between 1 and 90"
+        );
+        for (name, value) in [
+            ("raw retention", raw_retention_days),
+            ("audit retention", audit_retention_days),
+            ("recovery retention", recovery_retention_days),
+        ] {
+            anyhow::ensure!(
+                (1..=3650).contains(&value),
+                "{name} days must be between 1 and 3650"
+            );
+        }
+        let active = self
+            .active_workspace_profile()?
+            .context("an active workspace profile is required")?;
+        anyhow::ensure!(
+            active.id == workspace_id,
+            "automation settings must belong to the active workspace"
+        );
+
+        let now = Utc::now();
+        let conn = self.connect()?;
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT updated_at FROM daily_automation_settings WHERE workspace_id = ?1",
+                params![workspace_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match (existing.as_deref(), expected_updated_at) {
+            (Some(current), Some(expected)) => anyhow::ensure!(
+                parse_time(current)? == expected,
+                "automation settings changed; reload and try again"
+            ),
+            (Some(_), None) => anyhow::bail!("expected automation settings revision is required"),
+            (None, Some(_)) => anyhow::bail!("automation settings do not exist yet"),
+            (None, None) => {}
+        }
+        conn.execute(
+            r#"INSERT INTO daily_automation_settings
+               (workspace_id, enabled, generation_time, catch_up_days, raw_retention_days,
+                audit_retention_days, recovery_retention_days, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+               ON CONFLICT(workspace_id) DO UPDATE SET
+                 enabled = excluded.enabled,
+                 generation_time = excluded.generation_time,
+                 catch_up_days = excluded.catch_up_days,
+                 raw_retention_days = excluded.raw_retention_days,
+                 audit_retention_days = excluded.audit_retention_days,
+                 recovery_retention_days = excluded.recovery_retention_days,
+                 updated_at = excluded.updated_at"#,
+            params![
+                workspace_id,
+                enabled,
+                generation_time,
+                catch_up_days,
+                raw_retention_days,
+                audit_retention_days,
+                recovery_retention_days,
+                now.to_rfc3339(),
+            ],
+        )?;
+        self.daily_automation_settings(workspace_id)
+    }
+
+    pub fn enqueue_daily_schedule_run(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        due_at: DateTime<Utc>,
+    ) -> Result<DailyScheduleRun> {
+        let now = Utc::now().to_rfc3339();
+        self.connect()?.execute(
+            r#"INSERT INTO daily_schedule_runs
+               (workspace_id, local_date, state, attempts, next_attempt_at, updated_at)
+               VALUES (?1, ?2, 'pending', 0, ?3, ?4)
+               ON CONFLICT(workspace_id, local_date) DO NOTHING"#,
+            params![
+                workspace_id,
+                local_date.to_string(),
+                due_at.to_rfc3339(),
+                now
+            ],
+        )?;
+        self.daily_schedule_run(workspace_id, local_date)?
+            .context("schedule run missing after enqueue")
+    }
+
+    pub fn claim_daily_schedule_run(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        now: DateTime<Utc>,
+    ) -> Result<Option<DailyScheduleRun>> {
+        let stale_before = now - Duration::minutes(30);
+        let conn = self.connect()?;
+        let changed = conn.execute(
+            r#"UPDATE daily_schedule_runs
+               SET state = 'claimed', attempts = attempts + 1, claimed_at = ?1,
+                   last_error = NULL, updated_at = ?1
+               WHERE workspace_id = ?2 AND local_date = ?3
+                 AND next_attempt_at <= ?1
+                 AND (state IN ('pending', 'failed') OR (state = 'claimed' AND claimed_at <= ?4))"#,
+            params![
+                now.to_rfc3339(),
+                workspace_id,
+                local_date.to_string(),
+                stale_before.to_rfc3339(),
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.daily_schedule_run(workspace_id, local_date)
+    }
+
+    pub fn finish_daily_schedule_run(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        error: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<DailyScheduleRun> {
+        let (state, completed_at, next_attempt_at, last_error) = match error {
+            None => ("completed", Some(now.to_rfc3339()), now.to_rfc3339(), None),
+            Some(error) => {
+                anyhow::ensure!(error.len() <= 2048, "schedule error is too large");
+                (
+                    "failed",
+                    None,
+                    (now + Duration::minutes(15)).to_rfc3339(),
+                    Some(error),
+                )
+            }
+        };
+        let changed = self.connect()?.execute(
+            r#"UPDATE daily_schedule_runs
+               SET state = ?1, completed_at = ?2, next_attempt_at = ?3,
+                   last_error = ?4, updated_at = ?5
+               WHERE workspace_id = ?6 AND local_date = ?7 AND state = 'claimed'"#,
+            params![
+                state,
+                completed_at,
+                next_attempt_at,
+                last_error,
+                now.to_rfc3339(),
+                workspace_id,
+                local_date.to_string(),
+            ],
+        )?;
+        anyhow::ensure!(changed == 1, "schedule run is not claimed");
+        self.daily_schedule_run(workspace_id, local_date)?
+            .context("schedule run missing after finish")
+    }
+
+    pub fn daily_schedule_runs(
+        &self,
+        workspace_id: &str,
+        limit: usize,
+    ) -> Result<Vec<DailyScheduleRun>> {
+        anyhow::ensure!(
+            (1..=100).contains(&limit),
+            "schedule run limit must be between 1 and 100"
+        );
+        let conn = self.connect()?;
+        let mut statement = conn.prepare(
+            "SELECT workspace_id, local_date, state, attempts, next_attempt_at, claimed_at, completed_at, last_error, updated_at FROM daily_schedule_runs WHERE workspace_id = ?1 ORDER BY local_date DESC LIMIT ?2",
+        )?;
+        let rows =
+            statement.query_map(params![workspace_id, limit], daily_schedule_run_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    fn daily_schedule_run(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+    ) -> Result<Option<DailyScheduleRun>> {
+        self.connect()?
+            .query_row(
+                "SELECT workspace_id, local_date, state, attempts, next_attempt_at, claimed_at, completed_at, last_error, updated_at FROM daily_schedule_runs WHERE workspace_id = ?1 AND local_date = ?2",
+                params![workspace_id, local_date.to_string()],
+                daily_schedule_run_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn ensure_daily_day(
         &self,
         local_date: NaiveDate,
@@ -1178,6 +1404,65 @@ fn daily_day_from_row(row: &Row<'_>) -> rusqlite::Result<DailyDay> {
     })
 }
 
+fn daily_automation_settings_from_row(row: &Row<'_>) -> rusqlite::Result<DailyAutomationSettings> {
+    let updated_at: String = row.get(7)?;
+    Ok(DailyAutomationSettings {
+        workspace_id: row.get(0)?,
+        enabled: row.get(1)?,
+        generation_time: row.get(2)?,
+        catch_up_days: row.get(3)?,
+        raw_retention_days: row.get(4)?,
+        audit_retention_days: row.get(5)?,
+        recovery_retention_days: row.get(6)?,
+        updated_at: parse_time(&updated_at).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, error.into())
+        })?,
+    })
+}
+
+fn daily_schedule_run_from_row(row: &Row<'_>) -> rusqlite::Result<DailyScheduleRun> {
+    let local_date: String = row.get(1)?;
+    let next_attempt_at: String = row.get(4)?;
+    let claimed_at: Option<String> = row.get(5)?;
+    let completed_at: Option<String> = row.get(6)?;
+    let updated_at: String = row.get(8)?;
+    Ok(DailyScheduleRun {
+        workspace_id: row.get(0)?,
+        local_date: parse_date(&local_date).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, error.into())
+        })?,
+        state: row.get(2)?,
+        attempts: row.get(3)?,
+        next_attempt_at: parse_time(&next_attempt_at).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, error.into())
+        })?,
+        claimed_at: claimed_at
+            .map(|value| parse_time(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            })?,
+        completed_at: completed_at
+            .map(|value| parse_time(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            })?,
+        last_error: row.get(7)?,
+        updated_at: parse_time(&updated_at).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, error.into())
+        })?,
+    })
+}
+
 fn proposal_revision_from_row(row: &Row<'_>) -> rusqlite::Result<ProposalRevision> {
     let local_date: String = row.get(2)?;
     let content_json: String = row.get(6)?;
@@ -1350,6 +1635,75 @@ fn validate_workstream_evidence(
 mod tests {
     use super::*;
     use crate::models::LogEventInput;
+
+    #[test]
+    fn saves_automation_settings_optimistically_and_claims_schedule_runs_once() {
+        let store = Store::open(std::env::temp_dir().join(format!(
+            "log-inbox-daily-automation-{}.sqlite3",
+            Uuid::new_v4()
+        )))
+        .expect("store opens");
+        let profile = store
+            .create_pending_workspace_profile(
+                "automation-binding",
+                "Europe/Stockholm",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+            )
+            .and_then(|profile| store.activate_workspace_profile(&profile.id))
+            .expect("profile activates");
+
+        let defaults = store
+            .daily_automation_settings(&profile.id)
+            .expect("defaults resolve");
+        assert!(defaults.enabled);
+        assert_eq!(defaults.generation_time, "00:15");
+        assert_eq!(defaults.catch_up_days, 7);
+
+        let saved = store
+            .save_daily_automation_settings(&profile.id, false, "06:45", 14, 30, 45, 60, None)
+            .expect("settings save");
+        assert!(!saved.enabled);
+        assert_eq!(saved.generation_time, "06:45");
+        assert!(
+            store
+                .save_daily_automation_settings(&profile.id, true, "00:15", 7, 30, 30, 30, None,)
+                .unwrap_err()
+                .to_string()
+                .contains("expected automation settings revision")
+        );
+
+        let date = NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+        let now = Utc::now();
+        store
+            .enqueue_daily_schedule_run(&profile.id, date, now)
+            .expect("run enqueues");
+        let claimed = store
+            .claim_daily_schedule_run(&profile.id, date, now)
+            .expect("claim succeeds")
+            .expect("run claims");
+        assert_eq!(claimed.state, "claimed");
+        assert_eq!(claimed.attempts, 1);
+        assert!(
+            store
+                .claim_daily_schedule_run(&profile.id, date, now)
+                .expect("second claim is safe")
+                .is_none()
+        );
+        let failed = store
+            .finish_daily_schedule_run(&profile.id, date, Some("model unavailable"), now)
+            .expect("failure records");
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.last_error.as_deref(), Some("model unavailable"));
+        assert!(
+            store
+                .claim_daily_schedule_run(&profile.id, date, now)
+                .expect("backoff applies")
+                .is_none()
+        );
+    }
 
     #[test]
     fn keeps_days_snapshots_and_revisions_immutable() {

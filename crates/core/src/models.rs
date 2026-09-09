@@ -241,6 +241,31 @@ pub struct DailyDay {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DailyAutomationSettings {
+    pub workspace_id: String,
+    pub enabled: bool,
+    pub generation_time: String,
+    pub catch_up_days: u16,
+    pub raw_retention_days: u16,
+    pub audit_retention_days: u16,
+    pub recovery_retention_days: u16,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DailyScheduleRun {
+    pub workspace_id: String,
+    pub local_date: NaiveDate,
+    pub state: String,
+    pub attempts: u16,
+    pub next_attempt_at: DateTime<Utc>,
+    pub claimed_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DailyTemplateSnapshot {
     pub workspace_id: String,
     pub local_date: NaiveDate,
