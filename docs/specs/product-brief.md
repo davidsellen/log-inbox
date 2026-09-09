@@ -1,25 +1,45 @@
 # Product Brief
 
+Status: planned refocus. See the [roadmap](../roadmap.md) for delivery order and acceptance gates. This brief describes the intended product, not a claim that the current runtime implements it.
+
 ## Problem
 
-Host machines, virtual machines, and local services produce useful diagnostic logs, but those logs are scattered across terminals, Docker, Windows, and device-specific locations. An agent can help summarize and connect those logs to Markdown work notes, but raw logs should not be pasted into chat or dumped into the vault.
+Engineering outcomes, decisions, validations, failed attempts, and follow-ups are scattered across terminals, repositories, agent sessions, and manual notes. Reconstructing a useful daily record takes effort; dumping raw activity into a notes workspace creates noise rather than durable understanding.
+
+The initial audience is an individual engineer already using coding agents and Markdown notes. The primary job is to answer: what changed, why, what was checked, and what remains?
 
 ## Desired Outcome
 
-Create a local log inbox that accepts logs from many producers, stores them durably, exposes review tools to an agent, and lets the agent write concise summaries into a Markdown vault when there is a durable result.
+Provide a single-owner, self-hosted HTTP collector, dashboard, scheduler, MCP interface, and reviewed Markdown writer. Create one current structured daily candidate with immutable revisions; require explicit review before writing one managed block to the resolved daily note.
+
+- **Daily:** generate, edit, inspect evidence, include or omit workstreams, preview the exact diff, and apply.
+- **Knowledge:** optionally select existing Markdown context and maintain canonical mappings. A useful draft must work without any collections or mappings.
+- **Settings:** configure workspace identity, dates, automation, model access, retention, security, and agent integration.
+
+Keep manual notes separate from automated summaries. Report model failures visibly. Preserve user-owned content outside the managed block, detect managed-block conflicts, and recover interrupted Apply operations without duplicating content. Document the limits of protection against independently writing editors.
 
 ## Non-Goals
 
-- Do not use MCP as the device ingestion protocol.
-- Do not write raw log streams directly into the Markdown vault.
-- Do not require every producer to install an agent-specific client.
-- Do not expose the collector publicly by default.
+- General vault management, file browsing, note reorganization, or a Notion-style workspace.
+- Product-note updates, decision-record creation, and feature-recap writes without a separate complete review/apply workflow.
+- Automatic Apply, raw-log fallback masquerading as a ready summary, or silent overwrites of edited drafts.
+- Browser filesystem write mode, per-task proposal staging, or operational proposal files inside the Markdown workspace after cutover.
+- Public multi-tenant hosting, multiple active workspaces/models, full editor-plugin emulation, or broad agent write access in the initial delivery.
+- MCP as ingestion, mandatory agent-specific producer clients, or productivity/surveillance metrics.
 
-## First Useful Version
+## First Usable Refocused Release
 
-- Docker Compose starts a local collector and MCP server.
-- Hosts and VMs can send JSON logs over HTTP.
-- Logs are stored in SQLite or JSONL on a Docker volume.
-- An agent can list sources, search recent logs, read a bounded window, and mark entries reviewed.
-- LLM-assisted consolidation can propose Markdown summaries and vault patches for review.
-- Vault updates are summaries with links or references to the source window, not raw log dumps.
+- Preserve the existing HTTP ingestion envelope and useful Rust behavior.
+- Scope events, settings, mappings, decisions, and revisions to a stable workspace profile.
+- Resolve dates on the server using the workspace timezone; retain event time and receipt time separately.
+- Generate validated structured workstreams, with explicit evidence coverage and no automatic raw fallback.
+- Support manual entries, structured review, reversible evidence-scoped omission, and visible failures without Knowledge setup.
+- Authenticate sensitive access and mutations before enabling the new writable deployment.
+- Show the resolved daily destination and block diff; Apply through one reviewed, recoverable writer.
+- Cut over through an idempotent migration that preserves source data on failure and removes obsolete runtime paths only when the replacement is ready.
+
+Scheduling, retention-aware late-event handling, and richer context retrieval follow the roadmap's gates. Remote provider support must bring its full privacy/security requirements forward if needed earlier.
+
+## Success Criteria
+
+Start with ten active engineering days. Measure review time, factual corrections, high-value evidence coverage, later recall, and configuration/maintenance effort. Data loss, unauthorized writes, silent draft overwrites, or silently discarded evidence block expansion. Commercial demand and willingness to pay remain hypotheses, not established outcomes.

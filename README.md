@@ -1,15 +1,21 @@
 # Log Inbox
 
-Spec-first project for collecting logs from hosts, VMs, and local devices into a durable inbox that can feed curated summaries into a Markdown vault through agent-readable tools.
+Spec-first project for turning selected engineering activity into reviewed daily records in an existing Markdown workspace.
 
 ## Goal
 
-Provide a small local logging system with two separate responsibilities:
+The product direction is a single-owner, self-hosted daily engineering journal pipeline:
 
-- Producers send logs to an ordinary ingest API.
-- An agent reads curated log slices through MCP tools and writes human summaries to notes only when useful.
+- Producers send selected activity to the ordinary HTTP ingest API.
+- Log Inbox collects evidence, generates daily drafts, and supports explicit review before applying summaries to Markdown notes.
 
-MCP is not the ingest protocol. It is the agent-facing read/search/ack interface. The managed output is a directory of ordinary Markdown files that can be read by any notes app, editor, static-site generator, or agent.
+MCP is an agent-facing interface, not the ingest protocol. Daily review is the product; Knowledge provides optional context; Settings configures the service. Log Inbox is not a vault manager or a Notion replacement.
+
+## Roadmap and Implementation Status
+
+See the [Daily Engineering Knowledge roadmap](docs/roadmap.md) for the planned direction, phased milestones, safety contracts, migration gates, and pilot criteria.
+
+The refocus is planned, not implemented by this documentation update. The usage instructions below describe the pre-refocus runtime, including browser-connected vaults, separate mounts, and per-task proposal staging. Those workflows remain documented until the coordinated cutover; the roadmap governs future development. Do not assume the planned dashboard authentication or new write-safety guarantees are available in the current runtime.
 
 ## Default Deployment
 
@@ -216,6 +222,7 @@ The LLM receives a bounded projection (16 KiB message and 8 KiB metadata per eve
 
 ## Specs
 
+- [Roadmap and delivery milestones](docs/roadmap.md)
 - [Product brief](docs/specs/product-brief.md)
 - [Architecture](docs/specs/architecture.md)
 - [Ingest API](docs/specs/ingest-api.md)
