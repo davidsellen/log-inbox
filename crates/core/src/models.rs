@@ -242,6 +242,38 @@ pub struct DailyFact {
     pub evidence_event_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApplyOperation {
+    pub id: String,
+    pub workspace_id: String,
+    pub local_date: NaiveDate,
+    pub revision_id: String,
+    pub revision_content_hash: String,
+    pub destination_path: String,
+    pub expected_old_block_hash: Option<String>,
+    pub intended_new_block_hash: String,
+    pub recovery_payload: Option<Vec<u8>>,
+    pub recovery_path: Option<String>,
+    pub state: String,
+    pub failure_reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrepareApplyOperation {
+    pub id: String,
+    pub workspace_id: String,
+    pub local_date: NaiveDate,
+    pub revision_id: String,
+    pub revision_content_hash: String,
+    pub destination_path: String,
+    pub expected_old_block_hash: Option<String>,
+    pub intended_new_block_hash: String,
+    pub recovery_payload: Option<Vec<u8>>,
+    pub recovery_path: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProposalRevision {
     pub id: String,

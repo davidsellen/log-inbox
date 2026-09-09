@@ -410,6 +410,55 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 8 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE apply_operations (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    local_date TEXT NOT NULL,
+                    revision_id TEXT NOT NULL,
+                    revision_content_hash TEXT NOT NULL,
+                    destination_path TEXT NOT NULL,
+                    expected_old_block_hash TEXT,
+                    intended_new_block_hash TEXT NOT NULL,
+                    recovery_payload BLOB,
+                    recovery_path TEXT,
+                    state TEXT NOT NULL CHECK(state IN (
+                        'prepared', 'writing', 'written', 'finalized', 'failed',
+                        'reconciliation_required'
+                    )),
+                    failure_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK((recovery_payload IS NOT NULL) <> (recovery_path IS NOT NULL)),
+                    FOREIGN KEY(workspace_id, local_date)
+                        REFERENCES daily_days(workspace_id, local_date),
+                    FOREIGN KEY(revision_id) REFERENCES proposal_revisions(id)
+                );
+
+                CREATE INDEX idx_apply_operations_day
+                    ON apply_operations(workspace_id, local_date, created_at DESC);
+                CREATE INDEX idx_apply_operations_state
+                    ON apply_operations(state, updated_at);
+
+                CREATE TRIGGER apply_operations_immutable_inputs
+                BEFORE UPDATE OF id, workspace_id, local_date, revision_id,
+                    revision_content_hash, destination_path, expected_old_block_hash,
+                    intended_new_block_hash, recovery_payload, recovery_path
+                ON apply_operations
+                BEGIN
+                    SELECT RAISE(ABORT, 'apply operation inputs are immutable');
+                END;
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (8, 'apply operation journal', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -674,6 +723,91 @@ impl Store {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_active_workspace_profile(
+        &self,
+        root_binding: &str,
+        timezone: &str,
+        daily_root: &str,
+        daily_pattern: &str,
+        template_path: Option<&str>,
+        link_style: &str,
+        expected_active: Option<(&str, DateTime<Utc>)>,
+    ) -> Result<WorkspaceProfile> {
+        validate_workspace_profile(
+            root_binding,
+            timezone,
+            daily_root,
+            daily_pattern,
+            template_path,
+            link_style,
+        )?;
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        let active = transaction
+            .query_row(
+                "SELECT id, status, root_binding, timezone, daily_root, daily_pattern, template_path, link_style, created_at, updated_at FROM workspace_profiles WHERE status = 'active'",
+                [],
+                workspace_profile_from_row,
+            )
+            .optional()?;
+        let now = Utc::now();
+        let id = if let Some(active) = active {
+            let (expected_id, expected_updated_at) = expected_active
+                .context("active workspace update requires its expected ID and update timestamp")?;
+            anyhow::ensure!(
+                active.id == expected_id && active.updated_at == expected_updated_at,
+                "active workspace changed; reload it before saving"
+            );
+            let changed = transaction.execute(
+                r#"UPDATE workspace_profiles
+                   SET root_binding = ?1, timezone = ?2, daily_root = ?3,
+                       daily_pattern = ?4, template_path = ?5, link_style = ?6,
+                       updated_at = ?7
+                   WHERE id = ?8 AND status = 'active' AND updated_at = ?9"#,
+                params![
+                    root_binding.trim(),
+                    timezone,
+                    daily_root.trim(),
+                    daily_pattern.trim(),
+                    template_path.map(str::trim),
+                    link_style,
+                    now.to_rfc3339(),
+                    expected_id,
+                    expected_updated_at.to_rfc3339()
+                ],
+            )?;
+            anyhow::ensure!(changed == 1, "active workspace changed while saving");
+            active.id
+        } else {
+            anyhow::ensure!(
+                expected_active.is_none(),
+                "expected active workspace does not exist"
+            );
+            let id = format!("workspace_{}", Uuid::new_v4().simple());
+            transaction.execute(
+                r#"INSERT INTO workspace_profiles
+                    (id, status, root_binding, timezone, daily_root, daily_pattern,
+                     template_path, link_style, created_at, updated_at)
+                   VALUES (?1, 'active', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)"#,
+                params![
+                    id,
+                    root_binding.trim(),
+                    timezone,
+                    daily_root.trim(),
+                    daily_pattern.trim(),
+                    template_path.map(str::trim),
+                    link_style,
+                    now.to_rfc3339()
+                ],
+            )?;
+            id
+        };
+        transaction.commit()?;
+        self.workspace_profile(&id)?
+            .context("saved active workspace profile is missing")
     }
 
     pub fn begin_migration_operation(
@@ -1739,10 +1873,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 7);
+        assert_eq!(store.schema_version().expect("version reads"), 8);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 7);
+        assert_eq!(store.schema_version().expect("version remains"), 8);
     }
 
     #[test]
@@ -1810,7 +1944,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 7);
+        assert_eq!(verification.schema_version, 8);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());
@@ -1917,6 +2051,68 @@ mod tests {
                     "markdown",
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn saves_the_first_active_workspace_and_updates_it_optimistically_in_place() {
+        let store = temp_store();
+        let first = store
+            .save_active_workspace_profile(
+                "binding-one",
+                "UTC",
+                "Daily",
+                "{date}.md",
+                None,
+                "markdown",
+                None,
+            )
+            .expect("first active workspace stores");
+        assert_eq!(first.status, "active");
+
+        assert!(
+            store
+                .save_active_workspace_profile(
+                    "binding-two",
+                    "Europe/Stockholm",
+                    "Work Log",
+                    "{year}/{date}.md",
+                    Some("Templates/Daily.md"),
+                    "wikilink",
+                    None,
+                )
+                .is_err(),
+            "updates require an optimistic version"
+        );
+        let updated = store
+            .save_active_workspace_profile(
+                "binding-two",
+                "Europe/Stockholm",
+                "Work Log",
+                "{year}/{date}.md",
+                Some("Templates/Daily.md"),
+                "wikilink",
+                Some((&first.id, first.updated_at)),
+            )
+            .expect("active workspace updates");
+        assert_eq!(updated.id, first.id);
+        assert_eq!(updated.created_at, first.created_at);
+        assert_eq!(updated.root_binding, "binding-two");
+        assert_eq!(updated.daily_root, "Work Log");
+
+        assert!(
+            store
+                .save_active_workspace_profile(
+                    "binding-three",
+                    "UTC",
+                    "Daily",
+                    "{date}.md",
+                    None,
+                    "markdown",
+                    Some((&first.id, first.updated_at)),
+                )
+                .is_err(),
+            "a stale version cannot overwrite the active workspace"
         );
     }
 

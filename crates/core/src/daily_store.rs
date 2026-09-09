@@ -1,8 +1,8 @@
 use crate::{
     daily::resolve_day,
     models::{
-        DailyDay, DailyRevisionContent, DailyWorkstream, EvidenceSnapshot, ManualDailyEntry,
-        ProposalRevision, SnapshotEvidence,
+        ApplyOperation, DailyDay, DailyRevisionContent, DailyWorkstream, EvidenceSnapshot,
+        ManualDailyEntry, PrepareApplyOperation, ProposalRevision, SnapshotEvidence,
     },
     store::Store,
 };
@@ -357,6 +357,129 @@ impl Store {
             .context("proposal revision missing after creation")
     }
 
+    pub fn prepare_apply_operation(&self, input: &PrepareApplyOperation) -> Result<ApplyOperation> {
+        validate_apply_operation_input(input)?;
+        let day = self
+            .daily_day(&input.workspace_id, input.local_date)?
+            .context("apply operation day does not exist")?;
+        anyhow::ensure!(
+            day.destination_path == input.destination_path,
+            "apply destination differs from the frozen daily destination"
+        );
+        anyhow::ensure!(
+            day.current_revision_id.as_deref() == Some(input.revision_id.as_str()),
+            "apply revision is not the current daily revision"
+        );
+        let revision = self
+            .proposal_revision(&input.revision_id)?
+            .context("apply proposal revision does not exist")?;
+        anyhow::ensure!(
+            revision.workspace_id == input.workspace_id
+                && revision.local_date == input.local_date
+                && revision.content_hash == input.revision_content_hash,
+            "apply revision identity or content hash does not match"
+        );
+
+        let now = Utc::now().to_rfc3339();
+        let conn = self.connect()?;
+        conn.execute(
+            r#"INSERT OR IGNORE INTO apply_operations
+                (id, workspace_id, local_date, revision_id, revision_content_hash,
+                 destination_path, expected_old_block_hash, intended_new_block_hash,
+                 recovery_payload, recovery_path, state, failure_reason, created_at, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                       'prepared', NULL, ?11, ?11)"#,
+            params![
+                input.id,
+                input.workspace_id,
+                input.local_date.to_string(),
+                input.revision_id,
+                input.revision_content_hash,
+                input.destination_path,
+                input.expected_old_block_hash,
+                input.intended_new_block_hash,
+                input.recovery_payload,
+                input.recovery_path,
+                now,
+            ],
+        )?;
+        let operation = self
+            .apply_operation(&input.id)?
+            .context("apply operation missing after preparation")?;
+        anyhow::ensure!(
+            operation_matches_input(&operation, input),
+            "apply operation ID already belongs to different immutable inputs"
+        );
+        Ok(operation)
+    }
+
+    pub fn apply_operation(&self, id: &str) -> Result<Option<ApplyOperation>> {
+        self.connect()?
+            .query_row(
+                r#"SELECT id, workspace_id, local_date, revision_id,
+                          revision_content_hash, destination_path,
+                          expected_old_block_hash, intended_new_block_hash,
+                          recovery_payload, recovery_path, state, failure_reason,
+                          created_at, updated_at
+                   FROM apply_operations WHERE id = ?1"#,
+                params![id],
+                apply_operation_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn transition_apply_operation(
+        &self,
+        id: &str,
+        expected_state: &str,
+        next_state: &str,
+        reason: Option<&str>,
+    ) -> Result<ApplyOperation> {
+        anyhow::ensure!(
+            valid_apply_state(expected_state) && valid_apply_state(next_state),
+            "invalid apply operation state"
+        );
+        let reason = reason.map(str::trim).filter(|value| !value.is_empty());
+        anyhow::ensure!(
+            reason.is_none_or(|value| value.len() <= 4096),
+            "apply transition reason is too large"
+        );
+        let needs_reason = matches!(next_state, "failed" | "reconciliation_required");
+        anyhow::ensure!(
+            needs_reason == reason.is_some(),
+            "failed or reconciliation transitions require a reason; other transitions forbid one"
+        );
+
+        let current = self
+            .apply_operation(id)?
+            .context("apply operation does not exist")?;
+        if current.state == next_state {
+            anyhow::ensure!(
+                current.failure_reason.as_deref() == reason,
+                "idempotent transition reason differs from the stored reason"
+            );
+            return Ok(current);
+        }
+        anyhow::ensure!(
+            current.state == expected_state,
+            "apply operation state changed: expected {expected_state}, found {}",
+            current.state
+        );
+        anyhow::ensure!(
+            allowed_apply_transition(expected_state, next_state),
+            "apply operation transition {expected_state} -> {next_state} is not allowed"
+        );
+        let now = Utc::now().to_rfc3339();
+        let changed = self.connect()?.execute(
+            "UPDATE apply_operations SET state = ?1, failure_reason = ?2, updated_at = ?3 WHERE id = ?4 AND state = ?5",
+            params![next_state, reason, now, id, expected_state],
+        )?;
+        anyhow::ensure!(changed == 1, "apply operation state changed concurrently");
+        self.apply_operation(id)?
+            .context("apply operation missing after transition")
+    }
+
     pub fn decide_snapshot_evidence(
         &self,
         snapshot_id: &str,
@@ -515,6 +638,120 @@ impl Store {
 
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn validate_apply_operation_input(input: &PrepareApplyOperation) -> Result<()> {
+    anyhow::ensure!(
+        !input.id.is_empty()
+            && input.id.len() <= 200
+            && input
+                .id
+                .bytes()
+                .all(|byte| { byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') }),
+        "apply operation ID is invalid"
+    );
+    anyhow::ensure!(
+        !input.workspace_id.trim().is_empty() && !input.revision_id.trim().is_empty(),
+        "apply workspace and revision IDs are required"
+    );
+    validate_sha256(&input.revision_content_hash, "revision content")?;
+    if let Some(hash) = &input.expected_old_block_hash {
+        validate_sha256(hash, "expected old block")?;
+    }
+    validate_sha256(&input.intended_new_block_hash, "intended new block")?;
+    validate_relative_path(&input.destination_path)?;
+    anyhow::ensure!(
+        input.recovery_payload.is_some() ^ input.recovery_path.is_some(),
+        "provide exactly one recovery payload or recovery path"
+    );
+    anyhow::ensure!(
+        input
+            .recovery_payload
+            .as_ref()
+            .is_none_or(|payload| payload.len() <= 16 * 1024 * 1024),
+        "apply recovery payload is too large"
+    );
+    anyhow::ensure!(
+        input.recovery_path.as_ref().is_none_or(|path| {
+            let path = path.trim();
+            !path.is_empty() && path.len() <= 4096 && !path.contains('\0')
+        }),
+        "apply recovery path is invalid"
+    );
+    Ok(())
+}
+
+fn validate_sha256(value: &str, label: &str) -> Result<()> {
+    anyhow::ensure!(
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "{label} hash must be a lowercase SHA-256 digest"
+    );
+    Ok(())
+}
+
+fn operation_matches_input(operation: &ApplyOperation, input: &PrepareApplyOperation) -> bool {
+    operation.id == input.id
+        && operation.workspace_id == input.workspace_id
+        && operation.local_date == input.local_date
+        && operation.revision_id == input.revision_id
+        && operation.revision_content_hash == input.revision_content_hash
+        && operation.destination_path == input.destination_path
+        && operation.expected_old_block_hash == input.expected_old_block_hash
+        && operation.intended_new_block_hash == input.intended_new_block_hash
+        && operation.recovery_payload == input.recovery_payload
+        && operation.recovery_path == input.recovery_path
+}
+
+fn valid_apply_state(state: &str) -> bool {
+    matches!(
+        state,
+        "prepared" | "writing" | "written" | "finalized" | "failed" | "reconciliation_required"
+    )
+}
+
+fn allowed_apply_transition(current: &str, next: &str) -> bool {
+    matches!(
+        (current, next),
+        ("prepared", "writing" | "failed" | "reconciliation_required")
+            | ("writing", "written" | "failed" | "reconciliation_required")
+            | ("written", "finalized" | "reconciliation_required")
+            | ("failed", "prepared" | "reconciliation_required")
+            | (
+                "reconciliation_required",
+                "prepared" | "written" | "finalized"
+            )
+    )
+}
+
+fn apply_operation_from_row(row: &Row<'_>) -> rusqlite::Result<ApplyOperation> {
+    let local_date: String = row.get(2)?;
+    let created_at: String = row.get(12)?;
+    let updated_at: String = row.get(13)?;
+    Ok(ApplyOperation {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        local_date: parse_date(&local_date).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, error.into())
+        })?,
+        revision_id: row.get(3)?,
+        revision_content_hash: row.get(4)?,
+        destination_path: row.get(5)?,
+        expected_old_block_hash: row.get(6)?,
+        intended_new_block_hash: row.get(7)?,
+        recovery_payload: row.get(8)?,
+        recovery_path: row.get(9)?,
+        state: row.get(10)?,
+        failure_reason: row.get(11)?,
+        created_at: parse_time(&created_at).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, error.into())
+        })?,
+        updated_at: parse_time(&updated_at).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(13, rusqlite::types::Type::Text, error.into())
+        })?,
+    })
 }
 
 fn evidence_event_digest(event: &crate::models::StoredLogEvent) -> Result<String> {
@@ -1099,5 +1336,198 @@ mod tests {
             )
             .expect("live reference reads");
         assert_eq!(live_event_id, None);
+    }
+
+    fn apply_operation_fixture() -> (Store, PrepareApplyOperation) {
+        let store = Store::open(std::env::temp_dir().join(format!(
+            "log-inbox-apply-operation-{}.sqlite3",
+            Uuid::new_v4()
+        )))
+        .expect("store opens");
+        let profile = store
+            .create_pending_workspace_profile(
+                "apply-binding",
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+            )
+            .expect("profile stores");
+        let profile = store
+            .activate_workspace_profile(&profile.id)
+            .expect("profile activates");
+        let date = NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+        let day = store
+            .ensure_daily_day(date, "Work Log/2026-09-09.md", None)
+            .expect("day freezes");
+        let revision = store
+            .create_proposal_revision(
+                &profile.id,
+                date,
+                None,
+                "advanced_markdown",
+                &serde_json::json!("Reviewed daily content"),
+            )
+            .expect("revision stores");
+        let input = PrepareApplyOperation {
+            id: "apply_2026-09-09_primary".to_owned(),
+            workspace_id: profile.id,
+            local_date: date,
+            revision_id: revision.id,
+            revision_content_hash: revision.content_hash,
+            destination_path: day.destination_path,
+            expected_old_block_hash: Some("a".repeat(64)),
+            intended_new_block_hash: "b".repeat(64),
+            recovery_payload: Some(b"original daily note".to_vec()),
+            recovery_path: None,
+        };
+        (store, input)
+    }
+
+    #[test]
+    fn prepares_apply_operations_idempotently_with_immutable_exact_inputs() {
+        let (store, input) = apply_operation_fixture();
+        let prepared = store
+            .prepare_apply_operation(&input)
+            .expect("operation prepares");
+        assert_eq!(prepared.state, "prepared");
+        assert_eq!(prepared.revision_content_hash, input.revision_content_hash);
+        assert_eq!(
+            prepared.expected_old_block_hash,
+            input.expected_old_block_hash
+        );
+        assert_eq!(prepared.recovery_payload, input.recovery_payload);
+        assert_eq!(
+            store
+                .prepare_apply_operation(&input)
+                .expect("identical retry resolves"),
+            prepared
+        );
+        assert_eq!(
+            store
+                .apply_operation(&input.id)
+                .expect("operation reads")
+                .expect("operation exists"),
+            prepared
+        );
+
+        let mut conflicting = input.clone();
+        conflicting.intended_new_block_hash = "c".repeat(64);
+        assert!(
+            store
+                .prepare_apply_operation(&conflicting)
+                .unwrap_err()
+                .to_string()
+                .contains("different immutable inputs")
+        );
+        let mut wrong_revision_hash = input.clone();
+        wrong_revision_hash.id = "apply_wrong_revision_hash".to_owned();
+        wrong_revision_hash.revision_content_hash = "c".repeat(64);
+        assert!(
+            store
+                .prepare_apply_operation(&wrong_revision_hash)
+                .unwrap_err()
+                .to_string()
+                .contains("content hash does not match")
+        );
+        let mut wrong_destination = input.clone();
+        wrong_destination.id = "apply_wrong_destination".to_owned();
+        wrong_destination.destination_path = "Work Log/other.md".to_owned();
+        assert!(
+            store
+                .prepare_apply_operation(&wrong_destination)
+                .unwrap_err()
+                .to_string()
+                .contains("frozen daily destination")
+        );
+        assert!(
+            store
+                .connect()
+                .unwrap()
+                .execute(
+                    "UPDATE apply_operations SET destination_path = 'other.md' WHERE id = ?1",
+                    params![input.id],
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn guards_apply_operation_transitions_and_makes_retries_idempotent() {
+        let (store, input) = apply_operation_fixture();
+        store
+            .prepare_apply_operation(&input)
+            .expect("operation prepares");
+        assert!(
+            store
+                .transition_apply_operation(&input.id, "prepared", "written", None)
+                .unwrap_err()
+                .to_string()
+                .contains("not allowed")
+        );
+        let writing = store
+            .transition_apply_operation(&input.id, "prepared", "writing", None)
+            .expect("writing records");
+        assert_eq!(writing.state, "writing");
+        assert_eq!(
+            store
+                .transition_apply_operation(&input.id, "prepared", "writing", None)
+                .expect("transition retry resolves"),
+            writing
+        );
+        assert!(
+            store
+                .transition_apply_operation(&input.id, "prepared", "failed", Some("write failed"))
+                .unwrap_err()
+                .to_string()
+                .contains("state changed")
+        );
+        let written = store
+            .transition_apply_operation(&input.id, "writing", "written", None)
+            .expect("written records");
+        assert_eq!(written.state, "written");
+        let finalized = store
+            .transition_apply_operation(&input.id, "written", "finalized", None)
+            .expect("finalized records");
+        assert_eq!(finalized.state, "finalized");
+        assert!(
+            store
+                .transition_apply_operation(&input.id, "finalized", "writing", None)
+                .unwrap_err()
+                .to_string()
+                .contains("not allowed")
+        );
+
+        let mut recovery = input.clone();
+        recovery.id = "apply_recovery_path".to_owned();
+        recovery.recovery_payload = None;
+        recovery.recovery_path = Some("recovery/apply_recovery_path.md".to_owned());
+        store
+            .prepare_apply_operation(&recovery)
+            .expect("path-backed recovery prepares");
+        let failed = store
+            .transition_apply_operation(
+                &recovery.id,
+                "prepared",
+                "failed",
+                Some("preflight failed"),
+            )
+            .expect("failure records");
+        assert_eq!(failed.failure_reason.as_deref(), Some("preflight failed"));
+        let retried = store
+            .transition_apply_operation(&recovery.id, "failed", "prepared", None)
+            .expect("failed operation can retry with the same identity");
+        assert_eq!(retried.state, "prepared");
+        assert_eq!(retried.failure_reason, None);
+        let reconciliation = store
+            .transition_apply_operation(
+                &recovery.id,
+                "prepared",
+                "reconciliation_required",
+                Some("destination changed after review"),
+            )
+            .expect("reconciliation records");
+        assert_eq!(reconciliation.state, "reconciliation_required");
     }
 }
