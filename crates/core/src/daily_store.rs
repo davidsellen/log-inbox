@@ -112,7 +112,7 @@ impl Store {
             .iter()
             .map(|id| {
                 let event = by_id.get(id).context("evidence event missing")?;
-                Ok((id.clone(), digest(&serde_json::to_vec(event)?)))
+                Ok((id.clone(), evidence_event_digest(event)?))
             })
             .collect::<Result<Vec<_>>>()?;
         let snapshot_digest = digest(&serde_json::to_vec(&event_digests)?);
@@ -265,6 +265,21 @@ impl Store {
 
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn evidence_event_digest(event: &crate::models::StoredLogEvent) -> Result<String> {
+    let immutable_envelope = serde_json::json!({
+        "id": event.id,
+        "received_at": event.received_at,
+        "timestamp": event.timestamp,
+        "source": event.source,
+        "level": event.level,
+        "message": event.message,
+        "metadata": event.metadata,
+        "fingerprint": event.fingerprint,
+        "truncated": event.truncated,
+    });
+    Ok(digest(&serde_json::to_vec(&immutable_envelope)?))
 }
 
 fn validate_relative_path(path: &str) -> Result<()> {
@@ -422,6 +437,13 @@ mod tests {
             .create_evidence_snapshot(&profile.id, date, &event_ids)
             .expect("snapshot is idempotent");
         assert_eq!(repeated.id, snapshot.id);
+        store
+            .mark_reviewed(&event_ids, "Daily note", "owner")
+            .expect("review state changes");
+        let after_review = store
+            .create_evidence_snapshot(&profile.id, date, &event_ids)
+            .expect("derived review state does not alter snapshot identity");
+        assert_eq!(after_review.id, snapshot.id);
         store
             .decide_snapshot_evidence(&snapshot.id, &event_ids[0], "include", None, "owner", None)
             .expect("evidence decision stores");
