@@ -90,12 +90,19 @@ impl Store {
             unique.len() == event_ids.len(),
             "evidence IDs must be unique"
         );
-        self.daily_day(workspace_id, local_date)?
+        let day = self
+            .daily_day(workspace_id, local_date)?
             .context("daily day is required before its evidence snapshot")?;
         let events = self.get_events_by_ids(event_ids)?;
         anyhow::ensure!(
             events.len() == event_ids.len(),
             "one or more evidence events do not exist"
+        );
+        anyhow::ensure!(
+            events
+                .iter()
+                .all(|event| event.timestamp >= day.start_utc && event.timestamp < day.end_utc),
+            "evidence event is outside the frozen daily boundary"
         );
         let by_id = events
             .into_iter()
@@ -391,6 +398,23 @@ mod tests {
             })
             .expect("second event stores");
         let event_ids = vec![first.id, second.id];
+        let outside = store
+            .insert_event(LogEventInput {
+                source: "codex/test".to_owned(),
+                level: None,
+                timestamp: Some(day.end_utc),
+                message: "This belongs to the next day.".to_owned(),
+                metadata: None,
+                fingerprint: None,
+            })
+            .expect("outside event stores");
+        assert!(
+            store
+                .create_evidence_snapshot(&profile.id, date, &[outside.id])
+                .unwrap_err()
+                .to_string()
+                .contains("outside the frozen daily boundary")
+        );
         let snapshot = store
             .create_evidence_snapshot(&profile.id, date, &event_ids)
             .expect("snapshot stores");
