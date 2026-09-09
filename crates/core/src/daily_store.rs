@@ -1,6 +1,6 @@
 use crate::{
     daily::resolve_day,
-    models::{DailyDay, EvidenceSnapshot, ProposalRevision},
+    models::{DailyDay, EvidenceSnapshot, ManualDailyEntry, ProposalRevision},
     store::Store,
 };
 use anyhow::{Context, Result};
@@ -76,6 +76,80 @@ impl Store {
             return Ok(None);
         };
         self.proposal_revision(&revision_id)
+    }
+
+    pub fn create_manual_daily_entry(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        text: &str,
+        references: &[String],
+    ) -> Result<ManualDailyEntry> {
+        let text = text.trim();
+        anyhow::ensure!(!text.is_empty(), "manual entry text is required");
+        anyhow::ensure!(text.len() <= 16 * 1024, "manual entry is too large");
+        anyhow::ensure!(
+            references.len() <= 20,
+            "manual entry has too many references"
+        );
+        anyhow::ensure!(
+            references.iter().all(|reference| {
+                let authority = reference
+                    .strip_prefix("https://")
+                    .or_else(|| reference.strip_prefix("http://"));
+                reference.len() <= 2048
+                    && !reference.chars().any(char::is_whitespace)
+                    && authority.is_some_and(|value| !value.is_empty() && !value.starts_with('/'))
+            }),
+            "manual references must be absolute HTTP(S) URLs"
+        );
+        self.daily_day(workspace_id, local_date)?
+            .context("daily day is required before a manual entry")?;
+        let id = format!("manual_{}", Uuid::new_v4().simple());
+        let now = Utc::now().to_rfc3339();
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO manual_daily_entries (id, workspace_id, local_date, text, references_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![
+                id,
+                workspace_id,
+                local_date.to_string(),
+                text,
+                serde_json::to_string(references)?,
+                now
+            ],
+        )?;
+        self.manual_daily_entry(&id)?
+            .context("manual entry missing after creation")
+    }
+
+    pub fn manual_daily_entries(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+    ) -> Result<Vec<ManualDailyEntry>> {
+        let conn = self.connect()?;
+        let mut statement = conn.prepare(
+            "SELECT id, workspace_id, local_date, text, references_json, created_at, updated_at FROM manual_daily_entries WHERE workspace_id = ?1 AND local_date = ?2 ORDER BY created_at, id",
+        )?;
+        statement
+            .query_map(
+                params![workspace_id, local_date.to_string()],
+                manual_entry_from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    fn manual_daily_entry(&self, id: &str) -> Result<Option<ManualDailyEntry>> {
+        self.connect()?
+            .query_row(
+                "SELECT id, workspace_id, local_date, text, references_json, created_at, updated_at FROM manual_daily_entries WHERE id = ?1",
+                params![id],
+                manual_entry_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn create_evidence_snapshot(
@@ -358,6 +432,30 @@ fn proposal_revision_from_row(row: &Row<'_>) -> rusqlite::Result<ProposalRevisio
     })
 }
 
+fn manual_entry_from_row(row: &Row<'_>) -> rusqlite::Result<ManualDailyEntry> {
+    let local_date: String = row.get(2)?;
+    let references: String = row.get(4)?;
+    let created_at: String = row.get(5)?;
+    let updated_at: String = row.get(6)?;
+    Ok(ManualDailyEntry {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        local_date: parse_date(&local_date).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, error.into())
+        })?,
+        text: row.get(3)?,
+        references: serde_json::from_str(&references).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, error.into())
+        })?,
+        created_at: parse_time(&created_at).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, error.into())
+        })?,
+        updated_at: parse_time(&updated_at).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, error.into())
+        })?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,6 +489,31 @@ mod tests {
             .expect("existing day resolves");
         assert_eq!(frozen.destination_path, day.destination_path);
         assert_eq!(day.end_utc - day.start_utc, chrono::Duration::hours(23));
+        assert!(
+            store
+                .create_manual_daily_entry(
+                    &profile.id,
+                    date,
+                    "Invalid reference",
+                    &["javascript:alert(1)".to_owned()],
+                )
+                .is_err()
+        );
+        let manual = store
+            .create_manual_daily_entry(
+                &profile.id,
+                date,
+                "Recorded the reviewed trade-off.",
+                &["https://example.test/decisions/42".to_owned()],
+            )
+            .expect("manual entry stores");
+        assert_eq!(manual.text, "Recorded the reviewed trade-off.");
+        assert_eq!(
+            store
+                .manual_daily_entries(&profile.id, date)
+                .expect("manual entries read"),
+            [manual]
+        );
 
         let first = store
             .insert_event(LogEventInput {

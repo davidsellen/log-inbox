@@ -319,6 +319,31 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 6 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE manual_daily_entries (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    local_date TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    references_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(workspace_id, local_date) REFERENCES daily_days(workspace_id, local_date)
+                );
+
+                CREATE INDEX idx_manual_daily_entries_day
+                    ON manual_daily_entries(workspace_id, local_date, created_at);
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (6, 'trusted manual daily entries', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -1633,10 +1658,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 5);
+        assert_eq!(store.schema_version().expect("version reads"), 6);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 5);
+        assert_eq!(store.schema_version().expect("version remains"), 6);
     }
 
     #[test]
@@ -1687,7 +1712,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 5);
+        assert_eq!(verification.schema_version, 6);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());

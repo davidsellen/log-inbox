@@ -113,6 +113,13 @@ struct LoginRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct ManualDailyEntryRequest {
+    text: String,
+    #[serde(default)]
+    references: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
     #[serde(default, rename = "jsonrpc")]
     _jsonrpc: Option<String>,
@@ -385,6 +392,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v2/auth/session", get(refocus_session))
         .route("/api/v2/auth/logout", post(refocus_logout))
         .route("/api/v2/daily/{date}", get(refocus_daily_day))
+        .route(
+            "/api/v2/daily/{date}/manual",
+            post(refocus_create_manual_entry),
+        )
         .route("/favicon.ico", get(favicon))
         .route("/api/dashboard", get(dashboard_data))
         .route("/api/logs/manual/options", get(manual_log_options))
@@ -578,6 +589,10 @@ async fn refocus_daily_day(
         .get_events_between(window.start_utc, window.end_utc, 500)
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let event_count = evidence.events.len();
+    let manual_entries = state
+        .store
+        .manual_daily_entries(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     let current_revision = state
         .store
         .current_proposal_revision(&profile.id, local_date)
@@ -590,14 +605,46 @@ async fn refocus_daily_day(
         "end_utc": window.end_utc,
         "destination_path": window.destination_path,
         "day": frozen_day,
-        "evidence": {
+        "automated_evidence": {
             "events": evidence.events,
-            "event_count": event_count,
+            "returned_count": event_count,
             "truncated": evidence.truncated,
             "limit": evidence.limit
         },
+        "manual_entries": manual_entries,
         "current_revision": current_revision
     })))
+}
+
+async fn refocus_create_manual_entry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(date): AxumPath<String>,
+    Json(input): Json<ManualDailyEntryRequest>,
+) -> Result<(StatusCode, Json<log_inbox_core::models::ManualDailyEntry>), ApiError> {
+    authorize_refocus(&state, &headers, "review:write", true)?;
+    let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let profile = state
+        .store
+        .active_workspace_profile()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::conflict("review and activate a workspace profile first"))?;
+    let frozen_day = state
+        .store
+        .daily_day(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let window = effective_daily_window(local_date, &profile, frozen_day.as_ref())
+        .map_err(ApiError::bad_request)?;
+    state
+        .store
+        .ensure_daily_day(local_date, &window.destination_path, None)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let entry = state
+        .store
+        .create_manual_daily_entry(&profile.id, local_date, &input.text, &input.references)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok((StatusCode::CREATED, Json(entry)))
 }
 
 fn effective_daily_window(

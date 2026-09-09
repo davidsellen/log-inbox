@@ -178,6 +178,17 @@ pub struct EvidenceSnapshot {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManualDailyEntry {
+    pub id: String,
+    pub workspace_id: String,
+    pub local_date: NaiveDate,
+    pub text: String,
+    pub references: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProposalRevision {
     pub id: String,
