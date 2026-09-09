@@ -15,6 +15,7 @@ rust-version = "1.98"
 anyhow = "1.0.99"
 axum = "0.8.4"
 chrono = { version = "0.4.41", features = ["serde"] }
+chrono-tz = "0.10.4"
 regex = "1.11.1"
 reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.37.0", features = ["backup", "bundled", "chrono"] }

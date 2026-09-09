@@ -112,3 +112,28 @@ pub struct BackupVerification {
     pub event_count: u64,
     pub integrity_check: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceProfile {
+    pub id: String,
+    pub status: String,
+    pub root_binding: String,
+    pub timezone: String,
+    pub daily_root: String,
+    pub daily_pattern: String,
+    pub template_path: Option<String>,
+    pub link_style: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationJournalEntry {
+    pub operation_id: String,
+    pub migration_name: String,
+    pub source_identity: String,
+    pub status: String,
+    pub details: Value,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}

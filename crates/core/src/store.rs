@@ -1,8 +1,8 @@
 use crate::{
     models::{
         BackupVerification, DailyConsolidationJob, IgnoredLinkIdentity, LogEventInput, LogQuery,
-        LogQueryResult, MarkReviewedResult, SourceSummary, StagedEventGroup, StoredLogEvent,
-        VaultLinkRule,
+        LogQueryResult, MarkReviewedResult, MigrationJournalEntry, SourceSummary, StagedEventGroup,
+        StoredLogEvent, VaultLinkRule, WorkspaceProfile,
     },
     redaction::{redact_metadata, redact_text},
 };
@@ -181,6 +181,34 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+
+        if current < 3 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE workspace_profiles (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL CHECK(status IN ('pending_review', 'active', 'disabled')),
+                    root_binding TEXT NOT NULL,
+                    timezone TEXT NOT NULL,
+                    daily_root TEXT NOT NULL,
+                    daily_pattern TEXT NOT NULL,
+                    template_path TEXT,
+                    link_style TEXT NOT NULL CHECK(link_style IN ('markdown', 'wikilink')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE UNIQUE INDEX idx_workspace_profiles_one_active
+                    ON workspace_profiles(status) WHERE status = 'active';
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (3, 'workspace profiles', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -222,6 +250,174 @@ impl Store {
             verification.event_count
         );
         Ok(verification)
+    }
+
+    pub fn create_pending_workspace_profile(
+        &self,
+        root_binding: &str,
+        timezone: &str,
+        daily_root: &str,
+        daily_pattern: &str,
+        template_path: Option<&str>,
+        link_style: &str,
+    ) -> Result<WorkspaceProfile> {
+        validate_workspace_profile(
+            root_binding,
+            timezone,
+            daily_root,
+            daily_pattern,
+            template_path,
+            link_style,
+        )?;
+        let id = format!("workspace_{}", Uuid::new_v4().simple());
+        let now = Utc::now().to_rfc3339();
+        let conn = self.connect()?;
+        conn.execute(
+            r#"
+            INSERT INTO workspace_profiles
+                (id, status, root_binding, timezone, daily_root, daily_pattern,
+                 template_path, link_style, created_at, updated_at)
+            VALUES (?1, 'pending_review', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+            "#,
+            params![
+                id,
+                root_binding.trim(),
+                timezone,
+                daily_root.trim(),
+                daily_pattern.trim(),
+                template_path.map(str::trim),
+                link_style,
+                now
+            ],
+        )?;
+        self.workspace_profile(&id)?
+            .context("created workspace profile missing")
+    }
+
+    pub fn activate_workspace_profile(&self, id: &str) -> Result<WorkspaceProfile> {
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        let exists = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_profiles WHERE id = ?1)",
+            params![id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        anyhow::ensure!(exists, "workspace profile not found: {id}");
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE workspace_profiles SET status = 'disabled', updated_at = ?1 WHERE status = 'active' AND id <> ?2",
+            params![now, id],
+        )?;
+        transaction.execute(
+            "UPDATE workspace_profiles SET status = 'active', updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        transaction.commit()?;
+        self.workspace_profile(id)?
+            .context("activated workspace profile missing")
+    }
+
+    pub fn active_workspace_profile(&self) -> Result<Option<WorkspaceProfile>> {
+        let conn = self.connect()?;
+        conn.query_row(
+            "SELECT id, status, root_binding, timezone, daily_root, daily_pattern, template_path, link_style, created_at, updated_at FROM workspace_profiles WHERE status = 'active'",
+            [],
+            workspace_profile_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn begin_migration_operation(
+        &self,
+        operation_id: &str,
+        migration_name: &str,
+        source_identity: &str,
+        details: &serde_json::Value,
+    ) -> Result<MigrationJournalEntry> {
+        anyhow::ensure!(!operation_id.trim().is_empty(), "operation ID is required");
+        anyhow::ensure!(
+            !migration_name.trim().is_empty(),
+            "migration name is required"
+        );
+        anyhow::ensure!(
+            !source_identity.trim().is_empty(),
+            "source identity is required"
+        );
+        let conn = self.connect()?;
+        conn.execute(
+            r#"
+            INSERT INTO migration_journal
+                (operation_id, migration_name, source_identity, status, details_json, started_at)
+            VALUES (?1, ?2, ?3, 'started', ?4, ?5)
+            ON CONFLICT(operation_id) DO NOTHING
+            "#,
+            params![
+                operation_id,
+                migration_name,
+                source_identity,
+                serde_json::to_string(details)?,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        let entry = self
+            .migration_operation(operation_id)?
+            .context("migration operation missing")?;
+        anyhow::ensure!(
+            entry.migration_name == migration_name && entry.source_identity == source_identity,
+            "operation ID already belongs to a different migration"
+        );
+        Ok(entry)
+    }
+
+    pub fn finish_migration_operation(
+        &self,
+        operation_id: &str,
+        status: &str,
+        details: &serde_json::Value,
+    ) -> Result<MigrationJournalEntry> {
+        anyhow::ensure!(
+            matches!(status, "completed" | "failed"),
+            "terminal migration status must be completed or failed"
+        );
+        let conn = self.connect()?;
+        let changed = conn.execute(
+            "UPDATE migration_journal SET status = ?1, details_json = ?2, completed_at = ?3 WHERE operation_id = ?4",
+            params![
+                status,
+                serde_json::to_string(details)?,
+                Utc::now().to_rfc3339(),
+                operation_id
+            ],
+        )?;
+        anyhow::ensure!(
+            changed == 1,
+            "migration operation not found: {operation_id}"
+        );
+        self.migration_operation(operation_id)?
+            .context("finished migration operation missing")
+    }
+
+    fn workspace_profile(&self, id: &str) -> Result<Option<WorkspaceProfile>> {
+        let conn = self.connect()?;
+        conn.query_row(
+            "SELECT id, status, root_binding, timezone, daily_root, daily_pattern, template_path, link_style, created_at, updated_at FROM workspace_profiles WHERE id = ?1",
+            params![id],
+            workspace_profile_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    fn migration_operation(&self, operation_id: &str) -> Result<Option<MigrationJournalEntry>> {
+        let conn = self.connect()?;
+        conn.query_row(
+            "SELECT operation_id, migration_name, source_identity, status, details_json, started_at, completed_at FROM migration_journal WHERE operation_id = ?1",
+            params![operation_id],
+            migration_journal_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn insert_event(&self, input: LogEventInput) -> Result<StoredLogEvent> {
@@ -950,6 +1146,78 @@ impl Store {
     }
 }
 
+fn validate_workspace_profile(
+    root_binding: &str,
+    timezone: &str,
+    daily_root: &str,
+    daily_pattern: &str,
+    template_path: Option<&str>,
+    link_style: &str,
+) -> Result<()> {
+    anyhow::ensure!(!root_binding.trim().is_empty(), "root binding is required");
+    timezone
+        .parse::<chrono_tz::Tz>()
+        .with_context(|| format!("invalid IANA timezone: {timezone}"))?;
+    validate_relative_workspace_path(daily_root, true)?;
+    validate_relative_workspace_path(daily_pattern, false)?;
+    if let Some(path) = template_path {
+        validate_relative_workspace_path(path, false)?;
+    }
+    anyhow::ensure!(
+        matches!(link_style, "markdown" | "wikilink"),
+        "link style must be markdown or wikilink"
+    );
+    Ok(())
+}
+
+fn validate_relative_workspace_path(path: &str, allow_empty: bool) -> Result<()> {
+    let trimmed = path.trim();
+    anyhow::ensure!(
+        allow_empty || !trimmed.is_empty(),
+        "relative path is required"
+    );
+    let candidate = Path::new(trimmed);
+    anyhow::ensure!(!candidate.is_absolute(), "workspace path must be relative");
+    anyhow::ensure!(
+        candidate
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "workspace path cannot contain traversal or platform prefixes"
+    );
+    Ok(())
+}
+
+fn workspace_profile_from_row(row: &Row<'_>) -> rusqlite::Result<WorkspaceProfile> {
+    Ok(WorkspaceProfile {
+        id: row.get(0)?,
+        status: row.get(1)?,
+        root_binding: row.get(2)?,
+        timezone: row.get(3)?,
+        daily_root: row.get(4)?,
+        daily_pattern: row.get(5)?,
+        template_path: row.get(6)?,
+        link_style: row.get(7)?,
+        created_at: parse_utc(row.get(8)?),
+        updated_at: parse_utc(row.get(9)?),
+    })
+}
+
+fn migration_journal_from_row(row: &Row<'_>) -> rusqlite::Result<MigrationJournalEntry> {
+    let details_json: String = row.get(4)?;
+    let details = serde_json::from_str(&details_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(MigrationJournalEntry {
+        operation_id: row.get(0)?,
+        migration_name: row.get(1)?,
+        source_identity: row.get(2)?,
+        status: row.get(3)?,
+        details,
+        started_at: parse_utc(row.get(5)?),
+        completed_at: row.get::<_, Option<String>>(6)?.map(parse_utc),
+    })
+}
+
 fn schema_version(conn: &Connection) -> Result<i64> {
     conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
@@ -1082,10 +1350,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 2);
+        assert_eq!(store.schema_version().expect("version reads"), 3);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 2);
+        assert_eq!(store.schema_version().expect("version remains"), 3);
     }
 
     #[test]
@@ -1107,12 +1375,125 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 2);
+        assert_eq!(verification.schema_version, 3);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());
 
         fs::remove_file(backup_path).expect("test backup removed");
+    }
+
+    #[test]
+    fn keeps_one_stable_active_workspace_profile() {
+        let store = temp_store();
+        let first = store
+            .create_pending_workspace_profile(
+                "binding-one",
+                "Europe/Stockholm",
+                "Work Log",
+                "{year}/{month}/Daily {date}.md",
+                Some("Templates/Daily.md"),
+                "wikilink",
+            )
+            .expect("first profile stores");
+        assert_eq!(first.status, "pending_review");
+        let active = store
+            .activate_workspace_profile(&first.id)
+            .expect("first profile activates");
+        assert_eq!(active.id, first.id);
+        assert_eq!(
+            store.active_workspace_profile().expect("active reads"),
+            Some(active)
+        );
+
+        let second = store
+            .create_pending_workspace_profile(
+                "binding-two",
+                "America/New_York",
+                "Daily",
+                "{date}.md",
+                None,
+                "markdown",
+            )
+            .expect("second profile stores");
+        store
+            .activate_workspace_profile(&second.id)
+            .expect("second profile activates");
+        assert_eq!(
+            store
+                .active_workspace_profile()
+                .expect("replacement reads")
+                .expect("replacement exists")
+                .id,
+            second.id
+        );
+        assert!(
+            store
+                .create_pending_workspace_profile(
+                    "binding-three",
+                    "not/a timezone",
+                    "Daily",
+                    "{date}.md",
+                    None,
+                    "markdown",
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .create_pending_workspace_profile(
+                    "binding-three",
+                    "UTC",
+                    "../outside",
+                    "{date}.md",
+                    None,
+                    "markdown",
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn journals_migration_operations_idempotently() {
+        let store = temp_store();
+        let started = store
+            .begin_migration_operation(
+                "cutover-1",
+                "legacy-cutover",
+                "legacy-database",
+                &serde_json::json!({"phase": "inventory"}),
+            )
+            .expect("migration starts");
+        assert_eq!(started.status, "started");
+        let repeated = store
+            .begin_migration_operation(
+                "cutover-1",
+                "legacy-cutover",
+                "legacy-database",
+                &serde_json::json!({"phase": "ignored retry"}),
+            )
+            .expect("retry resolves existing operation");
+        assert_eq!(repeated.details, serde_json::json!({"phase": "inventory"}));
+        assert!(
+            store
+                .begin_migration_operation(
+                    "cutover-1",
+                    "different-cutover",
+                    "legacy-database",
+                    &serde_json::Value::Null,
+                )
+                .is_err()
+        );
+
+        let completed = store
+            .finish_migration_operation(
+                "cutover-1",
+                "completed",
+                &serde_json::json!({"imported": 12}),
+            )
+            .expect("migration completes");
+        assert_eq!(completed.status, "completed");
+        assert!(completed.completed_at.is_some());
     }
 
     #[test]
