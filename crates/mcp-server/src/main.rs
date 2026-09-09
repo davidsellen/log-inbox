@@ -179,6 +179,18 @@ struct SaveWorkspaceSettingsRequest {
     expected_updated_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveAutomationSettingsRequest {
+    enabled: bool,
+    generation_time: String,
+    catch_up_days: u16,
+    raw_retention_days: u16,
+    audit_retention_days: u16,
+    recovery_retention_days: u16,
+    expected_updated_at: Option<DateTime<Utc>>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -247,6 +259,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/v2/settings/workspace/preview",
             post(refocus_preview_workspace_settings),
+        )
+        .route(
+            "/api/v2/settings/automation",
+            get(refocus_automation_settings).put(refocus_save_automation_settings),
         )
         .route(
             "/api/v2/migration/cutover",
@@ -395,6 +411,56 @@ async fn refocus_workspace_settings(
         "workspace_path": workspace.canonical_root().display().to_string(),
         "active_profile": active,
         "binding_matches": binding_matches
+    })))
+}
+
+async fn refocus_automation_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "logs:read", false)?;
+    let profile = active_refocus_workspace(&state)?;
+    let settings = state
+        .store
+        .daily_automation_settings(&profile.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let saved = settings.updated_at != DateTime::<Utc>::UNIX_EPOCH;
+    let recent_runs = state
+        .store
+        .daily_schedule_runs(&profile.id, 14)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(json!({
+        "settings": settings,
+        "saved": saved,
+        "recent_runs": recent_runs,
+        "writes_markdown_automatically": false
+    })))
+}
+
+async fn refocus_save_automation_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SaveAutomationSettingsRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "settings:write", true)?;
+    let profile = active_refocus_workspace(&state)?;
+    let settings = state
+        .store
+        .save_daily_automation_settings(
+            &profile.id,
+            input.enabled,
+            input.generation_time.trim(),
+            input.catch_up_days,
+            input.raw_retention_days,
+            input.audit_retention_days,
+            input.recovery_retention_days,
+            input.expected_updated_at,
+        )
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    Ok(Json(json!({
+        "settings": settings,
+        "saved": true,
+        "writes_markdown_automatically": false
     })))
 }
 
@@ -2270,6 +2336,105 @@ mod knowledge_destination_tests {
             response_json(updated).await["active_profile"]["id"],
             profile_id
         );
+    }
+
+    #[tokio::test]
+    async fn automation_settings_are_explicit_and_optimistically_saved() {
+        let state = test_state();
+        state
+            .store
+            .set_owner_secret_hash(&hash_owner_secret("owner-secret-for-tests").unwrap())
+            .unwrap();
+        let profile = state
+            .store
+            .save_active_workspace_profile(
+                state.workspace.root_binding(),
+                "Europe/Stockholm",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+                None,
+            )
+            .unwrap();
+        let app = build_router(state);
+        let login = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/auth/login",
+            json!({"owner_secret": "owner-secret-for-tests"}),
+            None,
+            None,
+        )
+        .await;
+        let cookie = login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let csrf = response_json(login).await["csrf_token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let defaults = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/settings/automation",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(defaults.status(), StatusCode::OK);
+        let defaults = response_json(defaults).await;
+        assert_eq!(defaults["saved"], false);
+        assert_eq!(defaults["settings"]["generation_time"], "00:15");
+        assert_eq!(defaults["writes_markdown_automatically"], false);
+
+        let save = json_response(
+            app.clone(),
+            "PUT",
+            "/api/v2/settings/automation",
+            json!({
+                "enabled": true,
+                "generation_time": "01:30",
+                "catch_up_days": 14,
+                "raw_retention_days": 30,
+                "audit_retention_days": 45,
+                "recovery_retention_days": 60,
+                "expected_updated_at": null
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(save.status(), StatusCode::OK);
+        let saved = response_json(save).await;
+        assert_eq!(saved["settings"]["workspace_id"], profile.id);
+        assert_eq!(saved["settings"]["generation_time"], "01:30");
+        assert_eq!(saved["writes_markdown_automatically"], false);
+
+        let stale = json_response(
+            app,
+            "PUT",
+            "/api/v2/settings/automation",
+            json!({
+                "enabled": false,
+                "generation_time": "00:15",
+                "catch_up_days": 7,
+                "raw_retention_days": 30,
+                "audit_retention_days": 30,
+                "recovery_retention_days": 30,
+                "expected_updated_at": null
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]
