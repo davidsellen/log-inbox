@@ -175,6 +175,18 @@ pub struct MigrationItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LegacyMigrationArtifact {
+    pub operation_id: String,
+    pub artifact_kind: String,
+    pub source_identity: String,
+    pub source_digest: String,
+    pub content: Vec<u8>,
+    pub parse_status: String,
+    pub details: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DashboardSession {
     pub token_digest: String,
     pub csrf_digest: String,

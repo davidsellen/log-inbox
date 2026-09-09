@@ -1,5 +1,8 @@
 use crate::{
-    models::{ContextMapping, IgnoredContextIdentity, LinkSelector, MigrationItem},
+    models::{
+        ContextMapping, IgnoredContextIdentity, LegacyMigrationArtifact, LinkSelector,
+        MigrationItem,
+    },
     store::Store,
 };
 use anyhow::{Context, Result};
@@ -21,6 +24,78 @@ const SELECTOR_FIELDS: &[&str] = &[
 ];
 
 impl Store {
+    pub fn preserve_legacy_migration_artifact(
+        &self,
+        artifact: &LegacyMigrationArtifact,
+    ) -> Result<LegacyMigrationArtifact> {
+        validate_id(&artifact.operation_id)?;
+        validate_item_kind(&artifact.artifact_kind)?;
+        anyhow::ensure!(
+            !artifact.source_identity.trim().is_empty() && artifact.source_identity.len() <= 4096,
+            "migration source identity is invalid"
+        );
+        validate_digest(&artifact.source_digest)?;
+        anyhow::ensure!(
+            artifact.content.len() <= 4 * 1024 * 1024,
+            "legacy artifact is too large"
+        );
+        anyhow::ensure!(
+            matches!(artifact.parse_status.as_str(), "valid" | "unparseable"),
+            "legacy artifact parse status is invalid"
+        );
+        let details_json = serde_json::to_string(&artifact.details)?;
+        anyhow::ensure!(
+            details_json.len() <= 64 * 1024,
+            "legacy artifact details are too large"
+        );
+        let conn = self.connect()?;
+        conn.execute(
+            r#"INSERT INTO legacy_migration_artifacts
+                (operation_id, artifact_kind, source_identity, source_digest, content,
+                 parse_status, details_json, created_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+               ON CONFLICT(operation_id, artifact_kind, source_identity) DO NOTHING"#,
+            params![
+                artifact.operation_id,
+                artifact.artifact_kind,
+                artifact.source_identity,
+                artifact.source_digest,
+                artifact.content,
+                artifact.parse_status,
+                details_json,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        let saved = self
+            .legacy_migration_artifact(
+                &artifact.operation_id,
+                &artifact.artifact_kind,
+                &artifact.source_identity,
+            )?
+            .context("legacy migration artifact missing after save")?;
+        anyhow::ensure!(
+            saved.source_digest == artifact.source_digest && saved.content == artifact.content,
+            "legacy migration source changed after it was preserved"
+        );
+        Ok(saved)
+    }
+
+    pub fn legacy_migration_artifact(
+        &self,
+        operation_id: &str,
+        artifact_kind: &str,
+        source_identity: &str,
+    ) -> Result<Option<LegacyMigrationArtifact>> {
+        self.connect()?
+            .query_row(
+                "SELECT operation_id, artifact_kind, source_identity, source_digest, content, parse_status, details_json, created_at FROM legacy_migration_artifacts WHERE operation_id = ?1 AND artifact_kind = ?2 AND source_identity = ?3",
+                params![operation_id, artifact_kind, source_identity],
+                legacy_artifact_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn list_migration_items(&self, operation_id: &str) -> Result<Vec<MigrationItem>> {
         validate_id(operation_id)?;
         let conn = self.connect()?;
@@ -48,15 +123,16 @@ impl Store {
             "migration item details are too large"
         );
         let now = Utc::now().to_rfc3339();
-        self.connect()?.execute(
+        let conn = self.connect()?;
+        conn.execute(
             r#"INSERT INTO migration_items
                 (operation_id, item_kind, source_identity, source_digest, status, details_json, updated_at)
                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                ON CONFLICT(operation_id, item_kind, source_identity) DO UPDATE SET
-                 source_digest = excluded.source_digest,
                  status = excluded.status,
                  details_json = excluded.details_json,
-                 updated_at = excluded.updated_at"#,
+                 updated_at = excluded.updated_at
+               WHERE migration_items.source_digest = excluded.source_digest"#,
             params![
                 item.operation_id,
                 item.item_kind,
@@ -67,13 +143,19 @@ impl Store {
                 now,
             ],
         )?;
-        self.connect()?
+        let saved = conn
             .query_row(
                 "SELECT operation_id, item_kind, source_identity, source_digest, status, details_json, updated_at FROM migration_items WHERE operation_id = ?1 AND item_kind = ?2 AND source_identity = ?3",
                 params![item.operation_id, item.item_kind, item.source_identity],
                 migration_item_from_row,
             )
-            .map_err(Into::into)
+            .optional()?;
+        let saved = saved.context("migration item missing after save")?;
+        anyhow::ensure!(
+            saved.source_digest == item.source_digest,
+            "migration source changed for an existing identity"
+        );
+        Ok(saved)
     }
 
     pub fn list_context_mappings(&self, workspace_id: &str) -> Result<Vec<ContextMapping>> {
@@ -361,6 +443,22 @@ fn migration_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Migratio
     })
 }
 
+fn legacy_artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LegacyMigrationArtifact> {
+    let details_json: String = row.get(6)?;
+    Ok(LegacyMigrationArtifact {
+        operation_id: row.get(0)?,
+        artifact_kind: row.get(1)?,
+        source_identity: row.get(2)?,
+        source_digest: row.get(3)?,
+        content: row.get(4)?,
+        parse_status: row.get(5)?,
+        details: serde_json::from_str(&details_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, error.into())
+        })?,
+        created_at: parse_time(row.get::<_, String>(7)?)?,
+    })
+}
+
 fn parse_time(value: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&value)
         .map(|value| value.with_timezone(&Utc))
@@ -475,6 +573,38 @@ mod tests {
         assert_eq!(
             store.list_migration_items("migration_test").unwrap(),
             vec![saved]
+        );
+
+        let artifact = LegacyMigrationArtifact {
+            operation_id: item.operation_id.clone(),
+            artifact_kind: item.item_kind.clone(),
+            source_identity: item.source_identity.clone(),
+            source_digest: item.source_digest.clone(),
+            content: b"legacy proposal bytes".to_vec(),
+            parse_status: "unparseable".to_owned(),
+            details: serde_json::json!({"reason": "missing frontmatter"}),
+            created_at: Utc::now(),
+        };
+        let preserved = store.preserve_legacy_migration_artifact(&artifact).unwrap();
+        assert_eq!(preserved.content, artifact.content);
+        assert_eq!(
+            store
+                .legacy_migration_artifact(
+                    &item.operation_id,
+                    &item.item_kind,
+                    &item.source_identity,
+                )
+                .unwrap(),
+            Some(preserved)
+        );
+
+        assert!(
+            store
+                .save_migration_item(&MigrationItem {
+                    source_digest: "d".repeat(64),
+                    ..item.clone()
+                })
+                .is_err()
         );
 
         assert!(
