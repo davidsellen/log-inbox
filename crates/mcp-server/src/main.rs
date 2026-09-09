@@ -29,7 +29,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     env,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -1348,85 +1348,214 @@ fn recover_daily_applies(state: &AppState) {
         Ok(context) => context,
         Err(_) => return,
     };
-    let operations = match state.store.list_unfinished_apply_operations(100) {
+    let operations = match state.store.list_recoverable_apply_operations(100) {
         Ok(operations) => operations,
         Err(error) => {
             tracing::error!(%error, "listing unfinished Daily Apply operations failed");
             return;
         }
     };
-    for mut operation in operations {
-        if operation.workspace_id != profile.id
-            || matches!(
-                operation.state.as_str(),
-                "failed" | "reconciliation_required"
-            )
-        {
+    for operation in operations {
+        if operation.workspace_id != profile.id {
             continue;
         }
-        let result = (|| -> anyhow::Result<()> {
-            let day = state
-                .store
-                .daily_day(&operation.workspace_id, operation.local_date)?
-                .ok_or_else(|| anyhow::anyhow!("Daily day is missing"))?;
-            workspace.resolve_markdown_path(
-                std::path::Path::new(&operation.destination_path),
-                MarkdownPathMode::MayCreate,
-            )?;
-            let target = std::path::Path::new(&operation.destination_path);
-            let current = daily_writer::read_file(workspace.directory(), target)?;
-            let current_bytes = current.as_deref().unwrap_or_default();
-            let intended_updated_content_hash = operation
-                .intended_updated_content_hash
-                .as_deref()
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Apply journal lacks exact updated content identity")
-                })?;
-            let block_hash = if current.is_some() {
-                daily_writer::managed_block_hash(current_bytes, &day.block_id)
-                    .map_err(anyhow::Error::msg)?
-            } else {
-                None
-            };
-            if current.is_some()
-                && daily_writer::digest(current_bytes) == intended_updated_content_hash
-                && block_hash.as_deref() == Some(operation.intended_new_block_hash.as_str())
-            {
-                if operation.state == "prepared" {
-                    operation = state.store.transition_apply_operation(
-                        &operation.id,
-                        "prepared",
-                        "writing",
-                        None,
-                    )?;
-                }
-                if operation.state == "writing" {
-                    operation = state.store.transition_apply_operation(
-                        &operation.id,
-                        "writing",
-                        "written",
-                        None,
-                    )?;
-                }
-                state.store.finalize_apply_operation(
-                    &operation.id,
-                    &operation.revision_id,
-                    &operation.revision_content_hash,
-                )?;
-            } else if matches!(operation.state.as_str(), "writing" | "written") {
-                state.store.transition_apply_operation(
-                    &operation.id,
-                    &operation.state,
-                    "reconciliation_required",
-                    Some("startup recovery could not verify the approved Daily block"),
-                )?;
-            }
-            Ok(())
-        })();
+        let result = recover_daily_apply(state, &workspace, operation.clone());
         if let Err(error) = result {
             tracing::error!(operation_id = %operation.id, %error, "recovering Daily Apply operation failed");
         }
     }
+}
+
+fn recover_daily_apply(
+    state: &AppState,
+    workspace: &InspectedWorkspace,
+    mut operation: ApplyOperation,
+) -> anyhow::Result<()> {
+    let day = state
+        .store
+        .daily_day(&operation.workspace_id, operation.local_date)?
+        .ok_or_else(|| anyhow::anyhow!("Daily day is missing"))?;
+    workspace.resolve_markdown_path(
+        std::path::Path::new(&operation.destination_path),
+        MarkdownPathMode::MayCreate,
+    )?;
+    let target_path = PathBuf::from(&operation.destination_path);
+    let target = target_path.as_path();
+    let expected_target_exists = operation
+        .expected_target_exists
+        .ok_or_else(|| anyhow::anyhow!("Apply journal lacks target existence identity"))?;
+    let expected_original_content_hash = operation
+        .expected_original_content_hash
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Apply journal lacks original content identity"))?;
+    let intended_updated_content_hash = operation
+        .intended_updated_content_hash
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Apply journal lacks updated content identity"))?;
+    let temporary_name = operation
+        .temporary_name
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Apply journal lacks temporary file identity"))?;
+    let current = daily_writer::read_file(workspace.directory(), target)?;
+    let current_bytes = current.as_deref().unwrap_or_default();
+    let current_hash = daily_writer::digest(current_bytes);
+    let current_block_hash = current
+        .as_deref()
+        .map(|bytes| daily_writer::managed_block_hash(bytes, &day.block_id))
+        .transpose()
+        .map_err(anyhow::Error::msg)?
+        .flatten();
+    let temporary = daily_writer::read_temporary(workspace.directory(), target, &temporary_name)?;
+
+    if current.is_some()
+        && current_hash == intended_updated_content_hash
+        && current_block_hash.as_deref() == Some(operation.intended_new_block_hash.as_str())
+    {
+        if temporary.is_some() {
+            daily_writer::remove_temporary(workspace.directory(), target, &temporary_name)?;
+        }
+        daily_writer::sync_parent(workspace.directory(), target)?;
+        if operation.state == "prepared" {
+            operation = state.store.transition_apply_operation(
+                &operation.id,
+                "prepared",
+                "writing",
+                None,
+            )?;
+        }
+        if operation.state == "writing" {
+            operation = state.store.transition_apply_operation(
+                &operation.id,
+                "writing",
+                "written",
+                None,
+            )?;
+        }
+        return finalize_recovered_apply(state, &operation);
+    }
+
+    let current_is_original = current.is_some() == expected_target_exists
+        && current_hash == expected_original_content_hash;
+    if !current_is_original || operation.state == "written" {
+        state.store.transition_apply_operation(
+            &operation.id,
+            &operation.state,
+            "reconciliation_required",
+            Some("startup recovery found a Daily target that differs from its exact journal identity"),
+        )?;
+        return Ok(());
+    }
+    if operation.state == "prepared" {
+        operation =
+            state
+                .store
+                .transition_apply_operation(&operation.id, "prepared", "writing", None)?;
+    }
+
+    let write_result = if let Some(temporary_bytes) = temporary {
+        if daily_writer::digest(&temporary_bytes) == intended_updated_content_hash {
+            daily_writer::commit_temporary(workspace.directory(), target, &temporary_name)
+        } else {
+            daily_writer::remove_temporary(workspace.directory(), target, &temporary_name)?;
+            resume_recovery_write(
+                state,
+                workspace,
+                &operation,
+                target,
+                &intended_updated_content_hash,
+            )
+        }
+    } else {
+        resume_recovery_write(
+            state,
+            workspace,
+            &operation,
+            target,
+            &intended_updated_content_hash,
+        )
+    };
+    if let Err(error) = write_result {
+        if error.rename_completed()
+            && daily_writer::sync_parent(workspace.directory(), target).is_ok()
+        {
+            // An explicit retry established directory-entry durability.
+        } else {
+            let next_state = if error.rename_completed() {
+                "reconciliation_required"
+            } else {
+                "failed"
+            };
+            state.store.transition_apply_operation(
+                &operation.id,
+                &operation.state,
+                next_state,
+                Some(&format!("startup recovery write failed {error}")),
+            )?;
+            return Ok(());
+        }
+    }
+
+    let written = daily_writer::read_file(workspace.directory(), target)?
+        .ok_or_else(|| anyhow::anyhow!("Daily target disappeared after recovery write"))?;
+    let written_block =
+        daily_writer::managed_block_hash(&written, &day.block_id).map_err(anyhow::Error::msg)?;
+    if daily_writer::digest(&written) != intended_updated_content_hash
+        || written_block.as_deref() != Some(operation.intended_new_block_hash.as_str())
+    {
+        state.store.transition_apply_operation(
+            &operation.id,
+            &operation.state,
+            "reconciliation_required",
+            Some("startup recovery could not verify the exact approved Daily content"),
+        )?;
+        return Ok(());
+    }
+    operation =
+        state
+            .store
+            .transition_apply_operation(&operation.id, "writing", "written", None)?;
+    finalize_recovered_apply(state, &operation)
+}
+
+fn resume_recovery_write(
+    state: &AppState,
+    workspace: &InspectedWorkspace,
+    operation: &ApplyOperation,
+    target: &Path,
+    intended_updated_content_hash: &str,
+) -> Result<(), daily_writer::AtomicWriteError> {
+    let material = daily_apply_material(state, operation.local_date).map_err(|error| {
+        daily_writer::AtomicWriteError::BeforeRename(std::io::Error::other(error.message))
+    })?;
+    if daily_writer::digest(&material.plan.updated_content) != intended_updated_content_hash {
+        return Err(daily_writer::AtomicWriteError::BeforeRename(
+            std::io::Error::other("reviewed Daily content no longer matches the journal"),
+        ));
+    }
+    daily_writer::write_atomically(
+        workspace.directory(),
+        target,
+        &material.plan.updated_content,
+        &operation.id,
+    )
+}
+
+fn finalize_recovered_apply(state: &AppState, operation: &ApplyOperation) -> anyhow::Result<()> {
+    if let Err(error) = state.store.finalize_apply_operation(
+        &operation.id,
+        &operation.revision_id,
+        &operation.revision_content_hash,
+    ) {
+        state.store.transition_apply_operation(
+            &operation.id,
+            "written",
+            "reconciliation_required",
+            Some(&format!(
+                "Daily file is written but finalization failed: {error}"
+            )),
+        )?;
+    }
+    Ok(())
 }
 
 fn daily_apply_material(
@@ -4305,7 +4434,7 @@ mod knowledge_destination_tests {
     }
 
     #[test]
-    fn startup_recovery_finalizes_a_verified_written_block() {
+    fn startup_recovery_commits_an_exact_journaled_temporary() {
         let state = test_state(true);
         let workspace = state.workspace.as_ref().unwrap();
         let profile = state
@@ -4364,17 +4493,16 @@ mod knowledge_destination_tests {
             .store
             .transition_apply_operation(&operation.id, "prepared", "writing", None)
             .unwrap();
-        workspace
-            .resolve_markdown_path(
-                std::path::Path::new(&day.destination_path),
-                MarkdownPathMode::MayCreate,
-            )
-            .unwrap();
-        daily_writer::write_atomically(
-            workspace.directory(),
-            std::path::Path::new(&day.destination_path),
+        let target = workspace.canonical_root().join(&day.destination_path);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(
+            target.parent().unwrap().join(
+                operation
+                    .temporary_name
+                    .as_deref()
+                    .expect("temporary identity exists"),
+            ),
             &plan.updated_content,
-            &operation.id,
         )
         .unwrap();
 
@@ -4398,6 +4526,7 @@ mod knowledge_destination_tests {
                 .review_status,
             "applied"
         );
+        assert_eq!(std::fs::read(target).unwrap(), plan.updated_content);
     }
 
     #[test]

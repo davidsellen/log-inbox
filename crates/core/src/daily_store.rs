@@ -438,8 +438,39 @@ impl Store {
     }
 
     pub fn list_unfinished_apply_operations(&self, limit: usize) -> Result<Vec<ApplyOperation>> {
+        self.list_apply_operations_by_states(
+            &[
+                "prepared",
+                "writing",
+                "written",
+                "failed",
+                "reconciliation_required",
+            ],
+            limit,
+        )
+    }
+
+    pub fn list_recoverable_apply_operations(&self, limit: usize) -> Result<Vec<ApplyOperation>> {
+        self.list_apply_operations_by_states(&["prepared", "writing", "written"], limit)
+    }
+
+    fn list_apply_operations_by_states(
+        &self,
+        states: &[&str],
+        limit: usize,
+    ) -> Result<Vec<ApplyOperation>> {
+        anyhow::ensure!(!states.is_empty(), "at least one Apply state is required");
+        anyhow::ensure!(
+            states.iter().all(|state| valid_apply_state(state)),
+            "invalid Apply state filter"
+        );
         let conn = self.connect()?;
-        let mut statement = conn.prepare(
+        let placeholders = (1..=states.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let limit_parameter = states.len() + 1;
+        let sql = format!(
             r#"SELECT id, workspace_id, local_date, revision_id,
                       revision_content_hash, destination_path,
                       expected_old_block_hash, intended_new_block_hash,
@@ -448,15 +479,19 @@ impl Store {
                       expected_original_content_hash, intended_updated_content_hash,
                       temporary_name
                FROM apply_operations
-               WHERE state != 'finalized'
+               WHERE state IN ({placeholders})
                ORDER BY updated_at, created_at, id
-               LIMIT ?1"#,
-        )?;
+               LIMIT ?{limit_parameter}"#
+        );
+        let mut statement = conn.prepare(&sql)?;
+        let mut parameters = states
+            .iter()
+            .map(|state| state as &dyn rusqlite::ToSql)
+            .collect::<Vec<_>>();
+        let bounded_limit = limit.clamp(1, 500) as i64;
+        parameters.push(&bounded_limit);
         statement
-            .query_map(
-                params![limit.clamp(1, 500) as i64],
-                apply_operation_from_row,
-            )?
+            .query_map(parameters.as_slice(), apply_operation_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }

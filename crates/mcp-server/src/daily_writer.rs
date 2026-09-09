@@ -3,6 +3,7 @@ use cap_std::fs::{Dir, OpenOptions};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
+    fmt,
     io::{self, Read, Write},
     path::{Component, Path},
 };
@@ -194,12 +195,14 @@ pub fn write_atomically(
     target: &Path,
     contents: &[u8],
     operation_id: &str,
-) -> io::Result<()> {
-    let (parent, file_name) = open_parent(workspace, target, true)?;
+) -> Result<(), AtomicWriteError> {
+    let (parent, file_name) =
+        open_parent(workspace, target, true).map_err(AtomicWriteError::BeforeRename)?;
     let file_name = file_name
         .to_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid target filename"))?;
-    let temporary = temporary_name(target, operation_id)?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid target filename"))
+        .map_err(AtomicWriteError::BeforeRename)?;
+    let temporary = temporary_name(target, operation_id).map_err(AtomicWriteError::BeforeRename)?;
     let permissions = parent
         .symlink_metadata(file_name)
         .ok()
@@ -209,21 +212,145 @@ pub fn write_atomically(
         .write(true)
         .create_new(true)
         .follow(FollowSymlinks::No);
-    let mut file = parent.open_with(&temporary, &options)?;
-    let result = (|| {
+    let mut file = parent
+        .open_with(&temporary, &options)
+        .map_err(AtomicWriteError::BeforeRename)?;
+    let staged = (|| -> io::Result<()> {
         if let Some(permissions) = permissions {
             file.set_permissions(permissions)?;
         }
         file.write_all(contents)?;
         file.sync_all()?;
         drop(file);
-        parent.rename(&temporary, &parent, file_name)?;
-        parent.open(".")?.sync_all()
+        Ok(())
     })();
-    if result.is_err() {
+    if let Err(error) = staged {
         let _ = parent.remove_file(&temporary);
+        return Err(AtomicWriteError::BeforeRename(error));
     }
-    result
+    commit_from_parent(&parent, file_name, &temporary)
+}
+
+#[derive(Debug)]
+pub enum AtomicWriteError {
+    BeforeRename(io::Error),
+    ParentSync(io::Error),
+}
+
+impl AtomicWriteError {
+    pub fn rename_completed(&self) -> bool {
+        matches!(self, Self::ParentSync(_))
+    }
+}
+
+impl fmt::Display for AtomicWriteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BeforeRename(error) => write!(formatter, "before replacement: {error}"),
+            Self::ParentSync(error) => {
+                write!(
+                    formatter,
+                    "after replacement, while syncing its directory: {error}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for AtomicWriteError {}
+
+pub fn read_temporary(
+    workspace: &Dir,
+    target: &Path,
+    temporary: &str,
+) -> io::Result<Option<Vec<u8>>> {
+    validate_temporary_name(temporary)?;
+    let (parent, _) = match open_parent(workspace, target, false) {
+        Ok(value) => value,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    read_from_parent(&parent, Path::new(temporary))
+}
+
+pub fn remove_temporary(workspace: &Dir, target: &Path, temporary: &str) -> io::Result<()> {
+    validate_temporary_name(temporary)?;
+    let (parent, _) = open_parent(workspace, target, false)?;
+    match parent.remove_file(temporary) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+pub fn commit_temporary(
+    workspace: &Dir,
+    target: &Path,
+    temporary: &str,
+) -> Result<(), AtomicWriteError> {
+    validate_temporary_name(temporary).map_err(AtomicWriteError::BeforeRename)?;
+    let (parent, file_name) =
+        open_parent(workspace, target, false).map_err(AtomicWriteError::BeforeRename)?;
+    let file_name = file_name
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid target filename"))
+        .map_err(AtomicWriteError::BeforeRename)?;
+    commit_from_parent(&parent, file_name, temporary)
+}
+
+pub fn sync_parent(workspace: &Dir, target: &Path) -> io::Result<()> {
+    let (parent, _) = open_parent(workspace, target, false)?;
+    parent.open(".")?.sync_all()
+}
+
+fn commit_from_parent(
+    parent: &Dir,
+    file_name: &str,
+    temporary: &str,
+) -> Result<(), AtomicWriteError> {
+    if let Err(error) = parent.rename(temporary, parent, file_name) {
+        let _ = parent.remove_file(temporary);
+        return Err(AtomicWriteError::BeforeRename(error));
+    }
+    parent
+        .open(".")
+        .and_then(|directory| directory.sync_all())
+        .map_err(AtomicWriteError::ParentSync)
+}
+
+fn read_from_parent(parent: &Dir, file_name: &Path) -> io::Result<Option<Vec<u8>>> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let mut file = match parent.open_with(file_name, &options) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut content = Vec::new();
+    Read::by_ref(&mut file)
+        .take((MAX_MARKDOWN_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut content)?;
+    if content.len() > MAX_MARKDOWN_FILE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Markdown note exceeds the {MAX_MARKDOWN_FILE_BYTES}-byte Apply limit"),
+        ));
+    }
+    Ok(Some(content))
+}
+
+fn validate_temporary_name(temporary: &str) -> io::Result<()> {
+    if temporary.is_empty()
+        || temporary.contains(['/', '\\', '\0'])
+        || !temporary.starts_with('.')
+        || !temporary.ends_with(".tmp")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid temporary filename",
+        ));
+    }
+    Ok(())
 }
 
 pub fn temporary_name(target: &Path, operation_id: &str) -> io::Result<String> {
@@ -376,6 +503,38 @@ mod tests {
             fs::metadata(root.join(target)).unwrap().permissions(),
             permissions
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inspects_and_commits_only_the_named_recovery_temporary() {
+        let root =
+            std::env::temp_dir().join(format!("log-inbox-daily-recovery-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("Daily.md"), b"original").unwrap();
+        fs::write(root.join(".Daily.md.log-inbox-operation.tmp"), b"intended").unwrap();
+        fs::write(root.join("unrelated.tmp"), b"leave me").unwrap();
+        let workspace = Dir::open_ambient_dir(&root, ambient_authority()).unwrap();
+
+        assert_eq!(
+            read_temporary(
+                &workspace,
+                Path::new("Daily.md"),
+                ".Daily.md.log-inbox-operation.tmp"
+            )
+            .unwrap()
+            .unwrap(),
+            b"intended"
+        );
+        commit_temporary(
+            &workspace,
+            Path::new("Daily.md"),
+            ".Daily.md.log-inbox-operation.tmp",
+        )
+        .unwrap();
+        assert_eq!(fs::read(root.join("Daily.md")).unwrap(), b"intended");
+        assert_eq!(fs::read(root.join("unrelated.tmp")).unwrap(), b"leave me");
+        assert!(read_temporary(&workspace, Path::new("Daily.md"), "../outside.tmp").is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
