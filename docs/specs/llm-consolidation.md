@@ -46,7 +46,7 @@ The dashboard may request a whole-day consolidation across staged, reviewed, and
 
 Concurrent producers never share a target file. The consolidator should use an advisory lock plus a content hash check before replacing a canonical note so an edit from any Markdown tool cannot be silently overwritten. A daily-note template or query may show pending proposals by `created_at` without appending links for each proposal.
 
-Storage and model limits are intentionally separate. The store retains every accepted redacted byte. For a whole-day prompt, the service selects the latest terminal event for each correlated task, or the latest event when the task is still open, while retaining every original event ID as proposal evidence. The LLM receives bounded messages and metadata plus an explicit notice when content was omitted from that model call.
+Storage and model limits are intentionally separate. The store retains every accepted redacted byte. A whole-day prompt includes every event in the immutable snapshot, ordered by event and receipt time, so an earlier decision or validation cannot disappear behind a terminal lifecycle event. Individual messages and metadata remain bounded and carry an explicit notice when content was omitted from the model call.
 
 ## Prompt Contract
 
@@ -81,7 +81,9 @@ Required output:
 }
 ```
 
-For whole-day consolidation, Rust groups evidence by task or session and resolves canonical links for each group before calling the model. The response contains exactly one structured `workstreams` item per supplied group ID with a title and 1-3 summary bullets. Rust validates complete group coverage and renders headings, server-owned links, and bounded per-workstream `Details:` lines. Invalid model structure falls back to the authoritative terminal message for every group; free-form model Markdown is never used for daily consolidation.
+For whole-day consolidation, Rust assigns server-owned group IDs and resolves canonical links before calling the model. The response contains exactly one structured workstream per supplied group ID, exact evidence IDs, and adaptive Outcome, Decision, Trade-off, Validation, Blocker, Follow-up, and reference arrays. Rust rejects unknown fields, invented or missing evidence, duplicate evidence assignment, cross-group evidence, placeholder titles, and empty factual workstreams. It then renders Markdown with server-owned links and references. Invalid output is a visible generation failure; daily consolidation never falls back to raw log messages or free-form model Markdown.
+
+Automated daily consolidation also fails visibly when no LLM is configured. Manual-only days remain reviewable without an LLM because their user-authored prose is rendered separately and verbatim.
 
 ## Markdown Rules
 

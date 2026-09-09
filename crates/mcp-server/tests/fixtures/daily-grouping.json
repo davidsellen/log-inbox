@@ -2,7 +2,7 @@
   "schema_version": 1,
   "cases": [
     {
-      "name": "terminal lifecycle event wins the prompt projection",
+      "name": "the prompt preserves the complete lifecycle evidence",
       "events": [
         {
           "id": "evt_start",
@@ -53,8 +53,8 @@
           "expected_group_key": "repo:sweetone|work-item:57950"
         }
       ],
-      "expected_daily_prompt_event_ids": ["evt_complete"],
-      "target_contract_note": "The refocused workflow must retain unique earlier decisions and validations even when the prompt projection chooses a terminal lifecycle event."
+      "expected_daily_prompt_event_ids": ["evt_start", "evt_complete", "evt_late_progress"],
+      "target_contract_note": "The refocused workflow supplies the complete bounded lifecycle so unique earlier decisions and validations cannot be silently discarded."
     },
     {
       "name": "repository namespaces matching work item numbers",
