@@ -1,6 +1,9 @@
 use crate::{
     daily::resolve_day,
-    models::{DailyDay, EvidenceSnapshot, ManualDailyEntry, ProposalRevision},
+    models::{
+        DailyDay, DailyRevisionContent, DailyWorkstream, EvidenceSnapshot, ManualDailyEntry,
+        ProposalRevision,
+    },
     store::Store,
 };
 use anyhow::{Context, Result};
@@ -233,7 +236,7 @@ impl Store {
         );
         self.daily_day(workspace_id, local_date)?
             .context("daily day is required before a proposal revision")?;
-        if let Some(snapshot_id) = snapshot_id {
+        let snapshot = if let Some(snapshot_id) = snapshot_id {
             let snapshot = self
                 .evidence_snapshot(snapshot_id)?
                 .context("proposal evidence snapshot does not exist")?;
@@ -241,6 +244,20 @@ impl Store {
                 snapshot.workspace_id == workspace_id && snapshot.local_date == local_date,
                 "proposal evidence snapshot belongs to a different day"
             );
+            Some(snapshot)
+        } else {
+            None
+        };
+        if origin != "advanced_markdown" {
+            let structured: DailyRevisionContent = serde_json::from_value(content.clone())
+                .context("proposal revision does not match the structured daily schema")?;
+            self.validate_daily_revision_content(
+                workspace_id,
+                local_date,
+                origin,
+                &structured,
+                snapshot.as_ref(),
+            )?;
         }
         let content_json = serde_json::to_string(content)?;
         let content_hash = digest(content_json.as_bytes());
@@ -326,6 +343,59 @@ impl Store {
             event_ids,
             created_at: parse_time(&created_at)?,
         }))
+    }
+
+    fn validate_daily_revision_content(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        origin: &str,
+        content: &DailyRevisionContent,
+        snapshot: Option<&EvidenceSnapshot>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            content.schema_version == 1,
+            "unsupported daily revision schema"
+        );
+        let manual_ids = content.manual_entry_ids.iter().collect::<HashSet<_>>();
+        anyhow::ensure!(
+            manual_ids.len() == content.manual_entry_ids.len(),
+            "manual entry IDs must be unique"
+        );
+        let available_manual_ids = self
+            .manual_daily_entries(workspace_id, local_date)?
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<HashSet<_>>();
+        anyhow::ensure!(
+            manual_ids
+                .iter()
+                .all(|entry_id| available_manual_ids.contains(entry_id.as_str())),
+            "proposal contains a manual entry from a different day"
+        );
+        if origin == "manual" {
+            anyhow::ensure!(
+                snapshot.is_none(),
+                "manual revision cannot have automated evidence"
+            );
+            anyhow::ensure!(
+                content.workstreams.is_empty(),
+                "manual revision cannot have workstreams"
+            );
+            anyhow::ensure!(
+                !manual_ids.is_empty(),
+                "manual revision requires a manual entry"
+            );
+            return Ok(());
+        }
+        let Some(snapshot) = snapshot else {
+            anyhow::ensure!(
+                content.workstreams.is_empty() && !manual_ids.is_empty(),
+                "revision without a snapshot must contain only manual entries"
+            );
+            return Ok(());
+        };
+        validate_workstream_evidence(&content.workstreams, &snapshot.event_ids)
     }
 
     fn proposal_revision(&self, id: &str) -> Result<Option<ProposalRevision>> {
@@ -456,6 +526,89 @@ fn manual_entry_from_row(row: &Row<'_>) -> rusqlite::Result<ManualDailyEntry> {
     })
 }
 
+fn validate_workstream_evidence(
+    workstreams: &[DailyWorkstream],
+    expected_event_ids: &[String],
+) -> Result<()> {
+    anyhow::ensure!(
+        !workstreams.is_empty(),
+        "automated revision requires a workstream"
+    );
+    let expected = expected_event_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut covered = HashSet::new();
+    let mut workstream_ids = HashSet::new();
+    for workstream in workstreams {
+        anyhow::ensure!(
+            !workstream.id.trim().is_empty() && !workstream.title.trim().is_empty(),
+            "workstream ID and title are required"
+        );
+        anyhow::ensure!(
+            workstream_ids.insert(&workstream.id),
+            "workstream IDs must be unique"
+        );
+        let workstream_evidence = workstream
+            .evidence_event_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        anyhow::ensure!(
+            workstream_evidence.len() == workstream.evidence_event_ids.len()
+                && !workstream_evidence.is_empty(),
+            "workstream evidence must be nonempty and unique"
+        );
+        anyhow::ensure!(
+            workstream_evidence
+                .iter()
+                .all(|event_id| expected.contains(event_id)),
+            "workstream contains evidence outside its snapshot"
+        );
+        anyhow::ensure!(
+            workstream_evidence
+                .iter()
+                .all(|event_id| covered.insert(*event_id)),
+            "snapshot evidence appears in multiple workstreams"
+        );
+        let facts = [
+            &workstream.outcome,
+            &workstream.decision,
+            &workstream.trade_off,
+            &workstream.validation,
+            &workstream.blocker,
+            &workstream.follow_up,
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        anyhow::ensure!(!facts.is_empty(), "workstream requires a factual field");
+        let mut supported = HashSet::new();
+        for fact in facts {
+            anyhow::ensure!(
+                !fact.text.trim().is_empty() && !fact.evidence_event_ids.is_empty(),
+                "daily fact requires text and evidence"
+            );
+            for event_id in &fact.evidence_event_ids {
+                anyhow::ensure!(
+                    workstream_evidence.contains(event_id.as_str()),
+                    "daily fact cites evidence outside its workstream"
+                );
+                supported.insert(event_id.as_str());
+            }
+        }
+        anyhow::ensure!(
+            supported == workstream_evidence,
+            "workstream evidence must support a factual field"
+        );
+    }
+    anyhow::ensure!(
+        covered == expected,
+        "proposal does not cover the complete snapshot"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,12 +661,25 @@ mod tests {
             )
             .expect("manual entry stores");
         assert_eq!(manual.text, "Recorded the reviewed trade-off.");
-        assert_eq!(
-            store
-                .manual_daily_entries(&profile.id, date)
-                .expect("manual entries read"),
-            [manual]
-        );
+        let manual_entries = store
+            .manual_daily_entries(&profile.id, date)
+            .expect("manual entries read");
+        assert_eq!(manual_entries.len(), 1);
+        assert_eq!(manual_entries[0], manual);
+        let manual_revision = store
+            .create_proposal_revision(
+                &profile.id,
+                date,
+                None,
+                "manual",
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "manual_entry_ids": [manual.id],
+                    "workstreams": []
+                }),
+            )
+            .expect("manual revision stores");
+        assert_eq!(manual_revision.origin, "manual");
 
         let first = store
             .insert_event(LogEventInput {
@@ -596,7 +762,23 @@ mod tests {
                 date,
                 Some(&snapshot.id),
                 "generated",
-                &serde_json::json!({"workstreams": []}),
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "manual_entry_ids": [manual.id],
+                    "workstreams": [{
+                        "id": "task:test",
+                        "title": "Daily domain",
+                        "evidence_event_ids": event_ids,
+                        "decision": [{
+                            "text": "Kept review before apply.",
+                            "evidence_event_ids": [event_ids[0]]
+                        }],
+                        "validation": [{
+                            "text": "Validation passed.",
+                            "evidence_event_ids": [event_ids[1]]
+                        }]
+                    }]
+                }),
             )
             .expect("first revision stores");
         let edited = store
@@ -605,11 +787,23 @@ mod tests {
                 date,
                 Some(&snapshot.id),
                 "structured_edit",
-                &serde_json::json!({"workstreams": [{"outcome": "Reviewed"}]}),
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "manual_entry_ids": [manual.id],
+                    "workstreams": [{
+                        "id": "task:test",
+                        "title": "Daily domain",
+                        "evidence_event_ids": event_ids,
+                        "outcome": [{
+                            "text": "Reviewed the immutable daily domain.",
+                            "evidence_event_ids": event_ids
+                        }]
+                    }]
+                }),
             )
             .expect("edited revision stores");
-        assert_eq!(first_revision.revision_number, 1);
-        assert_eq!(edited.revision_number, 2);
+        assert_eq!(first_revision.revision_number, 2);
+        assert_eq!(edited.revision_number, 3);
         assert_eq!(
             store
                 .daily_day(&profile.id, date)

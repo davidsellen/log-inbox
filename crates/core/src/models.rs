@@ -189,6 +189,45 @@ pub struct ManualDailyEntry {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DailyRevisionContent {
+    pub schema_version: u64,
+    #[serde(default)]
+    pub workstreams: Vec<DailyWorkstream>,
+    #[serde(default)]
+    pub manual_entry_ids: Vec<String>,
+    #[serde(default)]
+    pub open_questions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DailyWorkstream {
+    pub id: String,
+    pub title: String,
+    pub evidence_event_ids: Vec<String>,
+    #[serde(default)]
+    pub outcome: Vec<DailyFact>,
+    #[serde(default)]
+    pub decision: Vec<DailyFact>,
+    #[serde(default)]
+    pub trade_off: Vec<DailyFact>,
+    #[serde(default)]
+    pub validation: Vec<DailyFact>,
+    #[serde(default)]
+    pub blocker: Vec<DailyFact>,
+    #[serde(default)]
+    pub follow_up: Vec<DailyFact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DailyFact {
+    pub text: String,
+    pub evidence_event_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProposalRevision {
     pub id: String,
