@@ -199,7 +199,7 @@ pub fn write_atomically(
     let file_name = file_name
         .to_str()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid target filename"))?;
-    let temporary = format!(".{file_name}.log-inbox-{operation_id}.tmp");
+    let temporary = temporary_name(target, operation_id)?;
     let permissions = parent
         .symlink_metadata(file_name)
         .ok()
@@ -224,6 +224,24 @@ pub fn write_atomically(
         let _ = parent.remove_file(&temporary);
     }
     result
+}
+
+pub fn temporary_name(target: &Path, operation_id: &str) -> io::Result<String> {
+    let file_name = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid target filename"))?;
+    if operation_id.is_empty()
+        || !operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid operation ID",
+        ));
+    }
+    Ok(format!(".{file_name}.log-inbox-{operation_id}.tmp"))
 }
 
 fn open_parent<'a>(workspace: &Dir, target: &'a Path, create: bool) -> io::Result<(Dir, &'a Path)> {

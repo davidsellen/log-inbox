@@ -153,6 +153,8 @@ struct ApplyDailyRequest {
     destination_path: String,
     expected_old_block_hash: Option<String>,
     intended_new_block_hash: String,
+    expected_target_exists: bool,
+    expected_original_content_hash: String,
     expected_updated_content_hash: String,
 }
 
@@ -1007,6 +1009,8 @@ async fn refocus_daily_apply_preview(
         "next_block": plan.next_block,
         "expected_old_block_hash": plan.expected_old_block_hash,
         "intended_new_block_hash": plan.intended_new_block_hash,
+        "expected_target_exists": material.target_exists,
+        "expected_original_content_hash": daily_writer::digest(&material.original_content),
         "updated_content_hash": updated_content_hash
     })))
 }
@@ -1034,7 +1038,7 @@ async fn refocus_daily_apply(
     {
         validate_apply_operation_approval(&operation, &input)?;
         return Ok(Json(json!({
-            "operation": operation,
+            "operation": public_apply_operation(&operation),
             "destination_path": input.destination_path,
             "idempotent": true
         })));
@@ -1060,7 +1064,7 @@ async fn refocus_daily_apply(
             state
                 .store
                 .prepare_apply_operation(&PrepareApplyOperation {
-                    id: operation_id,
+                    id: operation_id.clone(),
                     workspace_id: material.profile.id.clone(),
                     local_date,
                     revision_id: material.revision.id.clone(),
@@ -1068,6 +1072,15 @@ async fn refocus_daily_apply(
                     destination_path: material.day.destination_path.clone(),
                     expected_old_block_hash: material.plan.expected_old_block_hash.clone(),
                     intended_new_block_hash: material.plan.intended_new_block_hash.clone(),
+                    expected_target_exists: material.target_exists,
+                    expected_original_content_hash: daily_writer::digest(
+                        &material.original_content,
+                    ),
+                    intended_updated_content_hash: daily_writer::digest(
+                        &material.plan.updated_content,
+                    ),
+                    temporary_name: daily_writer::temporary_name(&material.target, &operation_id)
+                        .map_err(|error| ApiError::internal(error.to_string()))?,
                     recovery_payload: Some(material.original_content.clone()),
                     recovery_path: None,
                 })
@@ -1076,10 +1089,20 @@ async fn refocus_daily_apply(
     };
     let operation = execute_daily_apply(&state, &material, operation)?;
     Ok(Json(json!({
-        "operation": operation,
+        "operation": public_apply_operation(&operation),
         "destination_path": material.day.destination_path,
         "idempotent": false
     })))
+}
+
+fn public_apply_operation(operation: &ApplyOperation) -> Value {
+    json!({
+        "id": operation.id,
+        "state": operation.state,
+        "failure_reason": operation.failure_reason,
+        "created_at": operation.created_at,
+        "updated_at": operation.updated_at
+    })
 }
 
 fn apply_operation_id(
@@ -1088,11 +1111,14 @@ fn apply_operation_id(
     input: &ApplyDailyRequest,
 ) -> String {
     let identity = format!(
-        "{workspace_id}\0{local_date}\0{}\0{}\0{}\0{}",
+        "{workspace_id}\0{local_date}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
         input.expected_revision_id,
         input.expected_revision_content_hash,
         input.destination_path,
-        input.intended_new_block_hash
+        input.intended_new_block_hash,
+        input.expected_target_exists,
+        input.expected_original_content_hash,
+        input.expected_updated_content_hash
     );
     format!("apply_{}", daily_writer::digest(identity.as_bytes()))
 }
@@ -1106,6 +1132,11 @@ fn validate_apply_operation_approval(
         || operation.destination_path != input.destination_path
         || operation.expected_old_block_hash != input.expected_old_block_hash
         || operation.intended_new_block_hash != input.intended_new_block_hash
+        || operation.expected_target_exists != Some(input.expected_target_exists)
+        || operation.expected_original_content_hash.as_deref()
+            != Some(input.expected_original_content_hash.as_str())
+        || operation.intended_updated_content_hash.as_deref()
+            != Some(input.expected_updated_content_hash.as_str())
     {
         return Err(ApiError::conflict(
             "Apply approval differs from the journaled operation",
@@ -1122,6 +1153,8 @@ fn validate_apply_material_approval(
         || material.revision.content_hash != input.expected_revision_content_hash
         || material.day.destination_path != input.destination_path
         || material.plan.intended_new_block_hash != input.intended_new_block_hash
+        || material.target_exists != input.expected_target_exists
+        || daily_writer::digest(&material.original_content) != input.expected_original_content_hash
         || daily_writer::digest(&material.plan.updated_content)
             != input.expected_updated_content_hash
     {
@@ -1153,6 +1186,26 @@ fn execute_daily_apply(
     let current_file = daily_writer::read_file(workspace.directory(), &material.target)
         .map_err(|error| ApiError::internal(format!("reading Daily target failed: {error}")))?;
     let current = current_file.as_deref().unwrap_or_default();
+    let Some(expected_target_exists) = operation.expected_target_exists else {
+        return Err(ApiError::conflict(
+            "this legacy Apply operation lacks exact file identity and requires reconciliation",
+        ));
+    };
+    let Some(expected_original_content_hash) = operation.expected_original_content_hash.clone()
+    else {
+        return Err(ApiError::conflict(
+            "this Apply operation has incomplete file identity and requires reconciliation",
+        ));
+    };
+    let Some(intended_updated_content_hash) = operation.intended_updated_content_hash.clone()
+    else {
+        return Err(ApiError::conflict(
+            "this Apply operation has incomplete file identity and requires reconciliation",
+        ));
+    };
+    let current_hash = daily_writer::digest(current);
+    let current_is_intended =
+        current_file.is_some() && current_hash == intended_updated_content_hash;
     let current_block_hash = if current_file.is_none() {
         None
     } else {
@@ -1160,7 +1213,9 @@ fn execute_daily_apply(
             .map_err(ApiError::conflict)?
     };
 
-    if current_block_hash.as_deref() == Some(operation.intended_new_block_hash.as_str()) {
+    if current_is_intended
+        && current_block_hash.as_deref() == Some(operation.intended_new_block_hash.as_str())
+    {
         if operation.state == "prepared" {
             operation = transition_apply(state, &operation, "writing", None)?;
         }
@@ -1168,7 +1223,9 @@ fn execute_daily_apply(
             operation = transition_apply(state, &operation, "written", None)?;
         }
     } else if matches!(operation.state.as_str(), "prepared" | "writing") {
-        if operation.recovery_payload.as_deref() != Some(current) {
+        if current_file.is_some() != expected_target_exists
+            || current_hash != expected_original_content_hash
+        {
             transition_apply(
                 state,
                 &operation,
@@ -1207,23 +1264,25 @@ fn execute_daily_apply(
         ) {
             let after = daily_writer::read_file(workspace.directory(), &material.target)
                 .ok()
-                .flatten()
-                .unwrap_or_default();
-            let after_hash = daily_writer::managed_block_hash(&after, &material.day.block_id)
-                .ok()
                 .flatten();
-            if after_hash.as_deref() == Some(operation.intended_new_block_hash.as_str()) {
-                operation = transition_apply(state, &operation, "written", None)?;
+            let after_bytes = after.as_deref().unwrap_or_default();
+            if after.is_some() && daily_writer::digest(after_bytes) == intended_updated_content_hash
+            {
+                let message =
+                    format!("Daily target was replaced but write durability is uncertain: {error}");
+                transition_apply(state, &operation, "reconciliation_required", Some(&message))?;
+                return Err(ApiError::internal(message));
             } else {
-                let (state_name, message) =
-                    if operation.recovery_payload.as_deref() == Some(after.as_slice()) {
-                        ("failed", format!("atomic Daily write failed: {error}"))
-                    } else {
-                        (
-                            "reconciliation_required",
-                            format!("Daily target changed during a failed write: {error}"),
-                        )
-                    };
+                let (state_name, message) = if after.is_some() == expected_target_exists
+                    && daily_writer::digest(after_bytes) == expected_original_content_hash
+                {
+                    ("failed", format!("atomic Daily write failed: {error}"))
+                } else {
+                    (
+                        "reconciliation_required",
+                        format!("Daily target changed during a failed write: {error}"),
+                    )
+                };
                 transition_apply(state, &operation, state_name, Some(&message))?;
                 return Err(ApiError::internal(message));
             }
@@ -1235,7 +1294,9 @@ fn execute_daily_apply(
                 .ok_or_else(|| ApiError::conflict("the Daily target disappeared after writing"))?;
             let written_hash = daily_writer::managed_block_hash(&written, &material.day.block_id)
                 .map_err(ApiError::conflict)?;
-            if written_hash.as_deref() != Some(operation.intended_new_block_hash.as_str()) {
+            if daily_writer::digest(&written) != intended_updated_content_hash
+                || written_hash.as_deref() != Some(operation.intended_new_block_hash.as_str())
+            {
                 transition_apply(
                     state,
                     &operation,
@@ -1314,13 +1375,23 @@ fn recover_daily_applies(state: &AppState) {
             )?;
             let target = std::path::Path::new(&operation.destination_path);
             let current = daily_writer::read_file(workspace.directory(), target)?;
-            let block_hash = if let Some(current) = current {
-                daily_writer::managed_block_hash(&current, &day.block_id)
+            let current_bytes = current.as_deref().unwrap_or_default();
+            let intended_updated_content_hash = operation
+                .intended_updated_content_hash
+                .as_deref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Apply journal lacks exact updated content identity")
+                })?;
+            let block_hash = if current.is_some() {
+                daily_writer::managed_block_hash(current_bytes, &day.block_id)
                     .map_err(anyhow::Error::msg)?
             } else {
                 None
             };
-            if block_hash.as_deref() == Some(operation.intended_new_block_hash.as_str()) {
+            if current.is_some()
+                && daily_writer::digest(current_bytes) == intended_updated_content_hash
+                && block_hash.as_deref() == Some(operation.intended_new_block_hash.as_str())
+            {
                 if operation.state == "prepared" {
                     operation = state.store.transition_apply_operation(
                         &operation.id,
@@ -4131,6 +4202,8 @@ mod knowledge_destination_tests {
             "destination_path": apply_preview["destination_path"],
             "expected_old_block_hash": apply_preview["expected_old_block_hash"],
             "intended_new_block_hash": apply_preview["intended_new_block_hash"],
+            "expected_target_exists": apply_preview["expected_target_exists"],
+            "expected_original_content_hash": apply_preview["expected_original_content_hash"],
             "expected_updated_content_hash": apply_preview["updated_content_hash"]
         });
         let applied = json_response(
@@ -4143,10 +4216,11 @@ mod knowledge_destination_tests {
         )
         .await;
         assert_eq!(applied.status(), StatusCode::OK);
-        assert_eq!(
-            response_json(applied).await["operation"]["state"],
-            "finalized"
-        );
+        let applied = response_json(applied).await;
+        assert_eq!(applied["operation"]["state"], "finalized");
+        assert!(applied["operation"].get("recovery_payload").is_none());
+        assert!(applied["operation"].get("recovery_path").is_none());
+        assert!(applied["operation"].get("temporary_name").is_none());
         let destination = apply_preview["destination_path"].as_str().unwrap();
         let written = std::fs::read_to_string(workspace_root.join(destination)).unwrap();
         assert!(written.contains("Reviewed the safe Apply boundary."));
@@ -4218,6 +4292,8 @@ mod knowledge_destination_tests {
                 "destination_path": newer_preview["destination_path"],
                 "expected_old_block_hash": newer_preview["expected_old_block_hash"],
                 "intended_new_block_hash": newer_preview["intended_new_block_hash"],
+                "expected_target_exists": newer_preview["expected_target_exists"],
+                "expected_original_content_hash": newer_preview["expected_original_content_hash"],
                 "expected_updated_content_hash": newer_preview["updated_content_hash"]
             }),
             Some(&cookie),
@@ -4272,6 +4348,14 @@ mod knowledge_destination_tests {
                 destination_path: day.destination_path.clone(),
                 expected_old_block_hash: None,
                 intended_new_block_hash: plan.intended_new_block_hash.clone(),
+                expected_target_exists: false,
+                expected_original_content_hash: daily_writer::digest(b""),
+                intended_updated_content_hash: daily_writer::digest(&plan.updated_content),
+                temporary_name: daily_writer::temporary_name(
+                    std::path::Path::new(&day.destination_path),
+                    "apply_recovery_test",
+                )
+                .unwrap(),
                 recovery_payload: Some(Vec::new()),
                 recovery_path: None,
             })

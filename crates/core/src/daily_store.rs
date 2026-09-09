@@ -386,9 +386,11 @@ impl Store {
             r#"INSERT OR IGNORE INTO apply_operations
                 (id, workspace_id, local_date, revision_id, revision_content_hash,
                  destination_path, expected_old_block_hash, intended_new_block_hash,
-                 recovery_payload, recovery_path, state, failure_reason, created_at, updated_at)
+                 recovery_payload, recovery_path, state, failure_reason, created_at, updated_at,
+                 expected_target_exists, expected_original_content_hash,
+                 intended_updated_content_hash, temporary_name)
                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                       'prepared', NULL, ?11, ?11)"#,
+                       'prepared', NULL, ?11, ?11, ?12, ?13, ?14, ?15)"#,
             params![
                 input.id,
                 input.workspace_id,
@@ -401,6 +403,10 @@ impl Store {
                 input.recovery_payload,
                 input.recovery_path,
                 now,
+                input.expected_target_exists,
+                input.expected_original_content_hash,
+                input.intended_updated_content_hash,
+                input.temporary_name,
             ],
         )?;
         let operation = self
@@ -420,7 +426,9 @@ impl Store {
                           revision_content_hash, destination_path,
                           expected_old_block_hash, intended_new_block_hash,
                           recovery_payload, recovery_path, state, failure_reason,
-                          created_at, updated_at
+                          created_at, updated_at, expected_target_exists,
+                          expected_original_content_hash, intended_updated_content_hash,
+                          temporary_name
                    FROM apply_operations WHERE id = ?1"#,
                 params![id],
                 apply_operation_from_row,
@@ -436,7 +444,9 @@ impl Store {
                       revision_content_hash, destination_path,
                       expected_old_block_hash, intended_new_block_hash,
                       recovery_payload, recovery_path, state, failure_reason,
-                      created_at, updated_at
+                      created_at, updated_at, expected_target_exists,
+                      expected_original_content_hash, intended_updated_content_hash,
+                      temporary_name
                FROM apply_operations
                WHERE state != 'finalized'
                ORDER BY updated_at, created_at, id
@@ -516,7 +526,9 @@ impl Store {
                           revision_content_hash, destination_path,
                           expected_old_block_hash, intended_new_block_hash,
                           recovery_payload, recovery_path, state, failure_reason,
-                          created_at, updated_at
+                          created_at, updated_at, expected_target_exists,
+                          expected_original_content_hash, intended_updated_content_hash,
+                          temporary_name
                    FROM apply_operations WHERE id = ?1"#,
                 params![id],
                 apply_operation_from_row,
@@ -799,7 +811,23 @@ fn validate_apply_operation_input(input: &PrepareApplyOperation) -> Result<()> {
         validate_sha256(hash, "expected old block")?;
     }
     validate_sha256(&input.intended_new_block_hash, "intended new block")?;
+    validate_sha256(
+        &input.expected_original_content_hash,
+        "expected original content",
+    )?;
+    validate_sha256(
+        &input.intended_updated_content_hash,
+        "intended updated content",
+    )?;
     validate_relative_path(&input.destination_path)?;
+    anyhow::ensure!(
+        !input.temporary_name.is_empty()
+            && input.temporary_name.len() <= 255
+            && !input.temporary_name.contains(['/', '\\', '\0'])
+            && input.temporary_name.starts_with('.')
+            && input.temporary_name.ends_with(".tmp"),
+        "apply temporary filename is invalid"
+    );
     anyhow::ensure!(
         input.recovery_payload.is_some() ^ input.recovery_path.is_some(),
         "provide exactly one recovery payload or recovery path"
@@ -817,6 +845,26 @@ fn validate_apply_operation_input(input: &PrepareApplyOperation) -> Result<()> {
             !path.is_empty() && path.len() <= 4096 && !path.contains('\0')
         }),
         "apply recovery path is invalid"
+    );
+    if let Some(payload) = &input.recovery_payload {
+        anyhow::ensure!(
+            digest(payload) == input.expected_original_content_hash,
+            "apply recovery payload does not match the expected original content hash"
+        );
+        if !input.expected_target_exists {
+            anyhow::ensure!(
+                payload.is_empty(),
+                "a missing apply target must have an empty recovery payload"
+            );
+        }
+    }
+    let target_name = std::path::Path::new(&input.destination_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("apply destination filename is invalid")?;
+    anyhow::ensure!(
+        input.temporary_name == format!(".{target_name}.log-inbox-{}.tmp", input.id),
+        "apply temporary filename does not match the operation identity"
     );
     Ok(())
 }
@@ -841,6 +889,12 @@ fn operation_matches_input(operation: &ApplyOperation, input: &PrepareApplyOpera
         && operation.destination_path == input.destination_path
         && operation.expected_old_block_hash == input.expected_old_block_hash
         && operation.intended_new_block_hash == input.intended_new_block_hash
+        && operation.expected_target_exists == Some(input.expected_target_exists)
+        && operation.expected_original_content_hash.as_deref()
+            == Some(input.expected_original_content_hash.as_str())
+        && operation.intended_updated_content_hash.as_deref()
+            == Some(input.intended_updated_content_hash.as_str())
+        && operation.temporary_name.as_deref() == Some(input.temporary_name.as_str())
         && operation.recovery_payload == input.recovery_payload
         && operation.recovery_path == input.recovery_path
 }
@@ -882,6 +936,10 @@ fn apply_operation_from_row(row: &Row<'_>) -> rusqlite::Result<ApplyOperation> {
         recovery_path: row.get(9)?,
         state: row.get(10)?,
         failure_reason: row.get(11)?,
+        expected_target_exists: row.get(14)?,
+        expected_original_content_hash: row.get(15)?,
+        intended_updated_content_hash: row.get(16)?,
+        temporary_name: row.get(17)?,
         created_at: parse_time(&created_at).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, error.into())
         })?,
@@ -1516,6 +1574,10 @@ mod tests {
             destination_path: day.destination_path,
             expected_old_block_hash: Some("a".repeat(64)),
             intended_new_block_hash: "b".repeat(64),
+            expected_target_exists: true,
+            expected_original_content_hash: digest(b"original daily note"),
+            intended_updated_content_hash: "c".repeat(64),
+            temporary_name: ".2026-09-09.md.log-inbox-apply_2026-09-09_primary.tmp".to_owned(),
             recovery_payload: Some(b"original daily note".to_vec()),
             recovery_path: None,
         };
@@ -1535,6 +1597,19 @@ mod tests {
             input.expected_old_block_hash
         );
         assert_eq!(prepared.recovery_payload, input.recovery_payload);
+        assert_eq!(prepared.expected_target_exists, Some(true));
+        assert_eq!(
+            prepared.expected_original_content_hash.as_deref(),
+            Some(input.expected_original_content_hash.as_str())
+        );
+        assert_eq!(
+            prepared.intended_updated_content_hash.as_deref(),
+            Some(input.intended_updated_content_hash.as_str())
+        );
+        assert_eq!(
+            prepared.temporary_name.as_deref(),
+            Some(input.temporary_name.as_str())
+        );
         assert_eq!(
             store
                 .prepare_apply_operation(&input)
@@ -1558,8 +1633,20 @@ mod tests {
                 .to_string()
                 .contains("different immutable inputs")
         );
+        let mut changed_original = input.clone();
+        changed_original.recovery_payload = Some(b"different original".to_vec());
+        changed_original.expected_original_content_hash = digest(b"different original");
+        assert!(
+            store
+                .prepare_apply_operation(&changed_original)
+                .unwrap_err()
+                .to_string()
+                .contains("different immutable inputs")
+        );
         let mut wrong_revision_hash = input.clone();
         wrong_revision_hash.id = "apply_wrong_revision_hash".to_owned();
+        wrong_revision_hash.temporary_name =
+            ".2026-09-09.md.log-inbox-apply_wrong_revision_hash.tmp".to_owned();
         wrong_revision_hash.revision_content_hash = "c".repeat(64);
         assert!(
             store
@@ -1571,6 +1658,8 @@ mod tests {
         let mut wrong_destination = input.clone();
         wrong_destination.id = "apply_wrong_destination".to_owned();
         wrong_destination.destination_path = "Work Log/other.md".to_owned();
+        wrong_destination.temporary_name =
+            ".other.md.log-inbox-apply_wrong_destination.tmp".to_owned();
         assert!(
             store
                 .prepare_apply_operation(&wrong_destination)
@@ -1584,6 +1673,24 @@ mod tests {
                 .unwrap()
                 .execute(
                     "UPDATE apply_operations SET destination_path = 'other.md' WHERE id = ?1",
+                    params![input.id],
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .connect()
+                .unwrap()
+                .execute(
+                    r#"INSERT INTO apply_operations
+                        (id, workspace_id, local_date, revision_id, revision_content_hash,
+                         destination_path, expected_old_block_hash, intended_new_block_hash,
+                         recovery_payload, recovery_path, state, failure_reason, created_at, updated_at)
+                       SELECT 'apply_missing_identity', workspace_id, local_date, revision_id,
+                         revision_content_hash, destination_path, expected_old_block_hash,
+                         intended_new_block_hash, recovery_payload, recovery_path, state,
+                         failure_reason, created_at, updated_at
+                       FROM apply_operations WHERE id = ?1"#,
                     params![input.id],
                 )
                 .is_err()
@@ -1638,6 +1745,7 @@ mod tests {
 
         let mut recovery = input.clone();
         recovery.id = "apply_recovery_path".to_owned();
+        recovery.temporary_name = ".2026-09-09.md.log-inbox-apply_recovery_path.tmp".to_owned();
         recovery.recovery_payload = None;
         recovery.recovery_path = Some("recovery/apply_recovery_path.md".to_owned());
         store
@@ -1753,6 +1861,10 @@ mod tests {
             destination_path: day.destination_path,
             expected_old_block_hash: None,
             intended_new_block_hash: "b".repeat(64),
+            expected_target_exists: false,
+            expected_original_content_hash: digest(b""),
+            intended_updated_content_hash: "c".repeat(64),
+            temporary_name: ".2026-09-09.md.log-inbox-apply_evidence.tmp".to_owned(),
             recovery_payload: Some(Vec::new()),
             recovery_path: None,
         };

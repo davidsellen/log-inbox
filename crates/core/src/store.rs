@@ -459,6 +459,51 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 9 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                ALTER TABLE apply_operations ADD COLUMN expected_target_exists INTEGER
+                    CHECK(expected_target_exists IN (0, 1));
+                ALTER TABLE apply_operations ADD COLUMN expected_original_content_hash TEXT;
+                ALTER TABLE apply_operations ADD COLUMN intended_updated_content_hash TEXT;
+                ALTER TABLE apply_operations ADD COLUMN temporary_name TEXT;
+
+                UPDATE apply_operations
+                SET state = 'reconciliation_required',
+                    failure_reason = 'legacy Apply journal lacks exact file identity; review manually',
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE state != 'finalized';
+
+                DROP TRIGGER apply_operations_immutable_inputs;
+                CREATE TRIGGER apply_operations_immutable_inputs
+                BEFORE UPDATE OF id, workspace_id, local_date, revision_id,
+                    revision_content_hash, destination_path, expected_old_block_hash,
+                    intended_new_block_hash, recovery_payload, recovery_path,
+                    expected_target_exists, expected_original_content_hash,
+                    intended_updated_content_hash, temporary_name
+                ON apply_operations
+                BEGIN
+                    SELECT RAISE(ABORT, 'apply operation inputs are immutable');
+                END;
+
+                CREATE TRIGGER apply_operations_complete_identity
+                BEFORE INSERT ON apply_operations
+                WHEN NEW.expected_target_exists IS NULL
+                    OR NEW.expected_original_content_hash IS NULL
+                    OR NEW.intended_updated_content_hash IS NULL
+                    OR NEW.temporary_name IS NULL
+                BEGIN
+                    SELECT RAISE(ABORT, 'apply operation requires complete file identity');
+                END;
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (9, 'complete apply operation identity', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -1873,10 +1918,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 8);
+        assert_eq!(store.schema_version().expect("version reads"), 9);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 8);
+        assert_eq!(store.schema_version().expect("version remains"), 9);
     }
 
     #[test]
@@ -1944,7 +1989,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 8);
+        assert_eq!(verification.schema_version, 9);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());
