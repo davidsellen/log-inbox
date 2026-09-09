@@ -223,6 +223,8 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
       activeProfile = { id: activeProfile?.id || "workspace_fixture", status: "active", root_binding: "binding_fixture", ...saved.settings, created_at: activeProfile?.created_at || "2026-09-01T00:00:00Z", updated_at: "2026-09-09T12:00:00Z" };
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ active_profile: activeProfile, destination_example: "Journal/2026-09-08.md", binding_matches: true, changes_saved: true }) });
     }
+    if (url.pathname.endsWith("/apply-preview") && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ workspace_id: "workspace_fixture", local_date: "2026-09-08", destination_path: "Work Log/2026/Sep/Daily log 2026-09-08.md", revision_id: "revision_1", revision_content_hash: "a".repeat(64), block_id: "day_fixture", will_create_note: false, template_used: null, previous_block: "<!-- log-inbox:daily:day_fixture:begin -->\nOld\n<!-- log-inbox:daily:day_fixture:end -->", next_block: "<!-- log-inbox:daily:day_fixture:begin -->\nReviewed Daily\n<!-- log-inbox:daily:day_fixture:end -->", expected_old_block_hash: "b".repeat(64), intended_new_block_hash: "c".repeat(64), updated_content_hash: "d".repeat(64) }) });
+    if (url.pathname.endsWith("/apply") && request.method() === "POST") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ operation: { state: "finalized" }, destination_path: request.postDataJSON().destination_path, idempotent: false }) });
     const match = url.pathname.match(/^\/api\/v2\/daily\/(\d{4}-\d{2}-\d{2})$/);
     if (match && request.method() === "GET") {
       if (dailyStatus !== 200) return route.fulfill({ status: dailyStatus, contentType: "application/json", body: JSON.stringify({ error: "Daily fixture unavailable" }) });
@@ -268,6 +270,27 @@ test("refocused Daily saves structured edits against the visible revision", asyn
     expected_revision_id: "revision_1",
     content: { workstreams: [{ title: "Daily review experience" }] }
   });
+});
+
+test("refocused Daily reviews the exact managed block before Apply", async ({ page }) => {
+  const requests = await mockDaily(page);
+  await openDaily(page);
+
+  await page.getByRole("button", { name: "Review Apply" }).click();
+  await expect(page.getByRole("heading", { name: "Apply to Markdown" })).toBeVisible();
+  await expect(page.locator("#apply-target")).toContainText("Work Log/2026/Sep");
+  await expect(page.locator("#apply-before")).toContainText("Old");
+  await expect(page.locator("#apply-after")).toContainText("Reviewed Daily");
+  await page.getByRole("button", { name: "Confirm Apply" }).click();
+
+  await expect.poll(() => requests.find(request => request.path.endsWith("/apply") && request.method === "POST")?.body).toMatchObject({
+    expected_revision_id: "revision_1",
+    destination_path: "Work Log/2026/Sep/Daily log 2026-09-08.md",
+    expected_old_block_hash: "b".repeat(64),
+    intended_new_block_hash: "c".repeat(64),
+    expected_updated_content_hash: "d".repeat(64)
+  });
+  await expect(page.getByRole("status")).toContainText("Applied to Work Log/2026/Sep");
 });
 
 test("refocused Daily keeps CSRF authority in memory only", async ({ page }) => {

@@ -14,8 +14,9 @@ use log_inbox_core::{
     },
     daily::{render_daily_path, resolve_day},
     models::{
-        DailyConsolidationJob, DailyRevisionContent, IgnoredLinkIdentity, LinkSelector,
-        LogEventInput, LogQuery, ProposalRevision, VaultLinkRule, WorkspaceProfile,
+        ApplyOperation, DailyConsolidationJob, DailyDay, DailyRevisionContent, IgnoredLinkIdentity,
+        LinkSelector, LogEventInput, LogQuery, PrepareApplyOperation, ProposalRevision,
+        VaultLinkRule, WorkspaceProfile,
     },
     settings::Settings,
     store::Store,
@@ -142,6 +143,28 @@ struct EditDailyCandidateRequest {
 struct GenerateDailyRequest {
     #[serde(default)]
     replace_edited: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplyDailyRequest {
+    expected_revision_id: String,
+    expected_revision_content_hash: String,
+    destination_path: String,
+    expected_old_block_hash: Option<String>,
+    intended_new_block_hash: String,
+    expected_updated_content_hash: String,
+}
+
+struct DailyApplyMaterial {
+    profile: WorkspaceProfile,
+    day: DailyDay,
+    revision: ProposalRevision,
+    target: PathBuf,
+    target_exists: bool,
+    template_used: Option<String>,
+    original_content: Vec<u8>,
+    plan: daily_writer::ManagedBlockPlan,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -430,6 +453,9 @@ async fn main() -> anyhow::Result<()> {
         refocus,
         workspace,
     };
+    if refocus_enabled {
+        recover_daily_applies(&state);
+    }
 
     if !refocus_enabled {
         if let (Some(config), Some(inbox)) = (
@@ -492,6 +518,7 @@ fn build_router(state: AppState) -> Router {
                 "/api/v2/daily/{date}/apply-preview",
                 get(refocus_daily_apply_preview),
             )
+            .route("/api/v2/daily/{date}/apply", post(refocus_daily_apply))
             .route(
                 "/api/v2/daily/{date}/generate",
                 post(refocus_generate_daily),
@@ -961,7 +988,384 @@ async fn refocus_daily_apply_preview(
     authorize_refocus(&state, &headers, "logs:read", false)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let material = daily_apply_material(&state, local_date)?;
+    let plan = material.plan;
+    let updated_content_hash = daily_writer::digest(&plan.updated_content);
+    Ok(Json(json!({
+        "workspace_id": material.profile.id,
+        "local_date": local_date,
+        "destination_path": material.day.destination_path,
+        "revision_id": material.revision.id,
+        "revision_content_hash": material.revision.content_hash,
+        "block_id": material.day.block_id,
+        "will_create_note": !material.target_exists,
+        "template_used": material.template_used,
+        "previous_block": plan.previous_block,
+        "next_block": plan.next_block,
+        "expected_old_block_hash": plan.expected_old_block_hash,
+        "intended_new_block_hash": plan.intended_new_block_hash,
+        "updated_content_hash": updated_content_hash
+    })))
+}
+
+async fn refocus_daily_apply(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(date): AxumPath<String>,
+    Json(input): Json<ApplyDailyRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "vault:write", true)?;
+    let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
     let profile = active_refocus_workspace(&state)?;
+    let operation_id = apply_operation_id(&profile.id, local_date, &input);
+    let _guard = state
+        .apply_lock
+        .lock()
+        .map_err(|_| ApiError::internal("Daily Apply lock is unavailable"))?;
+    if let Some(operation) = state
+        .store
+        .apply_operation(&operation_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .filter(|operation| operation.state == "finalized")
+    {
+        validate_apply_operation_approval(&operation, &input)?;
+        return Ok(Json(json!({
+            "operation": operation,
+            "destination_path": input.destination_path,
+            "idempotent": true
+        })));
+    }
+
+    let material = daily_apply_material(&state, local_date)?;
+    validate_apply_material_approval(&material, &input)?;
+    let operation = match state
+        .store
+        .apply_operation(&operation_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    {
+        Some(operation) => {
+            validate_apply_operation_approval(&operation, &input)?;
+            operation
+        }
+        None => {
+            if material.plan.expected_old_block_hash != input.expected_old_block_hash {
+                return Err(ApiError::conflict(
+                    "the approved Daily block changed; preview Apply again",
+                ));
+            }
+            state
+                .store
+                .prepare_apply_operation(&PrepareApplyOperation {
+                    id: operation_id,
+                    workspace_id: material.profile.id.clone(),
+                    local_date,
+                    revision_id: material.revision.id.clone(),
+                    revision_content_hash: material.revision.content_hash.clone(),
+                    destination_path: material.day.destination_path.clone(),
+                    expected_old_block_hash: material.plan.expected_old_block_hash.clone(),
+                    intended_new_block_hash: material.plan.intended_new_block_hash.clone(),
+                    recovery_payload: Some(material.original_content.clone()),
+                    recovery_path: None,
+                })
+                .map_err(|error| ApiError::conflict(error.to_string()))?
+        }
+    };
+    let operation = execute_daily_apply(&state, &material, operation)?;
+    Ok(Json(json!({
+        "operation": operation,
+        "destination_path": material.day.destination_path,
+        "idempotent": false
+    })))
+}
+
+fn apply_operation_id(
+    workspace_id: &str,
+    local_date: NaiveDate,
+    input: &ApplyDailyRequest,
+) -> String {
+    let identity = format!(
+        "{workspace_id}\0{local_date}\0{}\0{}\0{}\0{}",
+        input.expected_revision_id,
+        input.expected_revision_content_hash,
+        input.destination_path,
+        input.intended_new_block_hash
+    );
+    format!("apply_{}", daily_writer::digest(identity.as_bytes()))
+}
+
+fn validate_apply_operation_approval(
+    operation: &ApplyOperation,
+    input: &ApplyDailyRequest,
+) -> Result<(), ApiError> {
+    if operation.revision_id != input.expected_revision_id
+        || operation.revision_content_hash != input.expected_revision_content_hash
+        || operation.destination_path != input.destination_path
+        || operation.expected_old_block_hash != input.expected_old_block_hash
+        || operation.intended_new_block_hash != input.intended_new_block_hash
+    {
+        return Err(ApiError::conflict(
+            "Apply approval differs from the journaled operation",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_apply_material_approval(
+    material: &DailyApplyMaterial,
+    input: &ApplyDailyRequest,
+) -> Result<(), ApiError> {
+    if material.revision.id != input.expected_revision_id
+        || material.revision.content_hash != input.expected_revision_content_hash
+        || material.day.destination_path != input.destination_path
+        || material.plan.intended_new_block_hash != input.intended_new_block_hash
+        || daily_writer::digest(&material.plan.updated_content)
+            != input.expected_updated_content_hash
+    {
+        return Err(ApiError::conflict(
+            "the approved Daily preview changed; preview Apply again",
+        ));
+    }
+    Ok(())
+}
+
+fn execute_daily_apply(
+    state: &AppState,
+    material: &DailyApplyMaterial,
+    mut operation: ApplyOperation,
+) -> Result<ApplyOperation, ApiError> {
+    if matches!(
+        operation.state.as_str(),
+        "failed" | "reconciliation_required"
+    ) {
+        return Err(ApiError::conflict(format!(
+            "Apply operation requires attention: {}",
+            operation
+                .failure_reason
+                .as_deref()
+                .unwrap_or(operation.state.as_str())
+        )));
+    }
+    let current = if material.target.exists() {
+        std::fs::read(&material.target)
+            .map_err(|error| ApiError::internal(format!("reading Daily target failed: {error}")))?
+    } else {
+        Vec::new()
+    };
+    let current_block_hash = if current.is_empty() && !material.target.exists() {
+        None
+    } else {
+        daily_writer::managed_block_hash(&current, &material.day.block_id)
+            .map_err(ApiError::conflict)?
+    };
+
+    if current_block_hash.as_deref() == Some(operation.intended_new_block_hash.as_str()) {
+        if operation.state == "prepared" {
+            operation = transition_apply(state, &operation, "writing", None)?;
+        }
+        if operation.state == "writing" {
+            operation = transition_apply(state, &operation, "written", None)?;
+        }
+    } else if matches!(operation.state.as_str(), "prepared" | "writing") {
+        if operation.recovery_payload.as_deref() != Some(current.as_slice()) {
+            transition_apply(
+                state,
+                &operation,
+                "reconciliation_required",
+                Some("the Daily target changed after approval"),
+            )?;
+            return Err(ApiError::conflict(
+                "the Daily target changed after approval; no content was overwritten",
+            ));
+        }
+        if operation.state == "prepared" {
+            operation = transition_apply(state, &operation, "writing", None)?;
+        }
+        let workspace = state
+            .workspace
+            .as_ref()
+            .ok_or_else(|| ApiError::internal("workspace root is not configured"))?;
+        let resolved = workspace
+            .resolve_markdown_path(
+                std::path::Path::new(&operation.destination_path),
+                MarkdownPathMode::MayCreate,
+            )
+            .map_err(|error| ApiError::conflict(error.to_string()))?;
+        if resolved != material.target {
+            transition_apply(
+                state,
+                &operation,
+                "reconciliation_required",
+                Some("the resolved Daily destination changed before writing"),
+            )?;
+            return Err(ApiError::conflict(
+                "the resolved Daily destination changed; no content was written",
+            ));
+        }
+        if let Err(error) = daily_writer::write_atomically(
+            &material.target,
+            &material.plan.updated_content,
+            &operation.id,
+        ) {
+            let after = std::fs::read(&material.target).unwrap_or_default();
+            let after_hash = daily_writer::managed_block_hash(&after, &material.day.block_id)
+                .ok()
+                .flatten();
+            if after_hash.as_deref() == Some(operation.intended_new_block_hash.as_str()) {
+                operation = transition_apply(state, &operation, "written", None)?;
+            } else {
+                let (state_name, message) =
+                    if operation.recovery_payload.as_deref() == Some(after.as_slice()) {
+                        ("failed", format!("atomic Daily write failed: {error}"))
+                    } else {
+                        (
+                            "reconciliation_required",
+                            format!("Daily target changed during a failed write: {error}"),
+                        )
+                    };
+                transition_apply(state, &operation, state_name, Some(&message))?;
+                return Err(ApiError::internal(message));
+            }
+        } else {
+            let written = std::fs::read(&material.target).map_err(|error| {
+                ApiError::internal(format!("verifying Daily target failed: {error}"))
+            })?;
+            let written_hash = daily_writer::managed_block_hash(&written, &material.day.block_id)
+                .map_err(ApiError::conflict)?;
+            if written_hash.as_deref() != Some(operation.intended_new_block_hash.as_str()) {
+                transition_apply(
+                    state,
+                    &operation,
+                    "reconciliation_required",
+                    Some("the written Daily block did not match the approved block"),
+                )?;
+                return Err(ApiError::conflict(
+                    "the written Daily block needs reconciliation",
+                ));
+            }
+            operation = transition_apply(state, &operation, "written", None)?;
+        }
+    } else if operation.state == "written" {
+        transition_apply(
+            state,
+            &operation,
+            "reconciliation_required",
+            Some("the Daily target changed after it was written"),
+        )?;
+        return Err(ApiError::conflict(
+            "the Daily target changed before database finalization",
+        ));
+    }
+
+    state
+        .store
+        .finalize_apply_operation(
+            &operation.id,
+            &operation.revision_id,
+            &operation.revision_content_hash,
+        )
+        .map_err(|error| ApiError::conflict(error.to_string()))
+}
+
+fn transition_apply(
+    state: &AppState,
+    operation: &ApplyOperation,
+    next_state: &str,
+    reason: Option<&str>,
+) -> Result<ApplyOperation, ApiError> {
+    state
+        .store
+        .transition_apply_operation(&operation.id, &operation.state, next_state, reason)
+        .map_err(|error| ApiError::conflict(error.to_string()))
+}
+
+fn recover_daily_applies(state: &AppState) {
+    let Some(workspace) = state.workspace.as_ref() else {
+        return;
+    };
+    let profile = match active_refocus_workspace(state) {
+        Ok(profile) => profile,
+        Err(_) => return,
+    };
+    let operations = match state.store.list_unfinished_apply_operations(100) {
+        Ok(operations) => operations,
+        Err(error) => {
+            tracing::error!(%error, "listing unfinished Daily Apply operations failed");
+            return;
+        }
+    };
+    for mut operation in operations {
+        if operation.workspace_id != profile.id
+            || matches!(
+                operation.state.as_str(),
+                "failed" | "reconciliation_required"
+            )
+        {
+            continue;
+        }
+        let result = (|| -> anyhow::Result<()> {
+            let day = state
+                .store
+                .daily_day(&operation.workspace_id, operation.local_date)?
+                .ok_or_else(|| anyhow::anyhow!("Daily day is missing"))?;
+            let target = workspace.resolve_markdown_path(
+                std::path::Path::new(&operation.destination_path),
+                MarkdownPathMode::MayCreate,
+            )?;
+            let current = if target.exists() {
+                std::fs::read(&target)?
+            } else {
+                Vec::new()
+            };
+            let block_hash = if target.exists() {
+                daily_writer::managed_block_hash(&current, &day.block_id)
+                    .map_err(anyhow::Error::msg)?
+            } else {
+                None
+            };
+            if block_hash.as_deref() == Some(operation.intended_new_block_hash.as_str()) {
+                if operation.state == "prepared" {
+                    operation = state.store.transition_apply_operation(
+                        &operation.id,
+                        "prepared",
+                        "writing",
+                        None,
+                    )?;
+                }
+                if operation.state == "writing" {
+                    operation = state.store.transition_apply_operation(
+                        &operation.id,
+                        "writing",
+                        "written",
+                        None,
+                    )?;
+                }
+                state.store.finalize_apply_operation(
+                    &operation.id,
+                    &operation.revision_id,
+                    &operation.revision_content_hash,
+                )?;
+            } else if matches!(operation.state.as_str(), "writing" | "written") {
+                state.store.transition_apply_operation(
+                    &operation.id,
+                    &operation.state,
+                    "reconciliation_required",
+                    Some("startup recovery could not verify the approved Daily block"),
+                )?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            tracing::error!(operation_id = %operation.id, %error, "recovering Daily Apply operation failed");
+        }
+    }
+}
+
+fn daily_apply_material(
+    state: &AppState,
+    local_date: NaiveDate,
+) -> Result<DailyApplyMaterial, ApiError> {
+    let profile = active_refocus_workspace(state)?;
     let workspace = state
         .workspace
         .as_ref()
@@ -1012,7 +1416,6 @@ async fn refocus_daily_apply_preview(
             "review every automated evidence item before previewing Apply",
         ));
     }
-
     let live = state
         .store
         .get_events_between(day.start_utc, day.end_utc, 500)
@@ -1052,7 +1455,6 @@ async fn refocus_daily_apply_preview(
             "new Daily evidence or manual notes are available; regenerate before Apply",
         ));
     }
-
     let target = workspace
         .resolve_markdown_path(
             std::path::Path::new(&day.destination_path),
@@ -1060,54 +1462,63 @@ async fn refocus_daily_apply_preview(
         )
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let target_exists = target.exists();
+    let original_content = if target_exists {
+        std::fs::read(&target)
+            .map_err(|error| ApiError::internal(format!("reading Daily target failed: {error}")))?
+    } else {
+        Vec::new()
+    };
     let (initial_content, template_used) = if target_exists {
-        (
-            Some(std::fs::read(&target).map_err(|error| {
-                ApiError::internal(format!("reading Daily target failed: {error}"))
-            })?),
-            None,
-        )
-    } else if let Some(template_path) = profile.template_path.as_deref() {
+        (original_content.as_slice(), None)
+    } else if let Some(template_path) = profile.template_path.clone() {
         let template = workspace
             .resolve_markdown_path(
-                std::path::Path::new(template_path),
+                std::path::Path::new(&template_path),
                 MarkdownPathMode::ExistingFile,
             )
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
-        (
-            Some(std::fs::read(&template).map_err(|error| {
-                ApiError::internal(format!("reading Daily template failed: {error}"))
-            })?),
-            Some(template_path.to_owned()),
+        let template_content = std::fs::read(&template).map_err(|error| {
+            ApiError::internal(format!("reading Daily template failed: {error}"))
+        })?;
+        let plan = daily_writer::plan_managed_block(
+            Some(&template_content),
+            &day.block_id,
+            &llm::render_daily_revision_preview(&content, &manual_entries, &snapshot_evidence),
+            &format!("Daily log {local_date}"),
         )
+        .map_err(ApiError::conflict)?;
+        return Ok(DailyApplyMaterial {
+            profile,
+            day,
+            revision,
+            target,
+            target_exists,
+            template_used: Some(template_path),
+            original_content,
+            plan,
+        });
     } else {
-        (None, None)
+        (&[][..], None)
     };
     let markdown =
         llm::render_daily_revision_preview(&content, &manual_entries, &snapshot_evidence);
     let plan = daily_writer::plan_managed_block(
-        initial_content.as_deref(),
+        Some(initial_content),
         &day.block_id,
         &markdown,
         &format!("Daily log {local_date}"),
     )
     .map_err(ApiError::conflict)?;
-    let updated_content_hash = daily_writer::digest(&plan.updated_content);
-    Ok(Json(json!({
-        "workspace_id": profile.id,
-        "local_date": local_date,
-        "destination_path": day.destination_path,
-        "revision_id": revision.id,
-        "revision_content_hash": revision.content_hash,
-        "block_id": day.block_id,
-        "will_create_note": !target_exists,
-        "template_used": template_used,
-        "previous_block": plan.previous_block,
-        "next_block": plan.next_block,
-        "expected_old_block_hash": plan.expected_old_block_hash,
-        "intended_new_block_hash": plan.intended_new_block_hash,
-        "updated_content_hash": updated_content_hash
-    })))
+    Ok(DailyApplyMaterial {
+        profile,
+        day,
+        revision,
+        target,
+        target_exists,
+        template_used,
+        original_content,
+        plan,
+    })
 }
 
 async fn refocus_create_manual_entry(
@@ -3719,6 +4130,43 @@ mod knowledge_destination_tests {
         );
         assert!(!workspace_root.join("Work Log").exists());
 
+        let approval = json!({
+            "expected_revision_id": apply_preview["revision_id"],
+            "expected_revision_content_hash": apply_preview["revision_content_hash"],
+            "destination_path": apply_preview["destination_path"],
+            "expected_old_block_hash": apply_preview["expected_old_block_hash"],
+            "intended_new_block_hash": apply_preview["intended_new_block_hash"],
+            "expected_updated_content_hash": apply_preview["updated_content_hash"]
+        });
+        let applied = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/daily/2026-09-09/apply",
+            approval.clone(),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(applied.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(applied).await["operation"]["state"],
+            "finalized"
+        );
+        let destination = apply_preview["destination_path"].as_str().unwrap();
+        let written = std::fs::read_to_string(workspace_root.join(destination)).unwrap();
+        assert!(written.contains("Reviewed the safe Apply boundary."));
+        let reapplied = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/daily/2026-09-09/apply",
+            approval,
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(reapplied.status(), StatusCode::OK);
+        assert_eq!(response_json(reapplied).await["idempotent"], true);
+
         let newer_manual = json_response(
             app.clone(),
             "POST",
@@ -3730,7 +4178,7 @@ mod knowledge_destination_tests {
         .await;
         assert_eq!(newer_manual.status(), StatusCode::CREATED);
         let stale = json_response(
-            app,
+            app.clone(),
             "GET",
             "/api/v2/daily/2026-09-09/apply-preview",
             json!({}),
@@ -3739,6 +4187,132 @@ mod knowledge_destination_tests {
         )
         .await;
         assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+        let regenerated = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/daily/2026-09-09/generate",
+            json!({}),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(regenerated.status(), StatusCode::OK);
+        let newer_preview = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/daily/2026-09-09/apply-preview",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(newer_preview.status(), StatusCode::OK);
+        let newer_preview = response_json(newer_preview).await;
+        let target = workspace_root.join(destination);
+        let mut externally_edited = std::fs::read(&target).unwrap();
+        externally_edited.extend_from_slice(b"\nUser edit after preview.\n");
+        std::fs::write(&target, &externally_edited).unwrap();
+        let rejected_apply = json_response(
+            app,
+            "POST",
+            "/api/v2/daily/2026-09-09/apply",
+            json!({
+                "expected_revision_id": newer_preview["revision_id"],
+                "expected_revision_content_hash": newer_preview["revision_content_hash"],
+                "destination_path": newer_preview["destination_path"],
+                "expected_old_block_hash": newer_preview["expected_old_block_hash"],
+                "intended_new_block_hash": newer_preview["intended_new_block_hash"],
+                "expected_updated_content_hash": newer_preview["updated_content_hash"]
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(rejected_apply.status(), StatusCode::CONFLICT);
+        assert_eq!(std::fs::read(&target).unwrap(), externally_edited);
+    }
+
+    #[test]
+    fn startup_recovery_finalizes_a_verified_written_block() {
+        let state = test_state(true);
+        let workspace = state.workspace.as_ref().unwrap();
+        let profile = state
+            .store
+            .save_active_workspace_profile(
+                workspace.root_binding(),
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+                None,
+            )
+            .unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+        let day = state
+            .store
+            .ensure_daily_day(date, "Work Log/2026-09-09.md", None)
+            .unwrap();
+        let revision = state
+            .store
+            .create_proposal_revision(
+                &profile.id,
+                date,
+                None,
+                "advanced_markdown",
+                &json!("Reviewed Daily"),
+            )
+            .unwrap();
+        let plan = daily_writer::plan_managed_block(None, &day.block_id, "Reviewed Daily", "Daily")
+            .unwrap();
+        let operation = state
+            .store
+            .prepare_apply_operation(&PrepareApplyOperation {
+                id: "apply_recovery_test".to_owned(),
+                workspace_id: profile.id.clone(),
+                local_date: date,
+                revision_id: revision.id.clone(),
+                revision_content_hash: revision.content_hash.clone(),
+                destination_path: day.destination_path.clone(),
+                expected_old_block_hash: None,
+                intended_new_block_hash: plan.intended_new_block_hash.clone(),
+                recovery_payload: Some(Vec::new()),
+                recovery_path: None,
+            })
+            .unwrap();
+        state
+            .store
+            .transition_apply_operation(&operation.id, "prepared", "writing", None)
+            .unwrap();
+        let target = workspace
+            .resolve_markdown_path(
+                std::path::Path::new(&day.destination_path),
+                MarkdownPathMode::MayCreate,
+            )
+            .unwrap();
+        daily_writer::write_atomically(&target, &plan.updated_content, &operation.id).unwrap();
+
+        recover_daily_applies(&state);
+
+        assert_eq!(
+            state
+                .store
+                .apply_operation(&operation.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            "finalized"
+        );
+        assert_eq!(
+            state
+                .store
+                .daily_day(&profile.id, date)
+                .unwrap()
+                .unwrap()
+                .review_status,
+            "applied"
+        );
     }
 
     #[test]

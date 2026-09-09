@@ -1,5 +1,10 @@
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::{
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    path::Path,
+};
 
 const MAX_MARKDOWN_FILE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -141,6 +146,87 @@ pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+pub fn managed_block_hash(current: &[u8], block_id: &str) -> Result<Option<String>, String> {
+    let text =
+        std::str::from_utf8(current).map_err(|_| "Markdown note must be valid UTF-8".to_owned())?;
+    let begin = format!("<!-- log-inbox:daily:{block_id}:begin -->");
+    let end = format!("<!-- log-inbox:daily:{block_id}:end -->");
+    marker_ranges(text, &begin, &end).map(|range| {
+        range.map(|(start, finish)| {
+            digest(
+                text[start..finish]
+                    .trim_end_matches(['\r', '\n'])
+                    .as_bytes(),
+            )
+        })
+    })
+}
+
+pub fn write_atomically(target: &Path, contents: &[u8], operation_id: &str) -> io::Result<()> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "target has no parent"))?;
+    create_missing_directories(parent)?;
+    let file_name = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid target filename"))?;
+    let temporary = parent.join(format!(".{file_name}.log-inbox-{operation_id}.tmp"));
+    let permissions = fs::metadata(target)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let result = (|| {
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, target)?;
+        OpenOptions::new().read(true).open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn create_missing_directories(directory: &Path) -> io::Result<()> {
+    let mut missing = Vec::new();
+    let mut cursor = directory;
+    while !cursor.exists() {
+        missing.push(cursor.to_owned());
+        cursor = cursor.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "directory has no existing parent",
+            )
+        })?;
+    }
+    let metadata = fs::symlink_metadata(cursor)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(io::Error::other("target parent is not a real directory"));
+    }
+    for path in missing.iter().rev() {
+        match fs::create_dir(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::other(
+                "target path changed while creating directories",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +299,28 @@ mod tests {
         assert!(plan_managed_block(None, "bad:id", "new", "title").is_err());
         let oversized = vec![b'x'; MAX_MARKDOWN_FILE_BYTES + 1];
         assert!(plan_managed_block(Some(&oversized), "day", "new", "title").is_err());
+    }
+
+    #[test]
+    fn reports_the_exact_owned_block_hash() {
+        let plan = plan_managed_block(None, "day_test", "Done.", "Daily").unwrap();
+        assert_eq!(
+            managed_block_hash(&plan.updated_content, "day_test").unwrap(),
+            Some(plan.intended_new_block_hash)
+        );
+    }
+
+    #[test]
+    fn writes_via_same_directory_replacement_and_preserves_permissions() {
+        let root =
+            std::env::temp_dir().join(format!("log-inbox-daily-writer-{}", uuid::Uuid::new_v4()));
+        let target = root.join("nested/Daily.md");
+        write_atomically(&target, b"first", "apply_test").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"first");
+        let permissions = fs::metadata(&target).unwrap().permissions();
+        write_atomically(&target, b"second", "apply_test_2").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"second");
+        assert_eq!(fs::metadata(&target).unwrap().permissions(), permissions);
+        fs::remove_dir_all(root).unwrap();
     }
 }
