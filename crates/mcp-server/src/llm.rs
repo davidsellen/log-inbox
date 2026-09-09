@@ -570,52 +570,75 @@ pub(crate) fn event_group_key(event: &StoredLogEvent) -> String {
         .metadata
         .get("repo")
         .and_then(Value::as_str)
-        .map(normalized_group_value)
-        .unwrap_or_default();
+        .filter(|value| !value.trim().is_empty())
+        .map(stable_identity);
+    let namespace = repo.as_ref().map_or_else(
+        || format!("source:{}", stable_identity(&event.source)),
+        |repo| format!("repo:{repo}"),
+    );
     if let Some(work_item) = event.metadata.get("work_item").and_then(Value::as_str) {
         return format!(
-            "repo:{repo}|work-item:{}",
-            normalized_reference_value(work_item)
+            "{namespace}|work-item:{}",
+            normalized_reference_value(work_item, "ado")
         );
     }
     if let Some(pull_request) = event.metadata.get("pull_request").and_then(Value::as_str) {
         return format!(
-            "repo:{repo}|pull-request:{}",
-            normalized_reference_value(pull_request)
+            "{namespace}|pull-request:{}",
+            normalized_reference_value(pull_request, "pr")
         );
     }
-    if let Some(project) = event.metadata.get("project").and_then(Value::as_str) {
-        return format!("project:{}", normalized_group_value(project));
-    }
-    if !repo.is_empty() {
-        return format!("repo:{repo}");
-    }
-    technical_event_group_key(event)
+    technical_event_group_key(event, &namespace)
 }
 
-fn technical_event_group_key(event: &StoredLogEvent) -> String {
-    ["task_id", "session_id"]
-        .into_iter()
-        .find_map(|name| event.metadata.get(name).and_then(Value::as_str))
-        .unwrap_or(&event.id)
-        .to_owned()
+fn technical_event_group_key(event: &StoredLogEvent, namespace: &str) -> String {
+    for (field, label) in [("task_id", "task"), ("session_id", "session")] {
+        if let Some(value) = event.metadata.get(field).and_then(Value::as_str)
+            && !value.trim().is_empty()
+        {
+            return format!("{namespace}|{label}:{}", stable_identity(value));
+        }
+    }
+    format!("event:{}", stable_identity(&event.id))
 }
 
-fn normalized_group_value(value: &str) -> String {
+fn stable_identity(value: &str) -> String {
     value
         .trim()
-        .chars()
-        .filter(|character| character.is_alphanumeric())
-        .flat_map(char::to_lowercase)
+        .to_lowercase()
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+                (byte as char).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
         .collect()
 }
 
-fn normalized_reference_value(value: &str) -> String {
-    value
-        .split(|character: char| !character.is_ascii_digit())
-        .rfind(|part| !part.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| normalized_group_value(value))
+fn normalized_reference_value(value: &str, label: &str) -> String {
+    let value = value.trim();
+    if value.chars().all(|character| character.is_ascii_digit()) {
+        return value.to_owned();
+    }
+    if let Some((prefix, identifier)) = value.split_once(char::is_whitespace)
+        && prefix.eq_ignore_ascii_case(label)
+        && identifier
+            .chars()
+            .all(|character| character.is_ascii_digit())
+    {
+        return identifier.to_owned();
+    }
+    if let Ok(url) = reqwest::Url::parse(value)
+        && let Some(identifier) = url
+            .path_segments()
+            .and_then(|mut segments| segments.rfind(|part| !part.is_empty()))
+            .filter(|part| part.chars().all(|character| character.is_ascii_digit()))
+    {
+        return identifier.to_owned();
+    }
+    stable_identity(value)
 }
 
 fn event_groups(events: &[StoredLogEvent]) -> BTreeMap<String, Vec<StoredLogEvent>> {
@@ -1400,7 +1423,7 @@ mod tests {
             vault_context: json!({
                 "daily_note": "Daily log Sep 8",
                 "candidate_notes": ["[[Sweet CRM]]"],
-                "workstream_links": { "repo:|pull-request:9374": ["[[Sweet CRM]]"] },
+                "workstream_links": { "source:manual%2Fdashboard|pull-request:9374": ["[[Sweet CRM]]"] },
             }),
             mode: "daily-consolidation".to_owned(),
             task: None,
@@ -1455,7 +1478,10 @@ mod tests {
             event_ids: vec![manual.id.clone(), automated.id.clone()],
             vault_context: json!({
                 "daily_note": "Daily log Sep 8",
-                "workstream_links": { "manual_1": [], "task_1": [] },
+                "workstream_links": {
+                    "source:manual%2Fdashboard|task:manual_1": [],
+                    "source:codex%2Ffedora|task:task_1": []
+                },
             }),
             mode: "daily-consolidation".to_owned(),
             task: None,
@@ -1524,7 +1550,10 @@ mod tests {
             source: "agent/test".to_owned(),
             level: "info".to_owned(),
             message: "Completed navigation work".to_owned(),
-            metadata: Map::from_iter([("repo".to_owned(), Value::from("portal-api"))]),
+            metadata: Map::from_iter([
+                ("repo".to_owned(), Value::from("portal-api")),
+                ("task_id".to_owned(), Value::from("navigation")),
+            ]),
             fingerprint: None,
             truncated: false,
             reviewed: false,
@@ -1535,7 +1564,7 @@ mod tests {
                 "daily_note": "Work log",
                 "candidate_notes": ["[[Record Navigation]]"],
                 "workstream_links": {
-                    "repo:portalapi": ["[[Record Navigation]]"]
+                    "repo:portal-api|task:navigation": ["[[Record Navigation]]"]
                 }
             }),
             mode: "daily-consolidation".to_owned(),
@@ -1543,7 +1572,7 @@ mod tests {
         };
         let model_output = json!({
             "workstreams": [{
-                "id": "repo:portalapi",
+                "id": "repo:portal-api|task:navigation",
                 "title": "Navigation validation",
                 "evidence_event_ids": ["evt_navigation"],
                 "outcome": [{
@@ -1765,6 +1794,52 @@ mod tests {
         assert_ne!(
             event_group_key(&event_with("SweetOne", "work_item", "ADO 57950")),
             event_group_key(&event_with("SweetNext", "work_item", "ADO 57950"))
+        );
+        assert_ne!(
+            event_group_key(&event_with("portal-api", "work_item", "42")),
+            event_group_key(&event_with("portal_api", "work_item", "42"))
+        );
+        assert_eq!(
+            event_group_key(&event_with(
+                "SweetOne",
+                "pull_request",
+                "https://dev.azure.com/org/project/pullrequest/9374?api-version=7.1"
+            )),
+            "repo:sweetone|pull-request:9374"
+        );
+    }
+
+    #[test]
+    fn daily_fallback_groups_never_merge_unrelated_sources_or_repo_events() {
+        let make_event = |id: &str, source: &str, repo: Option<&str>, task: Option<&str>| {
+            let mut metadata = Map::new();
+            if let Some(repo) = repo {
+                metadata.insert("repo".to_owned(), Value::from(repo));
+            }
+            if let Some(task) = task {
+                metadata.insert("task_id".to_owned(), Value::from(task));
+            }
+            StoredLogEvent {
+                id: id.to_owned(),
+                received_at: Utc::now(),
+                timestamp: Utc::now(),
+                source: source.to_owned(),
+                level: "info".to_owned(),
+                message: "done".to_owned(),
+                metadata,
+                fingerprint: None,
+                truncated: false,
+                reviewed: false,
+            }
+        };
+
+        assert_ne!(
+            event_group_key(&make_event("one", "agent/one", None, Some("shared"))),
+            event_group_key(&make_event("two", "agent/two", None, Some("shared")))
+        );
+        assert_ne!(
+            event_group_key(&make_event("one", "agent/one", Some("repo"), None)),
+            event_group_key(&make_event("two", "agent/one", Some("repo"), None))
         );
     }
 }

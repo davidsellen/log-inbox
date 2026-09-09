@@ -106,7 +106,7 @@
             "task_id": "manual-deployment-note",
             "entry_kind": "manual"
           },
-          "expected_group_key": "manual-deployment-note"
+          "expected_group_key": "source:manual%2Fdashboard|task:manual-deployment-note"
         },
         {
           "id": "evt_session",
@@ -117,7 +117,7 @@
           "metadata": {
             "session_id": "deployment-session"
           },
-          "expected_group_key": "deployment-session"
+          "expected_group_key": "source:agent%2Ffedora|session:deployment-session"
         }
       ],
       "expected_daily_prompt_event_ids": ["evt_task", "evt_session"],
