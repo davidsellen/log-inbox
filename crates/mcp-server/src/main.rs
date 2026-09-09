@@ -708,10 +708,7 @@ async fn refocus_workspace_settings(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     authorize_refocus(&state, &headers, "logs:read", false)?;
-    let workspace = state
-        .workspace
-        .as_ref()
-        .ok_or_else(|| ApiError::internal("workspace root is not configured"))?;
+    let workspace = inspect_refocus_workspace(&state)?;
     let active = state
         .store
         .active_workspace_profile()
@@ -732,7 +729,7 @@ async fn refocus_preview_workspace_settings(
     Json(input): Json<WorkspaceSettingsDraft>,
 ) -> Result<Json<Value>, ApiError> {
     authorize_refocus(&state, &headers, "settings:write", true)?;
-    let (settings, destination_example, preview_digest) =
+    let (settings, destination_example, preview_digest, _) =
         preview_workspace_settings(&state, input)?;
     Ok(Json(json!({
         "settings": settings,
@@ -748,7 +745,7 @@ async fn refocus_save_workspace_settings(
     Json(input): Json<SaveWorkspaceSettingsRequest>,
 ) -> Result<Json<Value>, ApiError> {
     authorize_refocus(&state, &headers, "settings:write", true)?;
-    let (settings, destination_example, preview_digest) =
+    let (settings, destination_example, preview_digest, workspace) =
         preview_workspace_settings(&state, input.settings)?;
     if preview_digest != input.preview_digest {
         return Err(ApiError::conflict(
@@ -767,10 +764,6 @@ async fn refocus_save_workspace_settings(
             ));
         }
     };
-    let workspace = state
-        .workspace
-        .as_ref()
-        .ok_or_else(|| ApiError::internal("workspace root is not configured"))?;
     let profile = state
         .store
         .save_active_workspace_profile(
@@ -794,11 +787,8 @@ async fn refocus_save_workspace_settings(
 fn preview_workspace_settings(
     state: &AppState,
     input: WorkspaceSettingsDraft,
-) -> Result<(WorkspaceSettingsDraft, String, String), ApiError> {
-    let workspace = state
-        .workspace
-        .as_ref()
-        .ok_or_else(|| ApiError::internal("workspace root is not configured"))?;
+) -> Result<(WorkspaceSettingsDraft, String, String, InspectedWorkspace), ApiError> {
+    let workspace = inspect_refocus_workspace(state)?;
     let settings = WorkspaceSettingsDraft {
         timezone: input.timezone.trim().to_owned(),
         daily_root: input.daily_root.trim().trim_matches('/').to_owned(),
@@ -850,14 +840,17 @@ fn preview_workspace_settings(
                 .map_err(|error| ApiError::internal(error.to_string()))?
         )
     );
-    Ok((settings, destination_example, preview_digest))
+    Ok((settings, destination_example, preview_digest, workspace))
 }
 
 fn active_refocus_workspace(state: &AppState) -> Result<WorkspaceProfile, ApiError> {
-    let workspace = state
-        .workspace
-        .as_ref()
-        .ok_or_else(|| ApiError::internal("workspace root is not configured"))?;
+    active_refocus_context(state).map(|(profile, _)| profile)
+}
+
+fn active_refocus_context(
+    state: &AppState,
+) -> Result<(WorkspaceProfile, InspectedWorkspace), ApiError> {
+    let workspace = inspect_refocus_workspace(state)?;
     let profile = state
         .store
         .active_workspace_profile()
@@ -868,7 +861,17 @@ fn active_refocus_workspace(state: &AppState) -> Result<WorkspaceProfile, ApiErr
             "the mounted workspace has changed; review and save workspace settings again",
         ));
     }
-    Ok(profile)
+    Ok((profile, workspace))
+}
+
+fn inspect_refocus_workspace(state: &AppState) -> Result<InspectedWorkspace, ApiError> {
+    let configured = state
+        .workspace
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("workspace root is not configured"))?;
+    InspectedWorkspace::inspect(configured.canonical_root()).map_err(|error| {
+        ApiError::conflict(format!("the mounted workspace is unavailable: {error}"))
+    })
 }
 
 async fn refocus_daily_day(
@@ -1181,10 +1184,7 @@ fn execute_daily_apply(
         if operation.state == "prepared" {
             operation = transition_apply(state, &operation, "writing", None)?;
         }
-        let workspace = state
-            .workspace
-            .as_ref()
-            .ok_or_else(|| ApiError::internal("workspace root is not configured"))?;
+        let (_, workspace) = active_refocus_context(state)?;
         let resolved = workspace
             .resolve_markdown_path(
                 std::path::Path::new(&operation.destination_path),
@@ -1365,11 +1365,7 @@ fn daily_apply_material(
     state: &AppState,
     local_date: NaiveDate,
 ) -> Result<DailyApplyMaterial, ApiError> {
-    let profile = active_refocus_workspace(state)?;
-    let workspace = state
-        .workspace
-        .as_ref()
-        .ok_or_else(|| ApiError::internal("workspace root is not configured"))?;
+    let (profile, workspace) = active_refocus_context(state)?;
     let day = state
         .store
         .daily_day(&profile.id, local_date)
@@ -4313,6 +4309,40 @@ mod knowledge_destination_tests {
                 .review_status,
             "applied"
         );
+    }
+
+    #[test]
+    fn active_workspace_checks_detect_replacement_after_startup() {
+        let state = test_state(true);
+        let root = state
+            .workspace
+            .as_ref()
+            .unwrap()
+            .canonical_root()
+            .to_owned();
+        state
+            .store
+            .save_active_workspace_profile(
+                state.workspace.as_ref().unwrap().root_binding(),
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+                None,
+            )
+            .unwrap();
+        let previous = root.with_extension("replaced");
+        std::fs::rename(&root, &previous).unwrap();
+        std::fs::create_dir(&root).unwrap();
+
+        let error = active_refocus_workspace(&state)
+            .expect_err("a replacement at the same configured path must require review");
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert!(error.message.contains("mounted workspace has changed"));
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(previous).unwrap();
     }
 
     #[test]
