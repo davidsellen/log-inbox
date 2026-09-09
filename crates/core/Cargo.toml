@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 argon2.workspace = true
+cap-std.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 regex.workspace = true

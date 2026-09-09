@@ -15,6 +15,8 @@ rust-version = "1.98"
 anyhow = "1.0.99"
 argon2 = "0.5.3"
 axum = "0.8.4"
+cap-fs-ext = "3.4.4"
+cap-std = "3.4.4"
 chrono = { version = "0.4.41", features = ["serde"] }
 chrono-tz = "0.10.4"
 regex = "1.11.1"

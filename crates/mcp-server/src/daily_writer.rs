@@ -1,9 +1,10 @@
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, OpenOptions};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, OpenOptions},
-    io::{self, Write},
-    path::Path,
+    io::{self, Read, Write},
+    path::{Component, Path},
 };
 
 const MAX_MARKDOWN_FILE_BYTES: usize = 4 * 1024 * 1024;
@@ -162,23 +163,53 @@ pub fn managed_block_hash(current: &[u8], block_id: &str) -> Result<Option<Strin
     })
 }
 
-pub fn write_atomically(target: &Path, contents: &[u8], operation_id: &str) -> io::Result<()> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "target has no parent"))?;
-    create_missing_directories(parent)?;
-    let file_name = target
-        .file_name()
-        .and_then(|value| value.to_str())
+pub fn read_file(workspace: &Dir, target: &Path) -> io::Result<Option<Vec<u8>>> {
+    let (parent, file_name) = match open_parent(workspace, target, false) {
+        Ok(value) => value,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let mut file = match parent.open_with(file_name, &options) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut content = Vec::new();
+    Read::by_ref(&mut file)
+        .take((MAX_MARKDOWN_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut content)?;
+    if content.len() > MAX_MARKDOWN_FILE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Markdown note exceeds the {MAX_MARKDOWN_FILE_BYTES}-byte Apply limit"),
+        ));
+    }
+    Ok(Some(content))
+}
+
+pub fn write_atomically(
+    workspace: &Dir,
+    target: &Path,
+    contents: &[u8],
+    operation_id: &str,
+) -> io::Result<()> {
+    let (parent, file_name) = open_parent(workspace, target, true)?;
+    let file_name = file_name
+        .to_str()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid target filename"))?;
-    let temporary = parent.join(format!(".{file_name}.log-inbox-{operation_id}.tmp"));
-    let permissions = fs::metadata(target)
+    let temporary = format!(".{file_name}.log-inbox-{operation_id}.tmp");
+    let permissions = parent
+        .symlink_metadata(file_name)
         .ok()
         .map(|metadata| metadata.permissions());
-    let mut file = OpenOptions::new()
+    let mut options = OpenOptions::new();
+    options
         .write(true)
         .create_new(true)
-        .open(&temporary)?;
+        .follow(FollowSymlinks::No);
+    let mut file = parent.open_with(&temporary, &options)?;
     let result = (|| {
         if let Some(permissions) = permissions {
             file.set_permissions(permissions)?;
@@ -186,50 +217,51 @@ pub fn write_atomically(target: &Path, contents: &[u8], operation_id: &str) -> i
         file.write_all(contents)?;
         file.sync_all()?;
         drop(file);
-        fs::rename(&temporary, target)?;
-        OpenOptions::new().read(true).open(parent)?.sync_all()
+        parent.rename(&temporary, &parent, file_name)?;
+        parent.open(".")?.sync_all()
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+        let _ = parent.remove_file(&temporary);
     }
     result
 }
 
-fn create_missing_directories(directory: &Path) -> io::Result<()> {
-    let mut missing = Vec::new();
-    let mut cursor = directory;
-    while !cursor.exists() {
-        missing.push(cursor.to_owned());
-        cursor = cursor.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "directory has no existing parent",
-            )
-        })?;
-    }
-    let metadata = fs::symlink_metadata(cursor)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(io::Error::other("target parent is not a real directory"));
-    }
-    for path in missing.iter().rev() {
-        match fs::create_dir(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
+fn open_parent<'a>(workspace: &Dir, target: &'a Path, create: bool) -> io::Result<(Dir, &'a Path)> {
+    let file_name = target
+        .file_name()
+        .map(Path::new)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "target has no filename"))?;
+    let mut directory = workspace.try_clone()?;
+    if let Some(parent) = target.parent() {
+        for component in parent.components() {
+            let Component::Normal(name) = component else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "target must be a relative normalized path",
+                ));
+            };
+            match directory.open_dir_nofollow(name) {
+                Ok(next) => directory = next,
+                Err(error) if create && error.kind() == io::ErrorKind::NotFound => {
+                    match directory.create_dir(name) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                        Err(error) => return Err(error),
+                    }
+                    directory = directory.open_dir_nofollow(name)?;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        let metadata = fs::symlink_metadata(path)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(io::Error::other(
-                "target path changed while creating directories",
-            ));
-        }
     }
-    Ok(())
+    Ok((directory, file_name))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cap_std::ambient_authority;
+    use std::fs;
 
     #[test]
     fn creates_a_minimal_note_without_touching_the_reviewed_markdown() {
@@ -314,13 +346,70 @@ mod tests {
     fn writes_via_same_directory_replacement_and_preserves_permissions() {
         let root =
             std::env::temp_dir().join(format!("log-inbox-daily-writer-{}", uuid::Uuid::new_v4()));
-        let target = root.join("nested/Daily.md");
-        write_atomically(&target, b"first", "apply_test").unwrap();
-        assert_eq!(fs::read(&target).unwrap(), b"first");
-        let permissions = fs::metadata(&target).unwrap().permissions();
-        write_atomically(&target, b"second", "apply_test_2").unwrap();
-        assert_eq!(fs::read(&target).unwrap(), b"second");
-        assert_eq!(fs::metadata(&target).unwrap().permissions(), permissions);
+        fs::create_dir(&root).unwrap();
+        let workspace = Dir::open_ambient_dir(&root, ambient_authority()).unwrap();
+        let target = Path::new("nested/Daily.md");
+        write_atomically(&workspace, target, b"first", "apply_test").unwrap();
+        assert_eq!(read_file(&workspace, target).unwrap().unwrap(), b"first");
+        let permissions = fs::metadata(root.join(target)).unwrap().permissions();
+        write_atomically(&workspace, target, b"second", "apply_test_2").unwrap();
+        assert_eq!(read_file(&workspace, target).unwrap().unwrap(), b"second");
+        assert_eq!(
+            fs::metadata(root.join(target)).unwrap().permissions(),
+            permissions
+        );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_parents_and_targets_at_the_capability_boundary() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "log-inbox-daily-capability-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let outside = root.with_extension("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+        symlink(outside.join("note.md"), root.join("target.md")).unwrap();
+        let workspace = Dir::open_ambient_dir(&root, ambient_authority()).unwrap();
+
+        assert!(
+            write_atomically(
+                &workspace,
+                Path::new("linked/Daily.md"),
+                b"no",
+                "apply_test"
+            )
+            .is_err()
+        );
+        assert!(read_file(&workspace, Path::new("target.md")).is_err());
+        write_atomically(
+            &workspace,
+            Path::new("target.md"),
+            b"safe replacement",
+            "apply_replace_symlink",
+        )
+        .unwrap();
+        assert_eq!(
+            read_file(&workspace, Path::new("target.md"))
+                .unwrap()
+                .unwrap(),
+            b"safe replacement"
+        );
+        assert!(
+            !fs::symlink_metadata(root.join("target.md"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!outside.join("Daily.md").exists());
+        assert!(!outside.join("note.md").exists());
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 }

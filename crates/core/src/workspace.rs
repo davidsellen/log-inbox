@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
+use cap_std::fs::Dir;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::ErrorKind,
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 const PROTECTED_COMPONENTS: &[&str] = &[".git", ".obsidian", ".trash", ".log-inbox"];
@@ -14,10 +16,11 @@ pub enum MarkdownPathMode {
     MayCreate,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct InspectedWorkspace {
     canonical_root: PathBuf,
     root_binding: String,
+    directory: Arc<Dir>,
 }
 
 impl InspectedWorkspace {
@@ -28,13 +31,17 @@ impl InspectedWorkspace {
                 configured_root.display()
             )
         })?;
-        let metadata = fs::metadata(&canonical_root)
+        let directory_file = fs::File::open(&canonical_root)
+            .with_context(|| format!("opening workspace root: {}", canonical_root.display()))?;
+        let metadata = directory_file
+            .metadata()
             .with_context(|| format!("reading workspace root: {}", canonical_root.display()))?;
         anyhow::ensure!(metadata.is_dir(), "workspace root is not a directory");
         let root_binding = root_binding(&canonical_root, &metadata);
         Ok(Self {
             canonical_root,
             root_binding,
+            directory: Arc::new(Dir::from_std_file(directory_file)),
         })
     }
 
@@ -44,6 +51,10 @@ impl InspectedWorkspace {
 
     pub fn root_binding(&self) -> &str {
         &self.root_binding
+    }
+
+    pub fn directory(&self) -> &Dir {
+        &self.directory
     }
 
     pub fn resolve_markdown_path(
@@ -133,6 +144,14 @@ impl InspectedWorkspace {
         }
     }
 }
+
+impl PartialEq for InspectedWorkspace {
+    fn eq(&self, other: &Self) -> bool {
+        self.canonical_root == other.canonical_root && self.root_binding == other.root_binding
+    }
+}
+
+impl Eq for InspectedWorkspace {}
 
 fn root_binding(canonical_root: &Path, metadata: &fs::Metadata) -> String {
     let mut hasher = Sha256::new();

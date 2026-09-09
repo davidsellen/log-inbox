@@ -1149,16 +1149,14 @@ fn execute_daily_apply(
                 .unwrap_or(operation.state.as_str())
         )));
     }
-    let current = if material.target.exists() {
-        std::fs::read(&material.target)
-            .map_err(|error| ApiError::internal(format!("reading Daily target failed: {error}")))?
-    } else {
-        Vec::new()
-    };
-    let current_block_hash = if current.is_empty() && !material.target.exists() {
+    let (_, workspace) = active_refocus_context(state)?;
+    let current_file = daily_writer::read_file(workspace.directory(), &material.target)
+        .map_err(|error| ApiError::internal(format!("reading Daily target failed: {error}")))?;
+    let current = current_file.as_deref().unwrap_or_default();
+    let current_block_hash = if current_file.is_none() {
         None
     } else {
-        daily_writer::managed_block_hash(&current, &material.day.block_id)
+        daily_writer::managed_block_hash(current, &material.day.block_id)
             .map_err(ApiError::conflict)?
     };
 
@@ -1170,7 +1168,7 @@ fn execute_daily_apply(
             operation = transition_apply(state, &operation, "written", None)?;
         }
     } else if matches!(operation.state.as_str(), "prepared" | "writing") {
-        if operation.recovery_payload.as_deref() != Some(current.as_slice()) {
+        if operation.recovery_payload.as_deref() != Some(current) {
             transition_apply(
                 state,
                 &operation,
@@ -1184,14 +1182,13 @@ fn execute_daily_apply(
         if operation.state == "prepared" {
             operation = transition_apply(state, &operation, "writing", None)?;
         }
-        let (_, workspace) = active_refocus_context(state)?;
         let resolved = workspace
             .resolve_markdown_path(
                 std::path::Path::new(&operation.destination_path),
                 MarkdownPathMode::MayCreate,
             )
             .map_err(|error| ApiError::conflict(error.to_string()))?;
-        if resolved != material.target {
+        if resolved != workspace.canonical_root().join(&material.target) {
             transition_apply(
                 state,
                 &operation,
@@ -1203,11 +1200,15 @@ fn execute_daily_apply(
             ));
         }
         if let Err(error) = daily_writer::write_atomically(
+            workspace.directory(),
             &material.target,
             &material.plan.updated_content,
             &operation.id,
         ) {
-            let after = std::fs::read(&material.target).unwrap_or_default();
+            let after = daily_writer::read_file(workspace.directory(), &material.target)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
             let after_hash = daily_writer::managed_block_hash(&after, &material.day.block_id)
                 .ok()
                 .flatten();
@@ -1227,9 +1228,11 @@ fn execute_daily_apply(
                 return Err(ApiError::internal(message));
             }
         } else {
-            let written = std::fs::read(&material.target).map_err(|error| {
-                ApiError::internal(format!("verifying Daily target failed: {error}"))
-            })?;
+            let written = daily_writer::read_file(workspace.directory(), &material.target)
+                .map_err(|error| {
+                    ApiError::internal(format!("verifying Daily target failed: {error}"))
+                })?
+                .ok_or_else(|| ApiError::conflict("the Daily target disappeared after writing"))?;
             let written_hash = daily_writer::managed_block_hash(&written, &material.day.block_id)
                 .map_err(ApiError::conflict)?;
             if written_hash.as_deref() != Some(operation.intended_new_block_hash.as_str()) {
@@ -1280,11 +1283,8 @@ fn transition_apply(
 }
 
 fn recover_daily_applies(state: &AppState) {
-    let Some(workspace) = state.workspace.as_ref() else {
-        return;
-    };
-    let profile = match active_refocus_workspace(state) {
-        Ok(profile) => profile,
+    let (profile, workspace) = match active_refocus_context(state) {
+        Ok(context) => context,
         Err(_) => return,
     };
     let operations = match state.store.list_unfinished_apply_operations(100) {
@@ -1308,16 +1308,13 @@ fn recover_daily_applies(state: &AppState) {
                 .store
                 .daily_day(&operation.workspace_id, operation.local_date)?
                 .ok_or_else(|| anyhow::anyhow!("Daily day is missing"))?;
-            let target = workspace.resolve_markdown_path(
+            workspace.resolve_markdown_path(
                 std::path::Path::new(&operation.destination_path),
                 MarkdownPathMode::MayCreate,
             )?;
-            let current = if target.exists() {
-                std::fs::read(&target)?
-            } else {
-                Vec::new()
-            };
-            let block_hash = if target.exists() {
+            let target = std::path::Path::new(&operation.destination_path);
+            let current = daily_writer::read_file(workspace.directory(), target)?;
+            let block_hash = if let Some(current) = current {
                 daily_writer::managed_block_hash(&current, &day.block_id)
                     .map_err(anyhow::Error::msg)?
             } else {
@@ -1451,31 +1448,32 @@ fn daily_apply_material(
             "new Daily evidence or manual notes are available; regenerate before Apply",
         ));
     }
-    let target = workspace
+    workspace
         .resolve_markdown_path(
             std::path::Path::new(&day.destination_path),
             MarkdownPathMode::MayCreate,
         )
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let target_exists = target.exists();
-    let original_content = if target_exists {
-        std::fs::read(&target)
-            .map_err(|error| ApiError::internal(format!("reading Daily target failed: {error}")))?
-    } else {
-        Vec::new()
-    };
+    let target = PathBuf::from(&day.destination_path);
+    let original = daily_writer::read_file(workspace.directory(), &target)
+        .map_err(|error| ApiError::internal(format!("reading Daily target failed: {error}")))?;
+    let target_exists = original.is_some();
+    let original_content = original.unwrap_or_default();
     let (initial_content, template_used) = if target_exists {
         (original_content.as_slice(), None)
     } else if let Some(template_path) = profile.template_path.clone() {
-        let template = workspace
+        workspace
             .resolve_markdown_path(
                 std::path::Path::new(&template_path),
                 MarkdownPathMode::ExistingFile,
             )
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
-        let template_content = std::fs::read(&template).map_err(|error| {
-            ApiError::internal(format!("reading Daily template failed: {error}"))
-        })?;
+        let template_content =
+            daily_writer::read_file(workspace.directory(), std::path::Path::new(&template_path))
+                .map_err(|error| {
+                    ApiError::internal(format!("reading Daily template failed: {error}"))
+                })?
+                .ok_or_else(|| ApiError::conflict("the reviewed Daily template disappeared"))?;
         let plan = daily_writer::plan_managed_block(
             Some(&template_content),
             &day.block_id,
@@ -4115,8 +4113,9 @@ mod knowledge_destination_tests {
             None,
         )
         .await;
-        assert_eq!(apply_preview.status(), StatusCode::OK);
+        let apply_preview_status = apply_preview.status();
         let apply_preview = response_json(apply_preview).await;
+        assert_eq!(apply_preview_status, StatusCode::OK, "{apply_preview}");
         assert_eq!(apply_preview["will_create_note"], true);
         assert!(
             apply_preview["next_block"]
@@ -4281,13 +4280,19 @@ mod knowledge_destination_tests {
             .store
             .transition_apply_operation(&operation.id, "prepared", "writing", None)
             .unwrap();
-        let target = workspace
+        workspace
             .resolve_markdown_path(
                 std::path::Path::new(&day.destination_path),
                 MarkdownPathMode::MayCreate,
             )
             .unwrap();
-        daily_writer::write_atomically(&target, &plan.updated_content, &operation.id).unwrap();
+        daily_writer::write_atomically(
+            workspace.directory(),
+            std::path::Path::new(&day.destination_path),
+            &plan.updated_content,
+            &operation.id,
+        )
+        .unwrap();
 
         recover_daily_applies(&state);
 

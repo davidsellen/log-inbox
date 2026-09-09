@@ -8,6 +8,8 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+cap-fs-ext.workspace = true
+cap-std.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 log_inbox_core = { path = "../core" }
