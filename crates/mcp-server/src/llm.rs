@@ -11,6 +11,8 @@ use tokio::sync::Semaphore;
 
 const MAX_PROMPT_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_PROMPT_METADATA_BYTES: usize = 8 * 1024;
+const MAX_PROMPT_BYTES: usize = 512 * 1024;
+const MAX_LLM_RESPONSE_BYTES: usize = 256 * 1024;
 const DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS: u64 = 300;
 const CONTEXT_METADATA_KEYS: &[&str] = &[
     "task_id",
@@ -119,19 +121,24 @@ pub struct StructuredWorkstream {
     pub title: String,
     pub evidence_event_ids: Vec<String>,
     #[serde(default)]
-    pub outcome: Vec<String>,
+    pub outcome: Vec<StructuredFact>,
     #[serde(default)]
-    pub decision: Vec<String>,
+    pub decision: Vec<StructuredFact>,
     #[serde(default)]
-    pub trade_off: Vec<String>,
+    pub trade_off: Vec<StructuredFact>,
     #[serde(default)]
-    pub validation: Vec<String>,
+    pub validation: Vec<StructuredFact>,
     #[serde(default)]
-    pub blocker: Vec<String>,
+    pub blocker: Vec<StructuredFact>,
     #[serde(default)]
-    pub follow_up: Vec<String>,
-    #[serde(default)]
-    pub references: Vec<String>,
+    pub follow_up: Vec<StructuredFact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StructuredFact {
+    pub text: String,
+    pub evidence_event_ids: Vec<String>,
 }
 
 pub fn parse_strict_daily_draft(
@@ -166,7 +173,7 @@ pub fn parse_strict_daily_draft(
         if workstream.evidence_event_ids.is_empty() {
             return Err(format!("workstream {} has no evidence", workstream.id));
         }
-        let has_factual_field = [
+        let facts = [
             &workstream.outcome,
             &workstream.decision,
             &workstream.trade_off,
@@ -175,10 +182,40 @@ pub fn parse_strict_daily_draft(
             &workstream.follow_up,
         ]
         .into_iter()
-        .any(|items| items.iter().any(|item| !item.trim().is_empty()));
-        if !has_factual_field {
+        .flatten()
+        .collect::<Vec<_>>();
+        if facts.is_empty() {
             return Err(format!(
                 "workstream {} has no factual fields",
+                workstream.id
+            ));
+        }
+        let workstream_evidence = workstream
+            .evidence_event_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let mut fact_evidence = BTreeSet::new();
+        for fact in facts {
+            if fact.text.trim().is_empty() || fact.evidence_event_ids.is_empty() {
+                return Err(format!(
+                    "workstream {} contains a fact without text or evidence",
+                    workstream.id
+                ));
+            }
+            for event_id in &fact.evidence_event_ids {
+                if !workstream_evidence.contains(event_id.as_str()) {
+                    return Err(format!(
+                        "fact in workstream {} cites evidence outside the workstream: {event_id}",
+                        workstream.id
+                    ));
+                }
+                fact_evidence.insert(event_id.as_str());
+            }
+        }
+        if fact_evidence != workstream_evidence {
+            return Err(format!(
+                "workstream {} contains evidence that supports no factual field",
                 workstream.id
             ));
         }
@@ -335,14 +372,26 @@ async fn suggest_automated_summary(
         request = request.bearer_auth(api_key);
     }
 
-    let response = request.send().await.map_err(|error| error.to_string())?;
+    let mut response = request.send().await.map_err(|error| error.to_string())?;
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("LLM request failed with {status}: {body}"));
+        return Err(format!("LLM provider returned HTTP {status}"));
     }
-
-    let chat: ChatResponse = response.json().await.map_err(|error| error.to_string())?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_LLM_RESPONSE_BYTES as u64)
+    {
+        return Err("LLM response exceeded the configured size limit".to_owned());
+    }
+    let mut response_bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        if response_bytes.len() + chunk.len() > MAX_LLM_RESPONSE_BYTES {
+            return Err("LLM response exceeded the configured size limit".to_owned());
+        }
+        response_bytes.extend_from_slice(&chunk);
+    }
+    let chat: ChatResponse = serde_json::from_slice(&response_bytes)
+        .map_err(|error| format!("LLM response envelope was invalid: {error}"))?;
     let content = chat
         .choices
         .first()
@@ -444,17 +493,16 @@ fn build_prompt(
     "id": "copy supplied group_id",
     "title": "Concise human-readable workstream name",
     "evidence_event_ids": ["every supplied event ID exactly once"],
-    "outcome": [],
+    "outcome": [{"text": "Supported fact", "evidence_event_ids": ["evt_..."]}],
     "decision": [],
     "trade_off": [],
     "validation": [],
     "blocker": [],
-    "follow_up": [],
-    "references": []
+    "follow_up": []
   }],
   "open_questions": []
 }"#,
-            "- Include exactly one workstream for every supplied group_id.\n- Copy each group_id into id exactly and assign every supplied event ID to that group.\n- Every event ID must appear exactly once; never invent an ID.\n- Use the adaptive factual fields and omit facts that are not supported. Arrays may be empty, but each workstream needs at least one factual item.\n- Merge repetitive lifecycle transport while retaining distinct outcomes, decisions, trade-offs, validation, blockers, and follow-up.\n- Do not choose links or write Markdown; the server renders reviewed Markdown.",
+            "- Include exactly one workstream for every supplied group_id.\n- Copy each group_id into id exactly and assign every supplied event ID to that group.\n- Every event ID must appear exactly once at workstream level and support at least one factual item; never invent an ID.\n- Every factual item has exactly text and evidence_event_ids. Use the adaptive factual fields and omit unsupported facts. Arrays may be empty, but each workstream needs at least one factual item.\n- Merge repetitive lifecycle transport while retaining distinct outcomes, decisions, trade-offs, validation, blockers, and follow-up.\n- Do not choose links, references, or write Markdown; the server renders reviewed Markdown.",
         )
     } else {
         (
@@ -470,7 +518,7 @@ fn build_prompt(
         )
     };
 
-    Ok(format!(
+    let prompt = format!(
         r#"Task: {task}
 Mode: {mode}
 
@@ -502,7 +550,13 @@ Rules:
         mode = args.mode,
         response_shape = response_shape,
         format_rules = format_rules,
-    ))
+    );
+    if prompt.len() > MAX_PROMPT_BYTES {
+        return Err(format!(
+            "daily evidence exceeds the {MAX_PROMPT_BYTES}-byte model input limit"
+        ));
+    }
+    Ok(prompt)
 }
 
 fn events_for_prompt<'a>(_mode: &str, events: &'a [StoredLogEvent]) -> Vec<&'a StoredLogEvent> {
@@ -760,17 +814,18 @@ fn render_strict_daily_markdown(
             let body = fields
                 .into_iter()
                 .flat_map(|(label, values)| {
-                    values.iter().filter_map(move |value| {
-                        let value = value.trim().trim_start_matches("- ").trim();
+                    values.iter().filter_map(move |fact| {
+                        let value = fact.text.trim().trim_start_matches("- ").trim();
                         (!value.is_empty()).then(|| format!("- **{label}:** {value}"))
                     })
                 })
+                .map(|line| safe_model_markdown_line(&line))
                 .collect::<Vec<_>>()
                 .join("\n");
             format!(
                 "{}\n\n{}",
                 workstream_heading(
-                    workstream.title.trim(),
+                    &safe_model_markdown_text(workstream.title.trim()),
                     &links_for_group(args, &workstream.id)
                 ),
                 with_daily_details(body, evidence)
@@ -778,6 +833,53 @@ fn render_strict_daily_markdown(
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn safe_model_markdown_line(line: &str) -> String {
+    let Some((prefix, value)) = line.split_once(":** ") else {
+        return safe_model_markdown_text(line);
+    };
+    format!("{prefix}:** {}", safe_model_markdown_text(value))
+}
+
+fn safe_model_markdown_text(value: &str) -> String {
+    let single_line = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut escaped = String::with_capacity(single_line.len());
+    for character in single_line.chars() {
+        if matches!(
+            character,
+            '\\' | '`'
+                | '*'
+                | '_'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | '('
+                | ')'
+                | '<'
+                | '>'
+                | '#'
+                | '!'
+                | '|'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped.replace("://", ":\u{200b}//")
 }
 
 fn configured_workstream_links(args: &SuggestMarkdownSummaryArgs) -> Vec<String> {
@@ -1163,8 +1265,14 @@ mod tests {
                 "id": "repo:portal|work-item:42",
                 "title": "Portal authentication",
                 "evidence_event_ids": expected,
-                "decision": ["Kept the callback local to the development profile."],
-                "validation": ["The authentication tests passed."]
+                "decision": [{
+                    "text": "Kept the callback local to the development profile.",
+                    "evidence_event_ids": ["evt_decision"]
+                }],
+                "validation": [{
+                    "text": "The authentication tests passed.",
+                    "evidence_event_ids": ["evt_validation"]
+                }]
             }],
             "open_questions": []
         })
@@ -1176,7 +1284,18 @@ mod tests {
         .expect("strict draft validates");
         assert!(parsed.workstreams[0].outcome.is_empty());
 
-        let missing = valid.replace(",\"evt_validation\"", "");
+        let missing = json!({
+            "workstreams": [{
+                "id": "repo:portal|work-item:42",
+                "title": "Portal authentication",
+                "evidence_event_ids": ["evt_decision"],
+                "decision": [{
+                    "text": "Kept the callback local.",
+                    "evidence_event_ids": ["evt_decision"]
+                }]
+            }]
+        })
+        .to_string();
         assert!(
             parse_strict_daily_draft(
                 &missing,
@@ -1427,8 +1546,14 @@ mod tests {
                 "id": "repo:portalapi",
                 "title": "Navigation validation",
                 "evidence_event_ids": ["evt_navigation"],
-                "outcome": ["Kept the chat open."],
-                "validation": ["Validated the host route."]
+                "outcome": [{
+                    "text": "Kept the chat open.",
+                    "evidence_event_ids": ["evt_navigation"]
+                }],
+                "validation": [{
+                    "text": "Validated the host route.",
+                    "evidence_event_ids": ["evt_navigation"]
+                }]
             }],
             "open_questions": []
         })
@@ -1475,6 +1600,53 @@ mod tests {
         );
         assert!(projected.metadata.contains_key("_prompt_notice"));
         assert_eq!(event.message, full_message);
+    }
+
+    #[test]
+    fn rejects_an_oversized_total_model_prompt() {
+        let now = Utc::now();
+        let events = (0..40)
+            .map(|index| StoredLogEvent {
+                id: format!("evt_{index}"),
+                received_at: now,
+                timestamp: now,
+                source: "codex/test".to_owned(),
+                level: "info".to_owned(),
+                message: "x".repeat(MAX_PROMPT_MESSAGE_BYTES),
+                metadata: Map::from_iter([(
+                    "task_id".to_owned(),
+                    Value::from(format!("task_{index}")),
+                )]),
+                fingerprint: None,
+                truncated: false,
+                reviewed: false,
+            })
+            .collect::<Vec<_>>();
+        let args = SuggestMarkdownSummaryArgs {
+            event_ids: events.iter().map(|event| event.id.clone()).collect(),
+            vault_context: json!({}),
+            mode: "daily-consolidation".to_owned(),
+            task: None,
+        };
+
+        assert!(
+            build_prompt(&args, &events)
+                .unwrap_err()
+                .contains("model input limit")
+        );
+    }
+
+    #[test]
+    fn escapes_model_controlled_markdown_structure_and_links() {
+        let escaped = safe_model_markdown_text(
+            "Injected\n## heading [[Unauthorized]] ![pixel](https://evil.example/pixel)",
+        );
+
+        assert!(!escaped.contains('\n'));
+        assert!(!escaped.contains("[["));
+        assert!(!escaped.contains("]("));
+        assert!(!escaped.contains("://"));
+        assert!(escaped.contains("\\#\\# heading"));
     }
 
     #[test]

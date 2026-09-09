@@ -81,7 +81,7 @@ Required output:
 }
 ```
 
-For whole-day consolidation, Rust assigns server-owned group IDs and resolves canonical links before calling the model. The response contains exactly one structured workstream per supplied group ID, exact evidence IDs, and adaptive Outcome, Decision, Trade-off, Validation, Blocker, Follow-up, and reference arrays. Rust rejects unknown fields, invented or missing evidence, duplicate evidence assignment, cross-group evidence, placeholder titles, and empty factual workstreams. It then renders Markdown with server-owned links and references. Invalid output is a visible generation failure; daily consolidation never falls back to raw log messages or free-form model Markdown.
+For whole-day consolidation, Rust assigns server-owned group IDs and resolves canonical links before calling the model. The response contains exactly one structured workstream per supplied group ID, exact workstream evidence IDs, and adaptive Outcome, Decision, Trade-off, Validation, Blocker, and Follow-up arrays. Every factual item carries its own supporting evidence IDs. Rust rejects unknown fields, invented or missing evidence, duplicate evidence assignment, cross-group evidence, unsupported facts, placeholder titles, and empty factual workstreams. Model-controlled prose is rendered as escaped plain text; links and durable references remain server-owned. Invalid output is a visible generation failure; daily consolidation never falls back to raw log messages or free-form model Markdown.
 
 Automated daily consolidation also fails visibly when no LLM is configured. Manual-only days remain reviewable without an LLM because their user-authored prose is rendered separately and verbatim.
 
