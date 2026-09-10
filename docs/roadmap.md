@@ -173,7 +173,7 @@ Exit gate: the pilot needs no database repair or manual proposal-folder cleanup,
 
 - [x] Add named source collections: label, purpose, selected existing/reviewed-new roots, and exclusions.
 - [x] Keep folder search confined to collection selection and note search to templates/mappings/context; no general vault browser.
-- [ ] Group identifier aliases by canonical note; surface curated unresolved identities and hide transient technical noise in diagnostics.
+- [x] Group identifier aliases by canonical note; surface curated unresolved identities and hide transient technical noise in diagnostics.
 - [x] Resolve saved mappings and unique exact title/alias/reference matches before bounded text retrieval. Text retrieval does not create canonical links.
 - [ ] Add incremental local SQLite FTS only where pilot cases justify it; refresh at startup, periodically, when stale before generation, and via Rescan.
 - [ ] Show Context used with excerpts/revisions and per-workstream adjustment. Invalidate removed/excluded content; exclude generated blocks from self-reinforcing evidence.

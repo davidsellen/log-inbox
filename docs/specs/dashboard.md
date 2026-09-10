@@ -25,15 +25,21 @@ Dismiss removes the exact visible candidate from reminders without writing or de
 
 Settings also exposes a reviewed, idempotent migration when legacy database or proposal-file state is detected. Migration mounts exist only in the Compose override and are never part of the ordinary runtime.
 
-## Knowledge collections
+## Knowledge links
 
-The Knowledge tab defines small, named sets of folders used to resolve exact canonical note links for new Daily candidates. Daily remains useful with no collections. The current stage reads bounded titles, aliases, and typed references but does not send note text to the model. Each card shows only the collection name, purpose, included roots, exclusions, and whether it is used for exact links; it does not expose a file tree or note browser.
+The Knowledge tab is a small review queue for durable names found in recent retained evidence. Product, project, repository, application, service, module, work-item, and pull-request names can be linked to an existing canonical note or ignored. Source names, branches, task/session IDs, messages, and other transient diagnostics are not shown as linking work.
+
+**Names to review** is the primary surface. Choosing Link opens a bounded title/path search within enabled source collections; it never opens a file browser or returns note bodies. Choosing Ignore only removes that identity from the review list, and **Review again** reverses it. **Saved links** are grouped by canonical note and expose explicit change, pause/enable, and remove actions. Imported advanced rules remain visible but cannot be silently simplified by the basic editor.
+
+Changes to links and ignored names are saved immediately in SQLite after the explicit action. They affect only new or regenerated Daily candidates; they never rewrite the current candidate or Markdown. Existing reviewed candidates therefore stay predictable.
+
+## Source collections
+
+Source collections are secondary setup under Knowledge. They define small, named sets of folders used to constrain canonical-note resolution and note search. Daily remains useful with no collections, but names cannot be manually linked until at least one collection provides safe note choices. The current stage reads bounded titles, aliases, and typed references but does not send note text to the model. Each collection shows only its name, purpose, included roots, exclusions, and active state; it does not expose a file tree or note browser.
 
 Creating or editing a collection is review-first. The owner enters one to eight relative roots and optional exclusions, then reviews matched/eligible counts and any missing or oversized sources before Save is enabled. Missing reviewed roots are not created. Saving changes only SQLite configuration and never creates, moves, edits, or deletes Markdown. Pause controls whether future candidates may use the collection; Remove deletes only the definition.
 
 Folder discovery is a bounded typeahead inside collection path fields. It returns safe relative directory paths only—never filenames or Markdown content. Knowledge loads independently from Daily, remains visible but read-only after a reload until changes are unlocked, and has an addressable `?view=knowledge` URL with browser-history navigation.
-
-The next Knowledge surface is review-oriented rather than tree-oriented. Names to review contains only bounded durable product/project/repository/application/service/module/work-item/PR identities from recent retained evidence that are not already resolved or ignored. Source names, branches, task/session IDs, messages, and other transient diagnostics stay hidden. Choosing Link opens a bounded title/path note search within enabled collections; choosing Ignore only removes that name from this list. Saved links are grouped separately by canonical note and expose pause, change, and remove actions. All changes are explicit and affect only new or regenerated Daily candidates.
 
 ## Boundaries
 

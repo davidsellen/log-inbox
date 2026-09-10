@@ -59,7 +59,24 @@ function knowledgeCollection(overrides = {}) {
   return { id: "knowledge_fixture", workspace_id: "workspace_fixture", label: "Product context", purpose: "Product behavior and decisions", roots: ["Products/Alpha"], exclusions: ["Products/Alpha/Archive"], enabled: true, revision_digest: "a".repeat(64), created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-09T12:00:00Z", ...overrides };
 }
 
-async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshness = "current", workspaceProfile = undefined, applyStatus = null, migrationItems = [], lateEvidence = false, knowledgeCollections = [], knowledgeStatus = 200 } = {}) {
+function knowledgeReview(overrides = {}) {
+  return {
+    workspace_id: "workspace_fixture",
+    review_status: "ready",
+    unresolved: {
+      identities: [{ field: "product", value: "Alpha", normalized_value: "alpha", group_count: 2, event_count: 4, latest_at: "2026-09-09T12:00:00Z" }],
+      total_count: 1,
+      truncated: false
+    },
+    mappings: [],
+    ignored: [],
+    diagnostics: { missing_root_count: 0, oversized_note_count: 0, unreadable_note_count: 0, invalid_note_count: 0, invalid_mapping_count: 0, ambiguous_group_count: 0 },
+    evidence: { considered_count: 20, limit: 500, truncated: false },
+    ...overrides
+  };
+}
+
+async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshness = "current", workspaceProfile = undefined, applyStatus = null, migrationItems = [], lateEvidence = false, knowledgeCollections = [], knowledgeStatus = 200, review = knowledgeReview(), noteOptions = [{ path: "Products/Alpha.md", title: "Alpha", collection_ids: ["knowledge_fixture"] }] } = {}) {
   const requests = [];
   let loggedIn = false;
   let currentApplyStatus = applyStatus;
@@ -69,6 +86,7 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
   let automationSettings = { workspace_id: "workspace_fixture", enabled: false, generation_time: "00:15", catch_up_days: 7, raw_retention_days: 30, audit_retention_days: 365, recovery_retention_days: 30, updated_at: "1970-01-01T00:00:00Z" };
   let lateDeferred = false;
   let collections = structuredClone(knowledgeCollections);
+  let knowledgeState = structuredClone(review);
   let activeProfile = workspaceProfile === undefined ? { id: "workspace_fixture", status: "active", root_binding: "binding_fixture", timezone: "Europe/Stockholm", daily_root: "Work Log", daily_pattern: "{year}/{month_name}/Daily log {month_name} {day}.md", template_path: null, link_style: "markdown", created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z" } : workspaceProfile;
   await page.route("http://daily.log-inbox.test/**", async route => {
     const request = route.request();
@@ -97,6 +115,41 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
     if (url.pathname === "/api/v2/knowledge/collections" && request.method() === "GET") {
       if (knowledgeStatus !== 200) return route.fulfill({ status: knowledgeStatus, contentType: "application/json", body: JSON.stringify({ error: "Knowledge fixture unavailable" }) });
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ workspace_id: "workspace_fixture", collections, count: collections.length, limit: 8 }) });
+    }
+    if (url.pathname === "/api/v2/knowledge/review" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(knowledgeState) });
+    if (url.pathname === "/api/v2/knowledge/notes" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ notes: noteOptions, limit: 20 }) });
+    if (url.pathname === "/api/v2/knowledge/mappings" && request.method() === "POST") {
+      const input = request.postDataJSON();
+      const saved = { id: "mapping_created", selectors: [{ field: input.mapping.field, operator: "exact", value: input.mapping.value }], canonical_note_path: input.mapping.canonical_note_path, enabled: input.mapping.enabled, created_at: "2026-09-10T12:00:00Z", updated_at: "2026-09-10T12:00:00Z", imported: false };
+      knowledgeState.unresolved.identities = knowledgeState.unresolved.identities.filter(item => !(item.field === input.mapping.field && item.value === input.mapping.value));
+      knowledgeState.unresolved.total_count = knowledgeState.unresolved.identities.length;
+      knowledgeState.mappings.push({ mapping: saved, target_status: "ready" });
+      return route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ mapping: saved, affects_new_candidates_only: true }) });
+    }
+    const mappingMatch = url.pathname.match(/^\/api\/v2\/knowledge\/mappings\/([^/]+)$/);
+    if (mappingMatch && request.method() === "PUT") {
+      const input = request.postDataJSON();
+      const index = knowledgeState.mappings.findIndex(item => item.mapping.id === mappingMatch[1]);
+      const saved = { ...knowledgeState.mappings[index].mapping, selectors: [{ field: input.mapping.field, operator: "exact", value: input.mapping.value }], canonical_note_path: input.mapping.canonical_note_path, enabled: input.mapping.enabled, updated_at: "2026-09-10T13:00:00Z", imported: false };
+      knowledgeState.mappings[index] = { mapping: saved, target_status: saved.enabled ? "ready" : "paused" };
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ mapping: saved, affects_new_candidates_only: true }) });
+    }
+    if (mappingMatch && request.method() === "DELETE") {
+      knowledgeState.mappings = knowledgeState.mappings.filter(item => item.mapping.id !== mappingMatch[1]);
+      return route.fulfill({ status: 204 });
+    }
+    if (url.pathname === "/api/v2/knowledge/ignored" && request.method() === "POST") {
+      const input = request.postDataJSON();
+      const ignored = { id: "ignored_created", field: input.field, value: input.value, normalized_value: input.value.toLowerCase(), created_at: "2026-09-10T12:00:00Z", imported: false };
+      knowledgeState.unresolved.identities = knowledgeState.unresolved.identities.filter(item => !(item.field === input.field && item.value === input.value));
+      knowledgeState.unresolved.total_count = knowledgeState.unresolved.identities.length;
+      knowledgeState.ignored.push(ignored);
+      return route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ ignored }) });
+    }
+    const ignoredMatch = url.pathname.match(/^\/api\/v2\/knowledge\/ignored\/([^/]+)$/);
+    if (ignoredMatch && request.method() === "DELETE") {
+      knowledgeState.ignored = knowledgeState.ignored.filter(item => item.id !== ignoredMatch[1]);
+      return route.fulfill({ status: 204 });
     }
     if (url.pathname === "/api/v2/knowledge/folders" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ folders: ["Products/Alpha", "Products/Beta"], limit: 20 }) });
     if (url.pathname === "/api/v2/knowledge/collections/preview" && request.method() === "POST") {
@@ -366,11 +419,13 @@ test("Knowledge navigation is lazy, keyboard accessible, and URL-addressable", a
 
   await expect(knowledge).toHaveAttribute("aria-selected", "true");
   await expect(page).toHaveURL(/view=knowledge/);
-  await expect(page.getByRole("heading", { name: "Knowledge collections" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Knowledge links" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Names to review" })).toBeVisible();
+  await page.getByText("Source collections (1)", { exact: true }).click();
   await expect(page.getByRole("heading", { name: "Product context" })).toBeVisible();
   await expect(page.getByText("Products/Alpha", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Structure", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Ignored", exact: true })).toHaveCount(0);
+  await expect(page.getByText("Ignored names (0)", { exact: true })).toBeVisible();
   expect(requests.filter(request => request.path === "/api/v2/knowledge/collections")).toHaveLength(1);
   await page.getByRole("tab", { name: "Daily" }).click();
   await page.goBack();
@@ -383,7 +438,7 @@ test("Knowledge creates a collection only after reviewing the bounded definition
   await openDaily(page);
   await page.getByRole("tab", { name: "Knowledge" }).click();
 
-  await expect(page.getByRole("heading", { name: "No collections yet" })).toBeVisible();
+  await expect(page.getByText("No source collections. Daily still works, but canonical-note search is unavailable.")).toBeVisible();
   await page.getByRole("button", { name: "New collection" }).first().click();
   await page.getByLabel("Collection name").fill(" Product context ");
   await page.getByLabel("What should this context help with?").fill(" Product behavior and decisions ");
@@ -396,6 +451,7 @@ test("Knowledge creates a collection only after reviewing the bounded definition
   await expect(page.locator("#knowledge-preview")).toContainText("3 Markdown notes match; 2 eligible");
   await expect(page.locator("#knowledge-preview")).toContainText("Nothing has been saved");
   await page.getByRole("button", { name: "Create collection" }).click();
+  await page.getByText("Source collections (1)", { exact: true }).click();
   await expect(page.getByRole("heading", { name: "Product context" })).toBeVisible();
 
   const preview = requests.find(request => request.path.endsWith("/collections/preview"));
@@ -409,18 +465,21 @@ test("Knowledge edits, pauses, and removes definitions without implying file cha
   page.on("dialog", dialog => dialog.accept());
   await openDaily(page);
   await page.getByRole("tab", { name: "Knowledge" }).click();
+  await page.getByText("Source collections (1)", { exact: true }).click();
 
   await page.getByRole("button", { name: "Edit" }).click();
   await page.getByLabel("What should this context help with?").fill("Current product decisions");
   await page.getByRole("button", { name: "Review collection" }).click();
   await page.getByRole("button", { name: "Save changes" }).click();
+  await page.getByText("Source collections (1)", { exact: true }).click();
   await expect(page.getByText("Current product decisions", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Pause" }).click();
+  await page.getByText("Source collections (1)", { exact: true }).click();
   await expect(page.getByText("Paused", { exact: true })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("paused and will not be used by Daily");
   await page.getByRole("button", { name: "Remove" }).click();
-  await expect(page.getByRole("heading", { name: "No collections yet" })).toBeVisible();
+  await expect(page.getByText("No source collections. Daily still works, but canonical-note search is unavailable.")).toBeVisible();
   await expect(page.getByRole("status")).toContainText("Markdown files were not changed");
 
   const updates = requests.filter(request => request.path.endsWith("/knowledge_fixture") && request.method === "PUT");
@@ -436,11 +495,47 @@ test("Knowledge stays useful but read-only after a reload loses CSRF authority",
   await page.getByRole("tab", { name: "Knowledge" }).click();
   await page.reload();
 
+  await page.getByText("Source collections (1)", { exact: true }).click();
   await expect(page.getByRole("heading", { name: "Product context" })).toBeVisible();
   await expect(page.getByRole("button", { name: "New collection" }).first()).toBeDisabled();
   await expect(page.getByRole("button", { name: "Edit" })).toBeDisabled();
-  await expect(page.getByRole("status")).toContainText("Reviewing collections read-only");
+  await expect(page.getByRole("status")).toContainText("Reviewing Knowledge read-only");
   await expect(page.getByRole("button", { name: "Unlock changes" })).toBeVisible();
+});
+
+test("Knowledge links a reviewed name through bounded note search and can ignore noise", async ({ page }) => {
+  page.on("dialog", dialog => dialog.accept());
+  const requests = await mockDaily(page, {
+    knowledgeCollections: [knowledgeCollection()],
+    review: knowledgeReview({ unresolved: { identities: [
+      { field: "product", value: "Alpha", normalized_value: "alpha", group_count: 2, event_count: 4, latest_at: "2026-09-09T12:00:00Z" },
+      { field: "project", value: "temp-project", normalized_value: "temp-project", group_count: 1, event_count: 1, latest_at: "2026-09-09T11:00:00Z" }
+    ], total_count: 2, truncated: false } })
+  });
+  await openDaily(page);
+  await page.getByRole("tab", { name: "Knowledge" }).click();
+
+  await expect(page.getByText("Alpha", { exact: true })).toBeVisible();
+  await page.locator(".review-row").filter({ hasText: "Alpha" }).getByRole("button", { name: "Link", exact: true }).click();
+  await page.getByLabel("Find a Markdown note").fill("Alpha");
+  await page.getByRole("button", { name: /Alpha Products\/Alpha\.md/ }).click();
+  await page.getByRole("button", { name: "Save link" }).click();
+
+  await expect(page.getByRole("heading", { name: "Saved links" })).toBeVisible();
+  await expect(page.getByText("Products/Alpha.md", { exact: true })).toBeVisible();
+  await expect(page.getByText("Product: Alpha", { exact: true })).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Regenerate a Daily candidate");
+  const mapping = requests.find(request => request.path === "/api/v2/knowledge/mappings" && request.method === "POST");
+  expect(mapping.body).toEqual({ mapping: { field: "product", value: "Alpha", canonical_note_path: "Products/Alpha.md", enabled: true } });
+
+  await page.getByRole("button", { name: "Ignore" }).click();
+  await page.getByText("Ignored names (1)", { exact: true }).click();
+  await expect(page.getByText("Project: temp-project", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Review again" }).click();
+  await expect(page.getByText("Ignored names (0)", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Remove" }).first().click();
+  await expect(page.getByText("No saved links yet.")).toBeVisible();
 });
 
 test("Knowledge exposes collection load failures with a retry", async ({ page }) => {
