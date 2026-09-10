@@ -164,6 +164,12 @@ pub struct MigrationJournalEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExpiredMigrationBackup {
+    pub operation_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationItem {
     pub operation_id: String,
     pub item_kind: String,
@@ -303,6 +309,7 @@ pub struct RetentionReport {
     pub stale_revisions_deleted: u64,
     pub orphan_snapshots_deleted: u64,
     pub finalized_recovery_scrubbed: u64,
+    pub imported_artifacts_deleted: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

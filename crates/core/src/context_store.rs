@@ -1,7 +1,7 @@
 use crate::{
     models::{
-        ContextMapping, IgnoredContextIdentity, LegacyCutoverImport, LegacyMigrationArtifact,
-        LinkSelector, MigrationItem, MigrationJournalEntry,
+        ContextMapping, ExpiredMigrationBackup, IgnoredContextIdentity, LegacyCutoverImport,
+        LegacyMigrationArtifact, LinkSelector, MigrationItem, MigrationJournalEntry,
     },
     store::Store,
 };
@@ -24,6 +24,84 @@ const SELECTOR_FIELDS: &[&str] = &[
 ];
 
 impl Store {
+    pub fn expired_migration_backups(
+        &self,
+        completed_before: DateTime<Utc>,
+    ) -> Result<Vec<ExpiredMigrationBackup>> {
+        let conn = self.connect()?;
+        let mut statement = conn.prepare(
+            r#"SELECT operation_id, details_json
+               FROM migration_journal
+               WHERE migration_name = 'refocus-cutover'
+                 AND status = 'completed'
+                 AND completed_at < ?1
+               ORDER BY completed_at, operation_id"#,
+        )?;
+        let rows = statement.query_map(params![completed_before.to_rfc3339()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut backups = Vec::new();
+        for row in rows {
+            let (operation_id, details_json) = row?;
+            let details: serde_json::Value = serde_json::from_str(&details_json)?;
+            if details.get("backup_deleted_at").is_some() {
+                continue;
+            }
+            if let Some(path) = details
+                .get("backup_path")
+                .and_then(serde_json::Value::as_str)
+            {
+                backups.push(ExpiredMigrationBackup {
+                    operation_id,
+                    path: path.to_owned(),
+                });
+            }
+        }
+        Ok(backups)
+    }
+
+    pub fn mark_migration_backup_deleted(
+        &self,
+        operation_id: &str,
+        expected_path: &str,
+        deleted_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.connect()?;
+        let current: (String, String, String) = conn
+            .query_row(
+                "SELECT migration_name, status, details_json FROM migration_journal WHERE operation_id = ?1",
+                params![operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .context("migration operation does not exist")?;
+        anyhow::ensure!(
+            current.0 == "refocus-cutover" && current.1 == "completed",
+            "only a completed refocus migration backup can be marked deleted"
+        );
+        let mut details: serde_json::Value = serde_json::from_str(&current.2)?;
+        anyhow::ensure!(
+            details
+                .get("backup_path")
+                .and_then(serde_json::Value::as_str)
+                == Some(expected_path),
+            "migration backup path changed before deletion was recorded"
+        );
+        if details.get("backup_deleted_at").is_some() {
+            return Ok(());
+        }
+        details["backup_deleted_at"] = serde_json::Value::String(deleted_at.to_rfc3339());
+        let changed = conn.execute(
+            "UPDATE migration_journal SET details_json = ?1 WHERE operation_id = ?2 AND details_json = ?3",
+            params![serde_json::to_string(&details)?, operation_id, current.2],
+        )?;
+        anyhow::ensure!(
+            changed == 1,
+            "migration journal changed while recording backup cleanup"
+        );
+        Ok(())
+    }
+
     pub fn commit_legacy_cutover_import(
         &self,
         import: &LegacyCutoverImport,
@@ -202,8 +280,8 @@ impl Store {
             )?;
             transaction.execute(
                 r#"INSERT INTO legacy_manual_event_imports
-                    (event_id, operation_id, workspace_id, manual_entry_id, source_digest, imported_at)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    (event_id, live_event_id, operation_id, workspace_id, manual_entry_id, source_digest, imported_at)
+                   VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6)
                    ON CONFLICT(event_id) DO NOTHING"#,
                 params![
                     manual.event_id,

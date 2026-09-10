@@ -164,7 +164,7 @@ Exit gate: recovery, idempotency, preserved-content, authorization and containme
 - [x] Add previous-day generation at 00:15, editable time/timezone, restart catch-up and bounded background work.
 - [x] Show recent statuses, meaningful missed-day counts, late-event updates and evidence-expiry warnings.
 - [ ] Preserve edited candidates on new evidence; implement dismiss/reopen and retention-safe revisions/amendments.
-- [ ] Coordinate cleanup across raw data, handled bodies, indexes, audit data and recovery copies.
+- [x] Coordinate cleanup across raw data, handled bodies, indexes, audit data and recovery copies.
 - [ ] Run a ten-active-day personal pilot; record correctness, review burden and operational problems.
 
 Exit gate: the pilot needs no database repair or manual proposal-folder cleanup, and no loss/authorization blocker remains.

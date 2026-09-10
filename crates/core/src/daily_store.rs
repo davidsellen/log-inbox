@@ -346,6 +346,17 @@ impl Store {
                  )"#,
             params![audit_cutoff.to_rfc3339()],
         )?;
+        let imported_artifacts_deleted = transaction.execute(
+            r#"DELETE FROM legacy_migration_artifacts
+               WHERE parse_status = 'valid'
+                 AND created_at < ?1
+                 AND EXISTS (
+                     SELECT 1 FROM migration_journal
+                     WHERE migration_journal.operation_id = legacy_migration_artifacts.operation_id
+                       AND migration_journal.status = 'completed'
+                 )"#,
+            params![audit_cutoff.to_rfc3339()],
+        )? as u64;
         transaction.commit()?;
         Ok(RetentionReport {
             raw_events_deleted,
@@ -355,6 +366,7 @@ impl Store {
             stale_revisions_deleted,
             orphan_snapshots_deleted,
             finalized_recovery_scrubbed,
+            imported_artifacts_deleted,
         })
     }
 

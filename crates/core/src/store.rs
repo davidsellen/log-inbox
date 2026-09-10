@@ -760,6 +760,43 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 17 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE legacy_manual_event_imports_v17 (
+                    event_id TEXT PRIMARY KEY,
+                    live_event_id TEXT,
+                    operation_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    manual_entry_id TEXT NOT NULL UNIQUE,
+                    source_digest TEXT NOT NULL,
+                    imported_at TEXT NOT NULL,
+                    CHECK(live_event_id IS NULL OR live_event_id = event_id),
+                    FOREIGN KEY(live_event_id) REFERENCES log_events(id) ON DELETE SET NULL,
+                    FOREIGN KEY(operation_id) REFERENCES migration_journal(operation_id) ON DELETE RESTRICT,
+                    FOREIGN KEY(workspace_id) REFERENCES workspace_profiles(id) ON DELETE RESTRICT,
+                    FOREIGN KEY(manual_entry_id) REFERENCES manual_daily_entries(id) ON DELETE RESTRICT
+                );
+
+                INSERT INTO legacy_manual_event_imports_v17
+                    (event_id, live_event_id, operation_id, workspace_id, manual_entry_id,
+                     source_digest, imported_at)
+                SELECT event_id, event_id, operation_id, workspace_id, manual_entry_id,
+                       source_digest, imported_at
+                FROM legacy_manual_event_imports;
+
+                DROP TABLE legacy_manual_event_imports;
+                ALTER TABLE legacy_manual_event_imports_v17
+                    RENAME TO legacy_manual_event_imports;
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (17, 'expiring migrated raw evidence', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -2211,10 +2248,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 16);
+        assert_eq!(store.schema_version().expect("version reads"), 17);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 16);
+        assert_eq!(store.schema_version().expect("version remains"), 17);
     }
 
     #[test]
@@ -2282,7 +2319,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 16);
+        assert_eq!(verification.schema_version, 17);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());

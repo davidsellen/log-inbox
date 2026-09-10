@@ -1,4 +1,5 @@
-use chrono::Utc;
+use anyhow::Context;
+use chrono::{DateTime, Duration, Utc};
 use log_inbox_core::{
     daily::render_daily_path,
     models::{
@@ -12,7 +13,7 @@ use log_inbox_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, fs, io::ErrorKind, path::Path};
 
 const LEGACY_PREFERENCE_KEYS: &[&str] = &[
     "browser_vault_catalog",
@@ -25,6 +26,51 @@ const LEGACY_PREFERENCE_KEYS: &[&str] = &[
     "extra_instructions",
 ];
 const MAX_PROPOSAL_BYTES: u64 = 4 * 1024 * 1024;
+
+pub fn cleanup_expired_backups(
+    store: &Store,
+    now: DateTime<Utc>,
+    retention_days: u16,
+) -> anyhow::Result<u64> {
+    anyhow::ensure!(
+        (1..=3650).contains(&retention_days),
+        "migration backup retention must be between 1 and 3650 days"
+    );
+    let backup_root = store
+        .database_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("migration-backups");
+    let expired =
+        store.expired_migration_backups(now - Duration::days(i64::from(retention_days)))?;
+    let mut deleted = 0;
+    for backup in expired {
+        let path = Path::new(&backup.path);
+        let filename = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .context("migration backup has no valid filename")?;
+        anyhow::ensure!(
+            path.parent() == Some(backup_root.as_path())
+                && filename.ends_with(&format!("-{}.sqlite3", backup.operation_id)),
+            "migration backup is outside its app-owned directory"
+        );
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+                    "migration backup is not a regular app-owned file"
+                );
+                fs::remove_file(path)?;
+                deleted += 1;
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        store.mark_migration_backup_deleted(&backup.operation_id, &backup.path, now)?;
+    }
+    Ok(deleted)
+}
 
 #[derive(Deserialize)]
 struct LegacyProposalFrontmatter {
@@ -1198,7 +1244,77 @@ mod tests {
         )
         .expect("completed cutover is idempotent");
         assert_eq!(retried.cleaned_files, 1);
+        let retention = store
+            .save_daily_automation_settings(&profile.id, false, "00:15", 7, 30, 30, 30, None)
+            .unwrap();
+        let future = Utc::now() + Duration::days(31);
+        let retention_report = store.run_retention_maintenance(&retention, future).unwrap();
+        assert_eq!(retention_report.raw_events_deleted, 1);
+        assert!(retention_report.imported_artifacts_deleted >= 1);
+        assert!(
+            store
+                .legacy_migration_artifact(
+                    &request.operation_id,
+                    "proposal_file",
+                    &valid_item.source_identity,
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .legacy_migration_artifact(
+                    &request.operation_id,
+                    "proposal_file",
+                    &broken_item.source_identity,
+                )
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(cleanup_expired_backups(&store, future, 30).unwrap(), 1);
+        assert!(
+            !app_root
+                .join("migration-backups")
+                .join(&result.backup_file)
+                .exists()
+        );
         fs::remove_dir_all(app_root).unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retention_deletes_only_journaled_completed_migration_backups() {
+        let app_root = temp_dir("migration-backup-retention");
+        let store = Store::open(app_root.join("app.sqlite3")).unwrap();
+        let backup_root = app_root.join("migration-backups");
+        fs::create_dir(&backup_root).unwrap();
+        let operation_id = "backup_retention_fixture";
+        let backup_path = backup_root.join(format!("20260910T120000.000Z-{operation_id}.sqlite3"));
+        fs::write(&backup_path, b"verified backup fixture").unwrap();
+        let details = json!({"phase": "complete", "backup_path": backup_path});
+        store
+            .begin_migration_operation(operation_id, "refocus-cutover", "fixture sources", &details)
+            .unwrap();
+        store
+            .finish_migration_operation(operation_id, "completed", &details)
+            .unwrap();
+
+        let deleted = cleanup_expired_backups(&store, Utc::now() + Duration::days(31), 30)
+            .expect("journaled backup cleanup succeeds");
+        assert_eq!(deleted, 1);
+        assert!(!backup_path.exists());
+        assert!(
+            store
+                .migration_operation(operation_id)
+                .unwrap()
+                .unwrap()
+                .details["backup_deleted_at"]
+                .is_string()
+        );
+        assert_eq!(
+            cleanup_expired_backups(&store, Utc::now() + Duration::days(32), 30).unwrap(),
+            0
+        );
+        fs::remove_dir_all(app_root).unwrap();
     }
 }

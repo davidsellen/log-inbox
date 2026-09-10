@@ -2290,13 +2290,18 @@ fn reconcile_retention(state: &AppState, now: DateTime<Utc>) -> Result<(), ApiEr
         .store
         .run_retention_maintenance(&settings, now)
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    let migration_backups_deleted =
+        migration::cleanup_expired_backups(&state.store, now, settings.recovery_retention_days)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
     let changed = report.raw_events_deleted
         + report.sessions_deleted
         + report.schedule_runs_deleted
         + report.reopened_dismissals_deleted
         + report.stale_revisions_deleted
         + report.orphan_snapshots_deleted
-        + report.finalized_recovery_scrubbed;
+        + report.finalized_recovery_scrubbed
+        + report.imported_artifacts_deleted
+        + migration_backups_deleted;
     if changed > 0 {
         tracing::info!(
             raw_events = report.raw_events_deleted,
@@ -2306,6 +2311,8 @@ fn reconcile_retention(state: &AppState, now: DateTime<Utc>) -> Result<(), ApiEr
             stale_revisions = report.stale_revisions_deleted,
             orphan_snapshots = report.orphan_snapshots_deleted,
             finalized_recovery = report.finalized_recovery_scrubbed,
+            imported_artifacts = report.imported_artifacts_deleted,
+            migration_backups = migration_backups_deleted,
             "Daily retention maintenance completed"
         );
     }

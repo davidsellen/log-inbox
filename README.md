@@ -90,12 +90,12 @@ The override accepts the three host paths documented in `.env.migration.example`
 
 - creates and verifies a timestamped SQLite backup outside the Markdown workspace;
 - imports valid link mappings, ignored identities, and old manual logs into workspace-scoped records;
-- preserves legacy settings and every recognized proposal as exact bytes in app storage, including malformed proposals;
+- preserves legacy settings and every recognized proposal as exact bytes in app storage for recovery; malformed proposals remain until manually resolved, while validated imported copies follow the saved audit-retention window;
 - removes obsolete preferences only in the same database transaction as their preservation;
 - deletes only valid pending proposal files whose bytes still match the reviewed SHA-256 hash;
 - never rewrites historical Markdown notes, guesses unresolved mappings, or deletes changed/unrecognized files.
 
-The operation is journaled and idempotent. If interrupted, opening Settings exposes the same operation for safe completion.
+The operation is journaled and idempotent. If interrupted, opening Settings exposes the same operation for safe completion. Its verified SQLite backup follows the separately disclosed recovery-retention window.
 After it completes, restart with ordinary `docker compose up --build`; the migration mounts are no longer needed.
 
 ## Configuration
