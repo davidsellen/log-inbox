@@ -2293,13 +2293,19 @@ fn reconcile_retention(state: &AppState, now: DateTime<Utc>) -> Result<(), ApiEr
     let changed = report.raw_events_deleted
         + report.sessions_deleted
         + report.schedule_runs_deleted
-        + report.reopened_dismissals_deleted;
+        + report.reopened_dismissals_deleted
+        + report.stale_revisions_deleted
+        + report.orphan_snapshots_deleted
+        + report.finalized_recovery_scrubbed;
     if changed > 0 {
         tracing::info!(
             raw_events = report.raw_events_deleted,
             sessions = report.sessions_deleted,
             schedule_runs = report.schedule_runs_deleted,
             reopened_dismissals = report.reopened_dismissals_deleted,
+            stale_revisions = report.stale_revisions_deleted,
+            orphan_snapshots = report.orphan_snapshots_deleted,
+            finalized_recovery = report.finalized_recovery_scrubbed,
             "Daily retention maintenance completed"
         );
     }

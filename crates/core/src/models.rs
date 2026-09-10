@@ -300,6 +300,9 @@ pub struct RetentionReport {
     pub sessions_deleted: u64,
     pub schedule_runs_deleted: u64,
     pub reopened_dismissals_deleted: u64,
+    pub stale_revisions_deleted: u64,
+    pub orphan_snapshots_deleted: u64,
+    pub finalized_recovery_scrubbed: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

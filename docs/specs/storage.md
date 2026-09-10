@@ -39,7 +39,7 @@ Before a cutover, the service creates a new destination with SQLite's online bac
 
 Retention is a workspace policy stored with Daily automation settings. Defaults are displayed but cleanup does not begin until the owner explicitly saves the policy. The Daily service runs bounded maintenance at startup and at most hourly; the collector only ingests and never deletes on startup.
 
-Raw events expire from `received_at`, while immutable snapshot IDs, digests, ordering, and review decisions survive with their live reference cleared. Expired sessions, terminal schedule runs, and reopened dismissal records use the separately configured audit window. Active dismissals, manual entries, user-edited candidates, migration artifacts, and unhandled content are not removed by this maintenance pass.
+Raw events expire from `received_at`, while snapshot IDs, digests, ordering, and review decisions referenced by a retained revision survive with their live reference cleared. Expired sessions, terminal schedule runs, reopened dismissal records, superseded unreferenced proposal revisions, and their orphan snapshots use the separately configured audit window. Finalized Apply operations keep their target, hashes, and operation identity, but their rollback bytes/path and temporary filename are scrubbed after the recovery window. Active dismissals, current revisions, manual entries, migration artifacts, and unfinished Apply recovery material are preserved.
 
 ## Proposal State
 

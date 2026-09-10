@@ -265,6 +265,7 @@ impl Store {
         );
         let raw_cutoff = now - Duration::days(i64::from(settings.raw_retention_days));
         let audit_cutoff = now - Duration::days(i64::from(settings.audit_retention_days));
+        let recovery_cutoff = now - Duration::days(i64::from(settings.recovery_retention_days));
         let mut conn = self.connect()?;
         let transaction = conn.transaction()?;
         let raw_events_deleted = transaction.execute(
@@ -287,12 +288,73 @@ impl Store {
             "DELETE FROM daily_dismissals WHERE reopened_at IS NOT NULL AND reopened_at < ?1",
             params![audit_cutoff.to_rfc3339()],
         )? as u64;
+        let finalized_recovery_scrubbed = transaction.execute(
+            r#"UPDATE apply_operations
+               SET recovery_payload = X'', recovery_path = NULL, temporary_name = ''
+               WHERE state = 'finalized'
+                 AND updated_at < ?1
+                 AND (length(recovery_payload) > 0
+                      OR recovery_path IS NOT NULL
+                      OR temporary_name != '')"#,
+            params![recovery_cutoff.to_rfc3339()],
+        )? as u64;
+        let stale_revisions_deleted = transaction.execute(
+            r#"DELETE FROM proposal_revisions
+               WHERE created_at < ?1
+                 AND NOT EXISTS (
+                     SELECT 1 FROM daily_days
+                     WHERE daily_days.current_revision_id = proposal_revisions.id
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM apply_operations
+                     WHERE apply_operations.revision_id = proposal_revisions.id
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM daily_dismissals
+                     WHERE daily_dismissals.revision_id = proposal_revisions.id
+                 )"#,
+            params![audit_cutoff.to_rfc3339()],
+        )? as u64;
+        let orphan_snapshots_deleted: u64 = transaction.query_row(
+            r#"SELECT COUNT(*) FROM evidence_snapshots
+               WHERE created_at < ?1
+                 AND NOT EXISTS (
+                     SELECT 1 FROM proposal_revisions
+                     WHERE proposal_revisions.snapshot_id = evidence_snapshots.id
+                 )"#,
+            params![audit_cutoff.to_rfc3339()],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            r#"DELETE FROM evidence_snapshot_events
+               WHERE snapshot_id IN (
+                   SELECT id FROM evidence_snapshots
+                   WHERE created_at < ?1
+                     AND NOT EXISTS (
+                         SELECT 1 FROM proposal_revisions
+                         WHERE proposal_revisions.snapshot_id = evidence_snapshots.id
+                     )
+               )"#,
+            params![audit_cutoff.to_rfc3339()],
+        )?;
+        transaction.execute(
+            r#"DELETE FROM evidence_snapshots
+               WHERE created_at < ?1
+                 AND NOT EXISTS (
+                     SELECT 1 FROM proposal_revisions
+                     WHERE proposal_revisions.snapshot_id = evidence_snapshots.id
+                 )"#,
+            params![audit_cutoff.to_rfc3339()],
+        )?;
         transaction.commit()?;
         Ok(RetentionReport {
             raw_events_deleted,
             sessions_deleted,
             schedule_runs_deleted,
             reopened_dismissals_deleted,
+            stale_revisions_deleted,
+            orphan_snapshots_deleted,
+            finalized_recovery_scrubbed,
         })
     }
 
@@ -2992,6 +3054,107 @@ mod tests {
             .expect("unfinished operations list");
         assert_eq!(unfinished.len(), 1);
         assert_eq!(unfinished[0].id, recovery.id);
+    }
+
+    #[test]
+    fn retention_expires_only_finalized_recovery_and_unreferenced_revision_history() {
+        let (store, input) = apply_operation_fixture();
+        let profile = store.active_workspace_profile().unwrap().unwrap();
+        let settings = store
+            .save_daily_automation_settings(&profile.id, false, "00:15", 7, 30, 30, 1, None)
+            .expect("retention policy saves");
+        store
+            .prepare_apply_operation(&input)
+            .expect("operation prepares");
+        assert!(
+            store
+                .connect()
+                .unwrap()
+                .execute(
+                    "UPDATE apply_operations SET recovery_payload = X'' WHERE id = ?1",
+                    params![input.id],
+                )
+                .is_err(),
+            "unfinished recovery material stays immutable"
+        );
+        store
+            .transition_apply_operation(&input.id, "prepared", "writing", None)
+            .unwrap();
+        store
+            .transition_apply_operation(&input.id, "writing", "written", None)
+            .unwrap();
+        store
+            .finalize_apply_operation(&input.id, &input.revision_id, &input.revision_content_hash)
+            .expect("operation finalizes");
+
+        let history_date = NaiveDate::from_ymd_opt(2026, 9, 10).unwrap();
+        store
+            .ensure_daily_day(history_date, "Work Log/2026-09-10.md", None)
+            .unwrap();
+        let stale_revision = store
+            .create_proposal_revision(
+                &profile.id,
+                history_date,
+                None,
+                "advanced_markdown",
+                &serde_json::json!("superseded content"),
+            )
+            .unwrap();
+        let current_revision = store
+            .create_proposal_revision(
+                &profile.id,
+                history_date,
+                None,
+                "advanced_markdown",
+                &serde_json::json!("current content"),
+            )
+            .unwrap();
+        let orphan_event = store
+            .insert_event(LogEventInput {
+                source: "codex/test".to_owned(),
+                level: None,
+                timestamp: Some("2026-09-10T12:00:00Z".parse().unwrap()),
+                message: "orphaned generation evidence".to_owned(),
+                metadata: None,
+                fingerprint: None,
+            })
+            .unwrap();
+        let orphan_snapshot = store
+            .create_evidence_snapshot(
+                &profile.id,
+                history_date,
+                std::slice::from_ref(&orphan_event.id),
+            )
+            .unwrap();
+
+        let report = store
+            .run_retention_maintenance(&settings, Utc::now() + Duration::days(31))
+            .expect("maintenance runs");
+        assert_eq!(report.finalized_recovery_scrubbed, 1);
+        assert_eq!(report.stale_revisions_deleted, 1);
+        assert_eq!(report.orphan_snapshots_deleted, 1);
+        let scrubbed = store.apply_operation(&input.id).unwrap().unwrap();
+        assert_eq!(scrubbed.recovery_payload, Some(Vec::new()));
+        assert_eq!(scrubbed.recovery_path, None);
+        assert_eq!(scrubbed.temporary_name.as_deref(), Some(""));
+        assert!(
+            store
+                .proposal_revision(&stale_revision.id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .proposal_revision(&current_revision.id)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .evidence_snapshot(&orphan_snapshot.id)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -723,6 +723,43 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 16 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                DROP TRIGGER apply_operations_immutable_inputs;
+                CREATE TRIGGER apply_operations_immutable_inputs
+                BEFORE UPDATE OF id, workspace_id, local_date, revision_id,
+                    revision_content_hash, destination_path, expected_old_block_hash,
+                    intended_new_block_hash, expected_target_exists,
+                    expected_original_content_hash, intended_updated_content_hash
+                ON apply_operations
+                BEGIN
+                    SELECT RAISE(ABORT, 'apply operation inputs are immutable');
+                END;
+
+                CREATE TRIGGER apply_operations_recovery_scrub_only
+                BEFORE UPDATE OF recovery_payload, recovery_path, temporary_name
+                ON apply_operations
+                WHEN NOT (
+                    OLD.state = 'finalized'
+                    AND NEW.state = 'finalized'
+                    AND typeof(NEW.recovery_payload) = 'blob'
+                    AND length(NEW.recovery_payload) = 0
+                    AND NEW.recovery_path IS NULL
+                    AND NEW.temporary_name = ''
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'Apply recovery material may only be scrubbed after finalization');
+                END;
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (16, 'expiring finalized Apply recovery', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -2174,10 +2211,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 15);
+        assert_eq!(store.schema_version().expect("version reads"), 16);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 15);
+        assert_eq!(store.schema_version().expect("version remains"), 16);
     }
 
     #[test]
@@ -2245,7 +2282,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 15);
+        assert_eq!(verification.schema_version, 16);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());
