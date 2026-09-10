@@ -33,6 +33,8 @@ The Knowledge tab is a small review queue for durable names found in recent reta
 
 Changes to links and ignored names are saved immediately in SQLite after the explicit action. They affect only new or regenerated Daily candidates; they never rewrite the current candidate or Markdown. Existing reviewed candidates therefore stay predictable.
 
+The Daily sidebar shows **Context used** for every candidate. At this stage it states explicitly that Knowledge supplied canonical links only and no note text. Used notes are grouped under the candidate workstream, while a small status distinguishes the immutable frozen links from the current Knowledge setup. Ordinary setup changes are advisory; a removed or excluded note that the candidate actually links is marked unavailable and blocks Apply until regeneration. Resolver and snapshot IDs stay under Technical details.
+
 ## Source collections
 
 Source collections are secondary setup under Knowledge. They define small, named sets of folders used to constrain canonical-note resolution and note search. Daily remains useful with no collections, but names cannot be manually linked until at least one collection provides safe note choices. The current stage reads bounded titles, aliases, and typed references but does not send note text to the model. Each collection shows only its name, purpose, included roots, exclusions, and active state; it does not expose a file tree or note browser.

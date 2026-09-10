@@ -6,7 +6,7 @@ const dailyHtml = await readFile(
   "utf8"
 );
 
-function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = "current", applyStatus = null, dismissed = false, lateEvidence = false, lateDeferred = false } = {}) {
+function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = "current", applyStatus = null, dismissed = false, lateEvidence = false, lateDeferred = false, contextSnapshot = null } = {}) {
   const events = [{ id: "evt_1", source: "codex/fedora", timestamp: `${date}T09:00:00Z`, message: "Validated the Daily workflow." }];
   if (lateEvidence) events.push({ id: "evt_late", source: "codex/fedora", timestamp: `${date}T10:00:00Z`, message: "Late deployment evidence." });
   return {
@@ -44,6 +44,7 @@ function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = 
       }
     },
     current_snapshot: { id: "snapshot_1", event_ids: ["evt_1"] },
+    current_context_snapshot: contextSnapshot,
     current_snapshot_evidence: [{ event_id: "evt_1", available: true, position: 0, event_digest: "digest", disposition: null }],
     active_late_evidence_deferrals: lateDeferred ? [{ workspace_id: "workspace_fixture", local_date: date, revision_id: "revision_1", event_id: "evt_late", available: true, event_digest: "late_digest", deferred_at: `${date}T11:00:00Z`, reopened_at: null }] : [],
     candidate_freshness: lateEvidence ? (lateDeferred ? "current" : "update_available") : freshness,
@@ -76,7 +77,7 @@ function knowledgeReview(overrides = {}) {
   };
 }
 
-async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshness = "current", workspaceProfile = undefined, applyStatus = null, migrationItems = [], lateEvidence = false, knowledgeCollections = [], knowledgeStatus = 200, review = knowledgeReview(), noteOptions = [{ path: "Products/Alpha.md", title: "Alpha", collection_ids: ["knowledge_fixture"] }] } = {}) {
+async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshness = "current", workspaceProfile = undefined, applyStatus = null, migrationItems = [], lateEvidence = false, knowledgeCollections = [], knowledgeStatus = 200, review = knowledgeReview(), noteOptions = [{ path: "Products/Alpha.md", title: "Alpha", collection_ids: ["knowledge_fixture"] }], contextDetails = { status: "none", workstreams: [] } } = {}) {
   const requests = [];
   let loggedIn = false;
   let currentApplyStatus = applyStatus;
@@ -186,10 +187,11 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ operation: currentApplyStatus }) });
     }
     if (url.pathname.endsWith("/apply") && request.method() === "POST") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ operation: { state: "finalized" }, destination_path: request.postDataJSON().destination_path, idempotent: false }) });
+    if (url.pathname.endsWith("/context") && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(contextDetails) });
     const match = url.pathname.match(/^\/api\/v2\/daily\/(\d{4}-\d{2}-\d{2})$/);
     if (match && request.method() === "GET") {
       if (dailyStatus !== 200) return route.fulfill({ status: dailyStatus, contentType: "application/json", body: JSON.stringify({ error: "Daily fixture unavailable" }) });
-      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dailyResponse(match[1], { origin, freshness, applyStatus: currentApplyStatus, dismissed, lateEvidence, lateDeferred })) });
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dailyResponse(match[1], { origin, freshness, applyStatus: currentApplyStatus, dismissed, lateEvidence, lateDeferred, contextSnapshot: contextDetails.snapshot || null })) });
     }
     if (url.pathname.endsWith("/late-evidence/evt_late") && ["POST", "DELETE"].includes(request.method())) {
       lateDeferred = request.method() === "POST";
@@ -221,6 +223,8 @@ test("refocused Daily shows one date, destination, notes, and exact preview", as
   await expect(page.getByText("Discussed the trade-off with the team.", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Workstream 1 title")).toHaveValue("Daily workflow");
   await expect(page.locator("#preview")).toContainText("Built a predictable Daily review.");
+  await expect(page.locator("#context-status")).toHaveText("No Knowledge");
+  await expect(page.locator("#context-card")).toContainText("Daily evidence and your notes only");
   await expect(page.getByRole("button", { name: /Mon, Sep 7 Needs review/i })).toBeVisible();
   await expect(page.locator("#missed-summary")).toHaveText("1 missed");
 
@@ -406,6 +410,39 @@ test("refocused Daily explicitly leaves late evidence for later and reopens it",
   const lateRequests = requests.filter(request => request.path.endsWith("/late-evidence/evt_late"));
   expect(lateRequests.map(request => request.method)).toEqual(["POST", "DELETE"]);
   expect(lateRequests[0].body).toEqual({ expected_revision_id: "revision_1" });
+});
+
+test("Daily shows frozen Knowledge links and discloses when setup changed", async ({ page }) => {
+  const contextDetails = {
+    status: "changed",
+    message: "Knowledge links or source metadata changed. Regenerate to use the latest setup.",
+    snapshot: { id: "context_1", snapshot_digest: "c".repeat(64), created_at: "2026-09-08T10:00:00Z", resolver_version: "exact-v1", used_note_count: 1, resolved_group_count: 1, diagnostics: {} },
+    workstreams: [{ id: "source:codex%2Ffedora|task:test", notes: [{ path: "Products/Alpha.md", title: "Alpha", reason: "mapping", matched_fields: ["product"] }] }]
+  };
+  await mockDaily(page, { contextDetails });
+  await openDaily(page);
+
+  await expect(page.getByRole("heading", { name: "Context used" })).toBeVisible();
+  await expect(page.locator("#context-status")).toHaveText("Setup changed");
+  await expect(page.locator("#context-card")).toContainText("Canonical links only · no note text was used.");
+  await expect(page.locator("#context-card")).toContainText("Daily workflow");
+  await expect(page.locator("#context-card")).toContainText("Products/Alpha.md · Saved link for Product");
+  await expect(page.locator("#context-card")).toContainText("Regenerate to use the latest setup");
+  await expect(page.getByRole("button", { name: "Review Apply" })).toBeEnabled();
+});
+
+test("Daily blocks Apply when a frozen Knowledge target disappeared", async ({ page }) => {
+  await mockDaily(page, { contextDetails: {
+    status: "invalid",
+    message: "A canonical note used by this revision was removed or excluded. Regenerate before Apply.",
+    snapshot: { id: "context_1", snapshot_digest: "c".repeat(64), created_at: "2026-09-08T10:00:00Z", resolver_version: "exact-v1", used_note_count: 1, resolved_group_count: 1, diagnostics: {} },
+    workstreams: [{ id: "source:codex%2Ffedora|task:test", notes: [{ path: "Products/Alpha.md", title: "Alpha", reason: "mapping", matched_fields: ["product"] }] }]
+  } });
+  await openDaily(page);
+
+  await expect(page.locator("#context-status")).toHaveText("Source unavailable");
+  await expect(page.getByRole("button", { name: "Review Apply" })).toBeDisabled();
+  await expect(page.locator("#context-card")).toContainText("Regenerate before Apply");
 });
 
 test("Knowledge navigation is lazy, keyboard accessible, and URL-addressable", async ({ page }) => {

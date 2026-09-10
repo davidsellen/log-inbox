@@ -349,6 +349,41 @@ pub fn find_note_option(
         }))
 }
 
+pub struct KnowledgeFingerprints {
+    pub configuration_digest: String,
+    pub catalog_digest: String,
+    pub note_paths: BTreeSet<String>,
+}
+
+pub fn current_fingerprints(
+    workspace: &InspectedWorkspace,
+    collections: &[KnowledgeCollection],
+    mappings: &[ContextMapping],
+) -> Result<KnowledgeFingerprints, String> {
+    let enabled = collections
+        .iter()
+        .filter(|collection| collection.enabled)
+        .collect::<Vec<_>>();
+    let catalog = build_catalog(workspace, &enabled)?.notes;
+    let catalog_revision = catalog
+        .values()
+        .map(|entry| {
+            json!({
+                "path": entry.note.path,
+                "title": entry.note.title,
+                "aliases": entry.note.aliases,
+                "references": entry.note.references,
+                "collection_ids": entry.collection_ids,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(KnowledgeFingerprints {
+        configuration_digest: configuration_digest(workspace, collections, mappings)?,
+        catalog_digest: json_digest(&JsonValue::Array(catalog_revision))?,
+        note_paths: catalog.keys().cloned().collect(),
+    })
+}
+
 pub fn curate_unresolved_identities(
     events: &[StoredLogEvent],
     mappings: &[ContextMapping],

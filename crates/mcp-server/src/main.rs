@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     env,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -389,6 +389,7 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/v2/daily/overview", get(refocus_daily_overview))
         .route("/api/v2/daily/{date}", get(refocus_daily_day))
+        .route("/api/v2/daily/{date}/context", get(refocus_daily_context))
         .route(
             "/api/v2/daily/{date}/apply-preview",
             get(refocus_daily_apply_preview),
@@ -1548,6 +1549,295 @@ async fn refocus_daily_day(
     })))
 }
 
+async fn refocus_daily_context(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(date): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "logs:read", false)?;
+    authorize_refocus(&state, &headers, "knowledge:read", false)?;
+    let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let (profile, workspace) = active_refocus_context(&state)?;
+    let revision = state
+        .store
+        .current_proposal_revision(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let Some(revision) = revision else {
+        return Ok(Json(json!({
+            "workspace_id": profile.id,
+            "local_date": local_date,
+            "status": "none",
+            "mode": "exact_links_only",
+            "workstreams": [],
+            "message": "Generate a Daily candidate to capture Knowledge links."
+        })));
+    };
+    let context_snapshot = state
+        .store
+        .proposal_context_snapshot(&revision.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let Some(context_snapshot) = context_snapshot else {
+        return Ok(Json(json!({
+            "workspace_id": profile.id,
+            "local_date": local_date,
+            "revision_id": revision.id,
+            "status": "none",
+            "mode": "exact_links_only",
+            "workstreams": [],
+            "message": "This candidate did not use Knowledge links."
+        })));
+    };
+    let diagnostics = context_snapshot.payload.get("diagnostics");
+    let generated_unavailable = diagnostics
+        .and_then(|value| value.get("resolution_error_code"))
+        .is_some();
+    let mut status = if generated_unavailable {
+        "unavailable"
+    } else {
+        "current"
+    };
+    let mut message = if generated_unavailable {
+        "Knowledge resolution was unavailable when this candidate was generated."
+    } else {
+        "Knowledge links match the frozen candidate."
+    };
+    if !generated_unavailable {
+        let freshness = current_context_freshness(
+            &state,
+            &profile,
+            &workspace,
+            local_date,
+            &revision,
+            &context_snapshot,
+        )?;
+        status = freshness.0;
+        message = freshness.1;
+    }
+    let notes = context_snapshot
+        .payload
+        .get("used_notes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let note_titles = notes
+        .iter()
+        .filter_map(|note| {
+            Some((
+                note.get("path")?.as_str()?.to_owned(),
+                note.get("title")?.as_str()?.to_owned(),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    let attached_links = serde_json::from_value::<DailyRevisionContent>(revision.content.clone())
+        .map(|content| {
+            content
+                .workstreams
+                .into_iter()
+                .map(|workstream| {
+                    (
+                        workstream.id,
+                        workstream
+                            .canonical_links
+                            .into_iter()
+                            .collect::<HashSet<_>>(),
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let mut grouped = BTreeMap::<String, BTreeMap<String, Value>>::new();
+    for resolved in context_snapshot
+        .payload
+        .get("resolved_groups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(workstream_id) = resolved.get("canonical_group_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(path) = resolved.get("canonical_note_path").and_then(Value::as_str) else {
+            continue;
+        };
+        let canonical_link = resolved
+            .get("canonical_link")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let attached = attached_links
+            .get(workstream_id)
+            .is_some_and(|links| links.contains(canonical_link));
+        grouped
+            .entry(workstream_id.to_owned())
+            .or_default()
+            .entry(path.to_owned())
+            .or_insert_with(|| {
+                json!({
+                    "path": path,
+                    "title": note_titles.get(path).cloned().unwrap_or_else(|| path.to_owned()),
+                    "canonical_link": canonical_link,
+                    "attached": attached,
+                    "reason": resolved.get("reason").and_then(Value::as_str),
+                    "matched_fields": resolved.get("matched_fields").and_then(Value::as_array).cloned().unwrap_or_default(),
+                })
+            });
+    }
+    let workstreams = grouped
+        .into_iter()
+        .map(|(id, notes)| json!({"id": id, "notes": notes.into_values().collect::<Vec<_>>() }))
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "workspace_id": profile.id,
+        "local_date": local_date,
+        "revision_id": revision.id,
+        "status": status,
+        "mode": "exact_links_only",
+        "message": message,
+        "snapshot": public_context_snapshot(&context_snapshot),
+        "workstreams": workstreams,
+    })))
+}
+
+fn current_context_freshness(
+    state: &AppState,
+    profile: &WorkspaceProfile,
+    workspace: &InspectedWorkspace,
+    _local_date: NaiveDate,
+    revision: &ProposalRevision,
+    context_snapshot: &log_inbox_core::models::ContextSnapshot,
+) -> Result<(&'static str, &'static str), ApiError> {
+    let used_note_paths = attached_context_note_paths(revision, &context_snapshot.payload);
+    let collections = state
+        .store
+        .list_knowledge_collections(&profile.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mappings = state
+        .store
+        .list_context_mappings(&profile.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let fingerprints = match knowledge::current_fingerprints(workspace, &collections, &mappings) {
+        Ok(fingerprints) => fingerprints,
+        Err(_) => {
+            return Ok((
+                "unavailable",
+                "Frozen links are preserved, but their current sources could not be checked.",
+            ));
+        }
+    };
+    if used_note_paths
+        .iter()
+        .any(|path| !fingerprints.note_paths.contains(path))
+    {
+        return Ok((
+            "invalid",
+            "A canonical note used by this revision was removed or excluded. Regenerate before Apply.",
+        ));
+    }
+    let resolver_matches = context_snapshot
+        .payload
+        .get("resolver_version")
+        .and_then(Value::as_str)
+        == Some("exact-v1");
+    let root_matches = context_snapshot
+        .payload
+        .get("root_binding")
+        .and_then(Value::as_str)
+        == Some(workspace.root_binding());
+    let configuration_matches = context_snapshot
+        .payload
+        .get("configuration_digest")
+        .and_then(Value::as_str)
+        == Some(fingerprints.configuration_digest.as_str());
+    let catalog_matches = context_snapshot
+        .payload
+        .get("catalog_digest")
+        .and_then(Value::as_str)
+        == Some(fingerprints.catalog_digest.as_str());
+    if resolver_matches && root_matches && configuration_matches && catalog_matches {
+        Ok(("current", "Knowledge links match the frozen candidate."))
+    } else {
+        Ok((
+            "changed",
+            "Knowledge links or source metadata changed. Regenerate to use the latest setup.",
+        ))
+    }
+}
+
+fn attached_context_note_paths(revision: &ProposalRevision, payload: &Value) -> Vec<String> {
+    let attached = serde_json::from_value::<DailyRevisionContent>(revision.content.clone())
+        .map(|content| {
+            content
+                .workstreams
+                .into_iter()
+                .map(|workstream| {
+                    (
+                        workstream.id,
+                        workstream
+                            .canonical_links
+                            .into_iter()
+                            .collect::<HashSet<_>>(),
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    payload
+        .get("resolved_groups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|resolved| {
+            let workstream_id = resolved.get("canonical_group_id")?.as_str()?;
+            let canonical_link = resolved.get("canonical_link")?.as_str()?;
+            if !attached
+                .get(workstream_id)
+                .is_some_and(|links| links.contains(canonical_link))
+            {
+                return None;
+            }
+            resolved
+                .get("canonical_note_path")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn ensure_context_applyable(state: &AppState, local_date: NaiveDate) -> Result<(), ApiError> {
+    let (profile, workspace) = active_refocus_context(state)?;
+    let Some(revision) = state
+        .store
+        .current_proposal_revision(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    else {
+        return Ok(());
+    };
+    let Some(context_snapshot) = state
+        .store
+        .proposal_context_snapshot(&revision.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    else {
+        return Ok(());
+    };
+    if current_context_freshness(
+        state,
+        &profile,
+        &workspace,
+        local_date,
+        &revision,
+        &context_snapshot,
+    )?
+    .0 == "invalid"
+    {
+        return Err(ApiError::conflict(
+            "a canonical note used by this candidate was removed or excluded; regenerate before Apply",
+        ));
+    }
+    Ok(())
+}
+
 async fn refocus_daily_overview(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1705,6 +1995,7 @@ async fn refocus_daily_apply_preview(
     require_cutover_for_daily_mutation(&state)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    ensure_context_applyable(&state, local_date)?;
     let material = daily_apply_material(&state, local_date)?;
     let plan = material.plan;
     let updated_content_hash = daily_writer::digest(&plan.updated_content);
@@ -1743,27 +2034,28 @@ async fn refocus_daily_apply(
         .apply_lock
         .lock()
         .map_err(|_| ApiError::internal("Daily Apply lock is unavailable"))?;
-    if let Some(operation) = state
+    let existing_operation = state
         .store
         .apply_operation(&operation_id)
-        .map_err(|error| ApiError::internal(error.to_string()))?
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if let Some(operation) = existing_operation
+        .as_ref()
         .filter(|operation| operation.state == "finalized")
     {
-        validate_apply_operation_approval(&operation, &input)?;
+        validate_apply_operation_approval(operation, &input)?;
         return Ok(Json(json!({
-            "operation": public_apply_operation(&operation),
+            "operation": public_apply_operation(operation),
             "destination_path": input.destination_path,
             "idempotent": true
         })));
     }
+    if existing_operation.is_none() {
+        ensure_context_applyable(&state, local_date)?;
+    }
 
     let material = daily_apply_material(&state, local_date)?;
     validate_apply_material_approval(&material, &input)?;
-    let operation = match state
-        .store
-        .apply_operation(&operation_id)
-        .map_err(|error| ApiError::internal(error.to_string()))?
-    {
+    let operation = match existing_operation {
         Some(operation) => {
             validate_apply_operation_approval(&operation, &input)?;
             operation
@@ -4180,7 +4472,7 @@ mod knowledge_destination_tests {
                 None,
             )
             .unwrap();
-        state
+        let event = state
             .store
             .insert_event(log_inbox_core::models::LogEventInput {
                 timestamp: Some("2026-09-09T12:00:00Z".parse().unwrap()),
@@ -4205,7 +4497,7 @@ mod knowledge_destination_tests {
                 Duration::hours(8),
             )
             .unwrap();
-        let app = build_router(state);
+        let app = build_router(state.clone());
         let limited_cookie = format!("log_inbox_session={}", limited.session_token);
         let limited_review = json_response(
             app.clone(),
@@ -4217,6 +4509,16 @@ mod knowledge_destination_tests {
         )
         .await;
         assert_eq!(limited_review.status(), StatusCode::UNAUTHORIZED);
+        let limited_context = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/daily/2026-09-09/context",
+            json!({}),
+            Some(&limited_cookie),
+            None,
+        )
+        .await;
+        assert_eq!(limited_context.status(), StatusCode::UNAUTHORIZED);
 
         let login = json_response(
             app.clone(),
@@ -4331,6 +4633,130 @@ mod knowledge_destination_tests {
                 .as_array()
                 .unwrap()
                 .is_empty()
+        );
+
+        let date = NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+        state
+            .store
+            .ensure_daily_day(date, "Work Log/2026-09-09.md", None)
+            .unwrap();
+        let evidence_snapshot = state
+            .store
+            .create_evidence_snapshot(&profile.id, date, std::slice::from_ref(&event.id))
+            .unwrap();
+        let collections = state.store.list_knowledge_collections(&profile.id).unwrap();
+        let mappings = state.store.list_context_mappings(&profile.id).unwrap();
+        let resolution = knowledge::resolve_knowledge(
+            &state.workspace,
+            &collections,
+            &mappings,
+            std::slice::from_ref(&event),
+        )
+        .unwrap()
+        .unwrap();
+        let context_snapshot = state
+            .store
+            .create_context_snapshot(&profile.id, date, &resolution.snapshot_payload)
+            .unwrap();
+        let workstream_id = resolution.snapshot_payload["resolved_groups"][0]["canonical_group_id"]
+            .as_str()
+            .unwrap();
+        state
+            .store
+            .create_proposal_revision_with_context(
+                &profile.id,
+                date,
+                Some(&evidence_snapshot.id),
+                &context_snapshot.id,
+                "generated",
+                &json!({
+                    "schema_version": 1,
+                    "workstreams": [{
+                        "id": workstream_id,
+                        "title": "Alpha work",
+                        "evidence_event_ids": [event.id],
+                        "canonical_links": ["[[Products/Alpha]]"],
+                        "outcome": [{"text": "Completed Alpha work.", "evidence_event_ids": [event.id]}],
+                        "decision": [], "trade_off": [], "validation": [], "blocker": [], "follow_up": []
+                    }],
+                    "manual_entry_ids": [],
+                    "open_questions": []
+                }),
+            )
+            .unwrap();
+        state
+            .store
+            .decide_snapshot_evidence(
+                &evidence_snapshot.id,
+                &event.id,
+                "include",
+                None,
+                "owner",
+                None,
+            )
+            .unwrap();
+        let context = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/daily/2026-09-09/context",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(context.status(), StatusCode::OK);
+        let context = response_json(context).await;
+        assert_eq!(context["status"], "current");
+        assert_eq!(
+            context["workstreams"][0]["notes"][0]["path"],
+            "Products/Alpha.md"
+        );
+        assert_eq!(context["workstreams"][0]["notes"][0]["attached"], true);
+        let context_text = context.to_string();
+        assert!(!context_text.contains("private product details"));
+        assert!(!context_text.contains("private event body"));
+
+        std::fs::write(
+            state.workspace.canonical_root().join("Products/Alpha.md"),
+            "# Alpha renamed\nprivate product details",
+        )
+        .unwrap();
+        let changed_context = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/daily/2026-09-09/context",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(response_json(changed_context).await["status"], "changed");
+        std::fs::remove_file(state.workspace.canonical_root().join("Products/Alpha.md")).unwrap();
+        let invalid_context = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/daily/2026-09-09/context",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(response_json(invalid_context).await["status"], "invalid");
+        let stale_apply = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/daily/2026-09-09/apply-preview",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(stale_apply.status(), StatusCode::CONFLICT);
+        assert!(
+            response_json(stale_apply).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("removed or excluded")
         );
 
         let stale = json_response(
