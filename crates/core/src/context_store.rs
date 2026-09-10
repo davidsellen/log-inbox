@@ -5,6 +5,7 @@ use crate::{
         MigrationJournalEntry,
     },
     store::Store,
+    workspace::normalize_knowledge_collection_paths,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -62,9 +63,7 @@ impl Store {
             !purpose.is_empty() && purpose.len() <= 1000,
             "Knowledge collection purpose must contain 1-1000 bytes"
         );
-        let roots = normalized_collection_paths(roots, 1, 8, "roots")?;
-        let exclusions = normalized_collection_paths(exclusions, 0, 32, "exclusions")?;
-        ensure_collection_exclusions_within_roots(&roots, &exclusions)?;
+        let (roots, exclusions) = normalize_knowledge_collection_paths(roots, exclusions)?;
         let revision_digest =
             collection_revision_digest(label, purpose, &roots, &exclusions, enabled)?;
         let mut conn = self.connect()?;
@@ -832,83 +831,6 @@ fn normalized_selectors(selectors: &[LinkSelector]) -> Result<Vec<LinkSelector>>
         "context selectors must be unique"
     );
     Ok(result)
-}
-
-fn normalized_collection_paths(
-    paths: &[String],
-    minimum: usize,
-    maximum: usize,
-    label: &str,
-) -> Result<Vec<String>> {
-    anyhow::ensure!(
-        (minimum..=maximum).contains(&paths.len()),
-        "Knowledge collection {label} must contain {minimum}-{maximum} paths"
-    );
-    let mut normalized = Vec::with_capacity(paths.len());
-    for value in paths {
-        let value = value.trim();
-        anyhow::ensure!(
-            !value.is_empty()
-                && value.len() <= 1024
-                && !value.contains('\\')
-                && !value.contains('\0'),
-            "Knowledge collection {label} contains an invalid path"
-        );
-        if value == "." {
-            normalized.push(value.to_owned());
-            continue;
-        }
-        let path = Path::new(value);
-        anyhow::ensure!(
-            !path.is_absolute()
-                && path
-                    .components()
-                    .all(|component| matches!(component, Component::Normal(_))),
-            "Knowledge collection {label} must use relative paths without traversal"
-        );
-        anyhow::ensure!(
-            path.components().all(|component| {
-                component.as_os_str().to_str().is_some_and(|value| {
-                    ![".git", ".obsidian", ".trash", ".log-inbox"]
-                        .iter()
-                        .any(|protected| value.eq_ignore_ascii_case(protected))
-                })
-            }),
-            "Knowledge collection {label} cannot enter protected workspace metadata"
-        );
-        normalized.push(
-            path.components()
-                .map(|component| component.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/"),
-        );
-    }
-    normalized.sort();
-    normalized.dedup();
-    anyhow::ensure!(
-        normalized.len() == paths.len(),
-        "Knowledge collection {label} must be unique"
-    );
-    Ok(normalized)
-}
-
-fn ensure_collection_exclusions_within_roots(
-    roots: &[String],
-    exclusions: &[String],
-) -> Result<()> {
-    anyhow::ensure!(
-        exclusions.iter().all(|excluded| {
-            roots.iter().any(|root| {
-                root == "."
-                    || root == excluded
-                    || excluded
-                        .strip_prefix(root)
-                        .is_some_and(|suffix| suffix.starts_with('/'))
-            })
-        }),
-        "each Knowledge collection exclusion must be inside an included root"
-    );
-    Ok(())
 }
 
 fn collection_revision_digest(

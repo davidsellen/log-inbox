@@ -37,7 +37,7 @@ Nonlocal access is unsupported unless the owner places the service behind an aut
 | `knowledge:read` | Read configured source excerpts | Change collections/mappings or write Markdown |
 | `draft:generate` | Request generation against an immutable snapshot | Resolve evidence or Apply |
 | `review:write` | Create manual entries and edit/include/omit/dismiss/reopen drafts | Write Markdown |
-| `settings:write` | Change reviewed ordinary settings | Reveal stored secrets or bypass destination review |
+| `settings:write` | Change reviewed ordinary settings and Knowledge collection definitions | Reveal stored secrets, read note content, or bypass destination review |
 | `vault:write` | Execute an already reviewed exact Apply operation | Select a destination or approve a revision |
 
 The initial dashboard owner session may receive all dashboard scopes, but every handler still checks its required scope. Initial MCP support excludes `vault:write`.

@@ -19,7 +19,7 @@ use log_inbox_core::{
     },
     settings::Settings,
     store::Store,
-    workspace::{InspectedWorkspace, MarkdownPathMode},
+    workspace::{InspectedWorkspace, MarkdownPathMode, normalize_knowledge_collection_paths},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -196,6 +196,37 @@ struct SaveAutomationSettingsRequest {
     expected_updated_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct KnowledgeCollectionDraft {
+    label: String,
+    purpose: String,
+    roots: Vec<String>,
+    #[serde(default)]
+    exclusions: Vec<String>,
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveKnowledgeCollectionRequest {
+    collection: KnowledgeCollectionDraft,
+    preview_digest: String,
+    expected_updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteKnowledgeCollectionRequest {
+    expected_updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnowledgeFolderQuery {
+    query: String,
+    limit: Option<usize>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -273,6 +304,19 @@ fn build_router(state: AppState) -> Router {
             "/api/v2/settings/automation",
             get(refocus_automation_settings).put(refocus_save_automation_settings),
         )
+        .route(
+            "/api/v2/knowledge/collections",
+            get(refocus_knowledge_collections).post(refocus_create_knowledge_collection),
+        )
+        .route(
+            "/api/v2/knowledge/collections/preview",
+            post(refocus_preview_knowledge_collection),
+        )
+        .route(
+            "/api/v2/knowledge/collections/{id}",
+            put(refocus_update_knowledge_collection).delete(refocus_delete_knowledge_collection),
+        )
+        .route("/api/v2/knowledge/folders", get(refocus_knowledge_folders))
         .route(
             "/api/v2/migration/cutover",
             get(refocus_cutover_report).post(refocus_commit_cutover),
@@ -480,6 +524,238 @@ async fn refocus_save_automation_settings(
         "saved": true,
         "writes_markdown_automatically": false
     })))
+}
+
+async fn refocus_knowledge_collections(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "knowledge:read", false)?;
+    let profile = active_refocus_workspace(&state)?;
+    let collections = state
+        .store
+        .list_knowledge_collections(&profile.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(json!({
+        "workspace_id": profile.id,
+        "collections": collections,
+        "count": collections.len(),
+        "limit": 8
+    })))
+}
+
+async fn refocus_preview_knowledge_collection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<KnowledgeCollectionDraft>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "knowledge:read", true)?;
+    let preview = preview_knowledge_collection(&state, input)?;
+    Ok(Json(preview.as_json(false)))
+}
+
+async fn refocus_create_knowledge_collection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SaveKnowledgeCollectionRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    authorize_refocus(&state, &headers, "settings:write", true)?;
+    if input.expected_updated_at.is_some() {
+        return Err(ApiError::bad_request(
+            "a new Knowledge collection cannot have an expected timestamp",
+        ));
+    }
+    let preview = preview_knowledge_collection(&state, input.collection)?;
+    if preview.preview_digest != input.preview_digest {
+        return Err(ApiError::conflict(
+            "Knowledge collection differs from the reviewed preview",
+        ));
+    }
+    let collection = state
+        .store
+        .save_knowledge_collection(
+            None,
+            &preview.workspace_id,
+            &preview.collection.label,
+            &preview.collection.purpose,
+            &preview.collection.roots,
+            &preview.collection.exclusions,
+            preview.collection.enabled,
+            None,
+        )
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "collection": collection, "changes_saved": true })),
+    ))
+}
+
+async fn refocus_update_knowledge_collection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<SaveKnowledgeCollectionRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "settings:write", true)?;
+    let expected_updated_at = input.expected_updated_at.ok_or_else(|| {
+        ApiError::bad_request("Knowledge collection update requires its expected timestamp")
+    })?;
+    let preview = preview_knowledge_collection(&state, input.collection)?;
+    if preview.preview_digest != input.preview_digest {
+        return Err(ApiError::conflict(
+            "Knowledge collection differs from the reviewed preview",
+        ));
+    }
+    let collection = state
+        .store
+        .save_knowledge_collection(
+            Some(&id),
+            &preview.workspace_id,
+            &preview.collection.label,
+            &preview.collection.purpose,
+            &preview.collection.roots,
+            &preview.collection.exclusions,
+            preview.collection.enabled,
+            Some(expected_updated_at),
+        )
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    Ok(Json(
+        json!({ "collection": collection, "changes_saved": true }),
+    ))
+}
+
+async fn refocus_delete_knowledge_collection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<DeleteKnowledgeCollectionRequest>,
+) -> Result<StatusCode, ApiError> {
+    authorize_refocus(&state, &headers, "settings:write", true)?;
+    let profile = active_refocus_workspace(&state)?;
+    state
+        .store
+        .delete_knowledge_collection(&id, &profile.id, input.expected_updated_at)
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn refocus_knowledge_folders(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(input): Query<KnowledgeFolderQuery>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "knowledge:read", false)?;
+    let (_, workspace) = active_refocus_context(&state)?;
+    let query = input.query.trim();
+    if !(2..=100).contains(&query.len()) {
+        return Err(ApiError::bad_request(
+            "folder search requires 2-100 characters",
+        ));
+    }
+    let limit = input.limit.unwrap_or(20);
+    if !(1..=20).contains(&limit) {
+        return Err(ApiError::bad_request(
+            "folder search limit must be between 1 and 20",
+        ));
+    }
+    let query = query.to_lowercase();
+    let folders = workspace
+        .list_markdown_folders(10_000)
+        .map_err(|error| ApiError::unprocessable(error.to_string()))?
+        .into_iter()
+        .filter(|folder| {
+            folder.path.to_lowercase().contains(&query)
+                || (folder.path == "." && "workspace root".contains(&query))
+        })
+        .take(limit)
+        .map(|folder| folder.path)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "folders": folders, "limit": limit })))
+}
+
+struct KnowledgeCollectionPreviewMaterial {
+    workspace_id: String,
+    collection: KnowledgeCollectionDraft,
+    matched_note_count: usize,
+    eligible_note_count: usize,
+    oversized_note_count: usize,
+    total_bytes: u64,
+    preview_digest: String,
+}
+
+impl KnowledgeCollectionPreviewMaterial {
+    fn as_json(&self, changes_saved: bool) -> Value {
+        json!({
+            "collection": self.collection,
+            "matched_note_count": self.matched_note_count,
+            "eligible_note_count": self.eligible_note_count,
+            "oversized_note_count": self.oversized_note_count,
+            "total_bytes": self.total_bytes,
+            "preview_digest": self.preview_digest,
+            "changes_saved": changes_saved
+        })
+    }
+}
+
+fn preview_knowledge_collection(
+    state: &AppState,
+    input: KnowledgeCollectionDraft,
+) -> Result<KnowledgeCollectionPreviewMaterial, ApiError> {
+    let (profile, workspace) = active_refocus_context(state)?;
+    let label = input.label.trim().to_owned();
+    let purpose = input.purpose.trim().to_owned();
+    if label.is_empty() || label.len() > 100 {
+        return Err(ApiError::bad_request(
+            "Knowledge collection label must contain 1-100 bytes",
+        ));
+    }
+    if purpose.is_empty() || purpose.len() > 1000 {
+        return Err(ApiError::bad_request(
+            "Knowledge collection purpose must contain 1-1000 bytes",
+        ));
+    }
+    let (roots, exclusions) = normalize_knowledge_collection_paths(&input.roots, &input.exclusions)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let collection = KnowledgeCollectionDraft {
+        label,
+        purpose,
+        roots,
+        exclusions,
+        enabled: input.enabled,
+    };
+    let sources = workspace
+        .list_markdown_sources(&collection.roots, &collection.exclusions, 2_000)
+        .map_err(|error| ApiError::unprocessable(error.to_string()))?;
+    let total_bytes = sources.iter().try_fold(0_u64, |total, source| {
+        total
+            .checked_add(source.byte_len)
+            .ok_or_else(|| ApiError::unprocessable("Knowledge collection size overflow"))
+    })?;
+    let oversized_note_count = sources
+        .iter()
+        .filter(|source| source.byte_len > 1024 * 1024)
+        .count();
+    let eligible_note_count = sources.len() - oversized_note_count;
+    let digest_input = json!({
+        "root_binding": workspace.root_binding(),
+        "collection": collection,
+    });
+    let preview_digest = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&digest_input)
+                .map_err(|error| ApiError::internal(error.to_string()))?
+        )
+    );
+    Ok(KnowledgeCollectionPreviewMaterial {
+        workspace_id: profile.id,
+        collection,
+        matched_note_count: sources.len(),
+        eligible_note_count,
+        oversized_note_count,
+        total_bytes,
+        preview_digest,
+    })
 }
 
 async fn refocus_cutover_report(
@@ -2975,6 +3251,267 @@ mod knowledge_destination_tests {
             response_json(updated).await["active_profile"]["id"],
             profile_id
         );
+    }
+
+    #[tokio::test]
+    async fn knowledge_collections_require_reviewed_scope_and_optimistic_changes() {
+        let state = test_state();
+        std::fs::create_dir_all(state.workspace.canonical_root().join("Products/Archive")).unwrap();
+        std::fs::write(
+            state
+                .workspace
+                .canonical_root()
+                .join("Products/Overview.md"),
+            "# Product\nprivate body",
+        )
+        .unwrap();
+        std::fs::write(
+            state
+                .workspace
+                .canonical_root()
+                .join("Products/Archive/Old.md"),
+            "old",
+        )
+        .unwrap();
+        state
+            .store
+            .set_owner_secret_hash(&hash_owner_secret("owner-secret-for-tests").unwrap())
+            .unwrap();
+        state
+            .store
+            .save_active_workspace_profile(
+                state.workspace.root_binding(),
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+                None,
+            )
+            .unwrap();
+        let limited = generate_session_credentials();
+        state
+            .store
+            .create_dashboard_session(
+                &limited,
+                &["knowledge:read".to_owned()],
+                Utc::now(),
+                Duration::minutes(30),
+                Duration::hours(8),
+            )
+            .unwrap();
+        let app = build_router(state);
+        assert_eq!(
+            route_status(app.clone(), "GET", "/api/v2/knowledge/collections", "").await,
+            StatusCode::UNAUTHORIZED
+        );
+        let login = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/auth/login",
+            json!({"owner_secret": "owner-secret-for-tests"}),
+            None,
+            None,
+        )
+        .await;
+        let cookie = login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let csrf = response_json(login).await["csrf_token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let draft = json!({
+            "label": " Product context ",
+            "purpose": " Product behavior and decisions ",
+            "roots": ["Products"],
+            "exclusions": ["Products/Archive"],
+            "enabled": true
+        });
+
+        let limited_cookie = format!("log_inbox_session={}", limited.session_token);
+        let limited_preview = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/knowledge/collections/preview",
+            draft.clone(),
+            Some(&limited_cookie),
+            Some(&limited.csrf_token),
+        )
+        .await;
+        assert_eq!(limited_preview.status(), StatusCode::OK);
+        let limited_preview = response_json(limited_preview).await;
+        let limited_write = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/knowledge/collections",
+            json!({
+                "collection": limited_preview["collection"],
+                "preview_digest": limited_preview["preview_digest"],
+                "expected_updated_at": null
+            }),
+            Some(&limited_cookie),
+            Some(&limited.csrf_token),
+        )
+        .await;
+        assert_eq!(limited_write.status(), StatusCode::UNAUTHORIZED);
+
+        let missing_csrf = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/knowledge/collections/preview",
+            draft.clone(),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(missing_csrf.status(), StatusCode::FORBIDDEN);
+        let preview = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/knowledge/collections/preview",
+            draft,
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(preview.status(), StatusCode::OK);
+        let preview = response_json(preview).await;
+        assert_eq!(preview["collection"]["label"], "Product context");
+        assert_eq!(preview["matched_note_count"], 1);
+        assert_eq!(preview["eligible_note_count"], 1);
+        assert_eq!(preview["changes_saved"], false);
+        assert!(!preview.to_string().contains("private body"));
+
+        let wrong_digest = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/knowledge/collections",
+            json!({
+                "collection": preview["collection"],
+                "preview_digest": "wrong",
+                "expected_updated_at": null
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(wrong_digest.status(), StatusCode::CONFLICT);
+        let created = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/knowledge/collections",
+            json!({
+                "collection": preview["collection"],
+                "preview_digest": preview["preview_digest"],
+                "expected_updated_at": null
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = response_json(created).await;
+        let id = created["collection"]["id"].as_str().unwrap();
+        let created_at = created["collection"]["updated_at"].clone();
+
+        let listed = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/knowledge/collections",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(listed.status(), StatusCode::OK);
+        assert_eq!(response_json(listed).await["count"], 1);
+        let folders = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/knowledge/folders?query=prod&limit=5",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(folders.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(folders).await["folders"],
+            json!(["Products", "Products/Archive"])
+        );
+
+        let changed_draft = json!({
+            "label": "Product context",
+            "purpose": "Product behavior and decisions",
+            "roots": ["Products"],
+            "exclusions": ["Products/Archive"],
+            "enabled": false
+        });
+        let changed_preview = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/knowledge/collections/preview",
+            changed_draft,
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        let changed_preview = response_json(changed_preview).await;
+        let stale = json_response(
+            app.clone(),
+            "PUT",
+            &format!("/api/v2/knowledge/collections/{id}"),
+            json!({
+                "collection": changed_preview["collection"],
+                "preview_digest": changed_preview["preview_digest"],
+                "expected_updated_at": DateTime::<Utc>::UNIX_EPOCH
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        let updated = json_response(
+            app.clone(),
+            "PUT",
+            &format!("/api/v2/knowledge/collections/{id}"),
+            json!({
+                "collection": changed_preview["collection"],
+                "preview_digest": changed_preview["preview_digest"],
+                "expected_updated_at": created_at
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(updated.status(), StatusCode::OK);
+        let updated_at = response_json(updated).await["collection"]["updated_at"].clone();
+
+        let stale_delete = json_response(
+            app.clone(),
+            "DELETE",
+            &format!("/api/v2/knowledge/collections/{id}"),
+            json!({"expected_updated_at": DateTime::<Utc>::UNIX_EPOCH}),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(stale_delete.status(), StatusCode::CONFLICT);
+        let deleted = json_response(
+            app.clone(),
+            "DELETE",
+            &format!("/api/v2/knowledge/collections/{id}"),
+            json!({"expected_updated_at": updated_at}),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]

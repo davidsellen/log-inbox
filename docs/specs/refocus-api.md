@@ -36,6 +36,30 @@ Requires `settings:write` and CSRF. Validates an IANA timezone, relative daily r
 
 Requires `settings:write`, CSRF, and the exact preview digest. It activates the first workspace profile or updates the active profile in place using its expected ID and timestamp, preserving the stable workspace ID. Existing days retain their frozen timezone and destination. A replaced mount or stale settings editor returns `409 Conflict` and must be reviewed again.
 
+## Knowledge collections
+
+Knowledge collections are optional, named sets of Markdown source folders. They configure context boundaries only: creating, changing, pausing, or removing a collection never creates, moves, edits, or deletes workspace files. Daily generation remains useful without any collection.
+
+### `GET /api/v2/knowledge/collections`
+
+Requires `knowledge:read`. Returns at most eight collection definitions for the active workspace. It never returns Markdown content.
+
+### `POST /api/v2/knowledge/collections/preview`
+
+Requires `knowledge:read` and CSRF. The body contains a label, purpose, one to eight relative include roots, up to 32 relative exclusions, and whether the collection is enabled. The server normalizes and validates paths, rejects traversal, protected metadata, symlinks, exclusions outside the selected roots, and selections over 2,000 Markdown files. It returns counts and a digest bound to the normalized definition and reviewed workspace mount, but no filenames or note contents. Nothing is saved.
+
+### `POST /api/v2/knowledge/collections`
+
+Requires `settings:write`, CSRF, and the exact preview digest. It creates the reviewed definition and returns `201 Created`. A workspace can have at most eight collections, with labels unique without regard to ASCII case.
+
+### `PUT|DELETE /api/v2/knowledge/collections/{id}`
+
+Requires `settings:write`, CSRF, and the exact current `updated_at`. PUT also requires a fresh matching preview digest. Stale, missing, cross-workspace, or concurrently changed definitions return `409 Conflict`. DELETE removes only the collection definition.
+
+### `GET /api/v2/knowledge/folders?query=...&limit=...`
+
+Requires `knowledge:read`. This is a bounded folder-only typeahead for collection fields, not a vault browser: queries contain 2–100 characters, return at most 20 relative safe directory paths, and never expose filenames or Markdown content.
+
 ## Daily read model
 
 ### `GET /api/v2/daily/{YYYY-MM-DD}`

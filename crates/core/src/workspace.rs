@@ -191,9 +191,7 @@ impl InspectedWorkspace {
             (1..=2_000).contains(&maximum),
             "Markdown source limit must be between 1 and 2000"
         );
-        let roots = normalized_relative_paths(roots, 1, 8, "roots")?;
-        let exclusions = normalized_relative_paths(exclusions, 0, 32, "exclusions")?;
-        ensure_exclusions_within_roots(&roots, &exclusions)?;
+        let (roots, exclusions) = normalize_knowledge_collection_paths(roots, exclusions)?;
         let mut scan = MarkdownSourceScan {
             exclusions: &exclusions,
             maximum,
@@ -415,6 +413,16 @@ fn collect_markdown_sources(
         }
     }
     Ok(())
+}
+
+pub fn normalize_knowledge_collection_paths(
+    roots: &[String],
+    exclusions: &[String],
+) -> Result<(Vec<String>, Vec<String>)> {
+    let roots = normalized_relative_paths(roots, 1, 8, "roots")?;
+    let exclusions = normalized_relative_paths(exclusions, 0, 32, "exclusions")?;
+    ensure_exclusions_within_roots(&roots, &exclusions)?;
+    Ok((roots, exclusions))
 }
 
 fn normalized_relative_paths(
