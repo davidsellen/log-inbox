@@ -46,7 +46,7 @@ Requires `knowledge:read`. Returns at most eight collection definitions for the 
 
 ### `POST /api/v2/knowledge/collections/preview`
 
-Requires `knowledge:read` and CSRF. The body contains a label, purpose, one to eight relative include roots, up to 32 relative exclusions, and whether the collection is enabled. The server normalizes and validates paths, rejects traversal, protected metadata, symlinks, exclusions outside the selected roots, and selections over 2,000 Markdown files. It returns counts and a digest bound to the normalized definition and reviewed workspace mount, but no filenames or note contents. Nothing is saved.
+Requires `knowledge:read` and CSRF. The body contains a label, purpose, one to eight relative include roots, up to 32 relative exclusions, and whether the collection is enabled. The server normalizes and validates paths, rejects traversal, protected metadata, symlinks, exclusions outside the selected roots, and selections over 2,000 Markdown files. Missing roots are explicitly returned for review and contribute no notes; preview and save never create them. The response contains counts and a digest bound to the normalized definition and reviewed workspace mount, but no filenames or note contents. Nothing is saved.
 
 ### `POST /api/v2/knowledge/collections`
 

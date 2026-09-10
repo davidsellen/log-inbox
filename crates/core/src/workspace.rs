@@ -38,6 +38,12 @@ pub struct WorkspaceMarkdownDocument {
     pub content_digest: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceMarkdownSelection {
+    pub sources: Vec<WorkspaceMarkdownSource>,
+    pub missing_roots: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct InspectedWorkspace {
     canonical_root: PathBuf,
@@ -187,6 +193,21 @@ impl InspectedWorkspace {
         exclusions: &[String],
         maximum: usize,
     ) -> Result<Vec<WorkspaceMarkdownSource>> {
+        let selection = self.preview_markdown_sources(roots, exclusions, maximum)?;
+        anyhow::ensure!(
+            selection.missing_roots.is_empty(),
+            "Knowledge collection roots do not exist: {}",
+            selection.missing_roots.join(", ")
+        );
+        Ok(selection.sources)
+    }
+
+    pub fn preview_markdown_sources(
+        &self,
+        roots: &[String],
+        exclusions: &[String],
+        maximum: usize,
+    ) -> Result<WorkspaceMarkdownSelection> {
         anyhow::ensure!(
             (1..=2_000).contains(&maximum),
             "Markdown source limit must be between 1 and 2000"
@@ -199,11 +220,15 @@ impl InspectedWorkspace {
             seen: BTreeSet::new(),
             sources: Vec::new(),
         };
+        let mut missing_roots = Vec::new();
         for root in roots {
             if path_is_excluded(&root, &exclusions) {
                 continue;
             }
-            let directory = self.open_relative_directory(&root)?;
+            let Some(directory) = self.open_relative_directory_if_exists(&root)? else {
+                missing_roots.push(root);
+                continue;
+            };
             let prefix = if root == "." {
                 PathBuf::new()
             } else {
@@ -213,7 +238,10 @@ impl InspectedWorkspace {
         }
         scan.sources
             .sort_by(|left, right| left.path.cmp(&right.path));
-        Ok(scan.sources)
+        Ok(WorkspaceMarkdownSelection {
+            sources: scan.sources,
+            missing_roots,
+        })
     }
 
     pub fn read_markdown_source(
@@ -278,22 +306,31 @@ impl InspectedWorkspace {
     }
 
     fn open_relative_directory(&self, relative_path: &str) -> Result<Dir> {
+        self.open_relative_directory_if_exists(relative_path)?
+            .with_context(|| format!("workspace directory does not exist: {relative_path}"))
+    }
+
+    fn open_relative_directory_if_exists(&self, relative_path: &str) -> Result<Option<Dir>> {
         if relative_path == "." {
-            return self.directory.try_clone().map_err(Into::into);
+            return self.directory.try_clone().map(Some).map_err(Into::into);
         }
         let path = Path::new(relative_path);
         validate_relative_workspace_path(path, "collection root")?;
         let mut directory = self.directory.try_clone()?;
         for component in path.components() {
             let name = component.as_os_str();
-            let metadata = directory.symlink_metadata(name)?;
+            let metadata = match directory.symlink_metadata(name) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
             anyhow::ensure!(
                 metadata.is_dir() && !metadata.is_symlink(),
                 "collection root is not a safe directory: {relative_path}"
             );
             directory = directory.open_dir_nofollow(name)?;
         }
-        Ok(directory)
+        Ok(Some(directory))
     }
 }
 
@@ -685,6 +722,16 @@ mod tests {
         assert!(
             workspace
                 .list_markdown_sources(&[".obsidian".to_owned()], &[], 10)
+                .is_err()
+        );
+        let future = workspace
+            .preview_markdown_sources(&["Products/Future".to_owned()], &[], 10)
+            .unwrap();
+        assert!(future.sources.is_empty());
+        assert_eq!(future.missing_roots, ["Products/Future"]);
+        assert!(
+            workspace
+                .list_markdown_sources(&["Products/Future".to_owned()], &[], 10)
                 .is_err()
         );
 

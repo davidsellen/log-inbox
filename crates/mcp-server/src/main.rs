@@ -680,6 +680,7 @@ struct KnowledgeCollectionPreviewMaterial {
     eligible_note_count: usize,
     oversized_note_count: usize,
     total_bytes: u64,
+    missing_roots: Vec<String>,
     preview_digest: String,
 }
 
@@ -691,6 +692,7 @@ impl KnowledgeCollectionPreviewMaterial {
             "eligible_note_count": self.eligible_note_count,
             "oversized_note_count": self.oversized_note_count,
             "total_bytes": self.total_bytes,
+            "missing_roots": self.missing_roots,
             "preview_digest": self.preview_digest,
             "changes_saved": changes_saved
         })
@@ -723,19 +725,20 @@ fn preview_knowledge_collection(
         exclusions,
         enabled: input.enabled,
     };
-    let sources = workspace
-        .list_markdown_sources(&collection.roots, &collection.exclusions, 2_000)
+    let selection = workspace
+        .preview_markdown_sources(&collection.roots, &collection.exclusions, 2_000)
         .map_err(|error| ApiError::unprocessable(error.to_string()))?;
-    let total_bytes = sources.iter().try_fold(0_u64, |total, source| {
+    let total_bytes = selection.sources.iter().try_fold(0_u64, |total, source| {
         total
             .checked_add(source.byte_len)
             .ok_or_else(|| ApiError::unprocessable("Knowledge collection size overflow"))
     })?;
-    let oversized_note_count = sources
+    let oversized_note_count = selection
+        .sources
         .iter()
         .filter(|source| source.byte_len > 1024 * 1024)
         .count();
-    let eligible_note_count = sources.len() - oversized_note_count;
+    let eligible_note_count = selection.sources.len() - oversized_note_count;
     let digest_input = json!({
         "root_binding": workspace.root_binding(),
         "collection": collection,
@@ -750,10 +753,11 @@ fn preview_knowledge_collection(
     Ok(KnowledgeCollectionPreviewMaterial {
         workspace_id: profile.id,
         collection,
-        matched_note_count: sources.len(),
+        matched_note_count: selection.sources.len(),
         eligible_note_count,
         oversized_note_count,
         total_bytes,
+        missing_roots: selection.missing_roots,
         preview_digest,
     })
 }
@@ -3384,6 +3388,7 @@ mod knowledge_destination_tests {
         assert_eq!(preview["collection"]["label"], "Product context");
         assert_eq!(preview["matched_note_count"], 1);
         assert_eq!(preview["eligible_note_count"], 1);
+        assert_eq!(preview["missing_roots"], json!([]));
         assert_eq!(preview["changes_saved"], false);
         assert!(!preview.to_string().contains("private body"));
 
