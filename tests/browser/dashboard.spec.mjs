@@ -55,7 +55,11 @@ function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = 
   };
 }
 
-async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshness = "current", workspaceProfile = undefined, applyStatus = null, migrationItems = [], lateEvidence = false } = {}) {
+function knowledgeCollection(overrides = {}) {
+  return { id: "knowledge_fixture", workspace_id: "workspace_fixture", label: "Product context", purpose: "Product behavior and decisions", roots: ["Products/Alpha"], exclusions: ["Products/Alpha/Archive"], enabled: true, revision_digest: "a".repeat(64), created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-09T12:00:00Z", ...overrides };
+}
+
+async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshness = "current", workspaceProfile = undefined, applyStatus = null, migrationItems = [], lateEvidence = false, knowledgeCollections = [], knowledgeStatus = 200 } = {}) {
   const requests = [];
   let loggedIn = false;
   let currentApplyStatus = applyStatus;
@@ -64,6 +68,7 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
   let automationSaved = false;
   let automationSettings = { workspace_id: "workspace_fixture", enabled: false, generation_time: "00:15", catch_up_days: 7, raw_retention_days: 30, audit_retention_days: 365, recovery_retention_days: 30, updated_at: "1970-01-01T00:00:00Z" };
   let lateDeferred = false;
+  let collections = structuredClone(knowledgeCollections);
   let activeProfile = workspaceProfile === undefined ? { id: "workspace_fixture", status: "active", root_binding: "binding_fixture", timezone: "Europe/Stockholm", daily_root: "Work Log", daily_pattern: "{year}/{month_name}/Daily log {month_name} {day}.md", template_path: null, link_style: "markdown", created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z" } : workspaceProfile;
   await page.route("http://daily.log-inbox.test/**", async route => {
     const request = route.request();
@@ -88,6 +93,33 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
       automationSettings = { workspace_id: "workspace_fixture", ...request.postDataJSON(), updated_at: "2026-09-09T13:00:00Z" };
       delete automationSettings.expected_updated_at;
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ settings: automationSettings, saved: true, writes_markdown_automatically: false }) });
+    }
+    if (url.pathname === "/api/v2/knowledge/collections" && request.method() === "GET") {
+      if (knowledgeStatus !== 200) return route.fulfill({ status: knowledgeStatus, contentType: "application/json", body: JSON.stringify({ error: "Knowledge fixture unavailable" }) });
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ workspace_id: "workspace_fixture", collections, count: collections.length, limit: 8 }) });
+    }
+    if (url.pathname === "/api/v2/knowledge/folders" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ folders: ["Products/Alpha", "Products/Beta"], limit: 20 }) });
+    if (url.pathname === "/api/v2/knowledge/collections/preview" && request.method() === "POST") {
+      const collection = request.postDataJSON();
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ collection: { ...collection, label: collection.label.trim(), purpose: collection.purpose.trim(), roots: [...collection.roots].sort(), exclusions: [...collection.exclusions].sort() }, matched_note_count: 3, eligible_note_count: 2, oversized_note_count: 1, total_bytes: 2048, missing_roots: [], preview_digest: "preview_knowledge_fixture", changes_saved: false }) });
+    }
+    if (url.pathname === "/api/v2/knowledge/collections" && request.method() === "POST") {
+      const input = request.postDataJSON();
+      const saved = knowledgeCollection({ id: "knowledge_created", ...input.collection, updated_at: "2026-09-10T10:00:00Z" });
+      collections.push(saved);
+      return route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ collection: saved, changes_saved: true }) });
+    }
+    const collectionMatch = url.pathname.match(/^\/api\/v2\/knowledge\/collections\/([^/]+)$/);
+    if (collectionMatch && request.method() === "PUT") {
+      const input = request.postDataJSON();
+      const index = collections.findIndex(item => item.id === collectionMatch[1]);
+      const saved = { ...collections[index], ...input.collection, updated_at: "2026-09-10T11:00:00Z" };
+      collections[index] = saved;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ collection: saved, changes_saved: true }) });
+    }
+    if (collectionMatch && request.method() === "DELETE") {
+      collections = collections.filter(item => item.id !== collectionMatch[1]);
+      return route.fulfill({ status: 204 });
     }
     if (url.pathname === "/api/v2/migration/cutover" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ operation_id: "refocus_fixture", report_digest: "f".repeat(64), workspace_id: "workspace_fixture", root_binding: "binding_fixture", ready: true, cutover_status: migrationCompleted ? "completed" : "not_started", completed_operation_id: migrationCompleted ? "refocus_fixture" : null, items: migrationCompleted ? [] : migrationItems, blockers: [], warnings: migrationItems.length ? ["Malformed proposal will be preserved."] : [] }) });
     if (url.pathname === "/api/v2/migration/cutover" && request.method() === "POST") {
@@ -321,4 +353,101 @@ test("refocused Daily explicitly leaves late evidence for later and reopens it",
   const lateRequests = requests.filter(request => request.path.endsWith("/late-evidence/evt_late"));
   expect(lateRequests.map(request => request.method)).toEqual(["POST", "DELETE"]);
   expect(lateRequests[0].body).toEqual({ expected_revision_id: "revision_1" });
+});
+
+test("Knowledge navigation is lazy, keyboard accessible, and URL-addressable", async ({ page }) => {
+  const requests = await mockDaily(page, { knowledgeCollections: [knowledgeCollection()] });
+  await openDaily(page);
+
+  expect(requests.filter(request => request.path === "/api/v2/knowledge/collections")).toHaveLength(0);
+  const knowledge = page.getByRole("tab", { name: "Knowledge" });
+  await knowledge.focus();
+  await page.keyboard.press("Enter");
+
+  await expect(knowledge).toHaveAttribute("aria-selected", "true");
+  await expect(page).toHaveURL(/view=knowledge/);
+  await expect(page.getByRole("heading", { name: "Knowledge collections" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Product context" })).toBeVisible();
+  await expect(page.getByText("Products/Alpha", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Structure", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Ignored", exact: true })).toHaveCount(0);
+  expect(requests.filter(request => request.path === "/api/v2/knowledge/collections")).toHaveLength(1);
+  await page.getByRole("tab", { name: "Daily" }).click();
+  await page.goBack();
+  await expect(knowledge).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("heading", { name: "Product context" })).toBeVisible();
+});
+
+test("Knowledge creates a collection only after reviewing the bounded definition", async ({ page }) => {
+  const requests = await mockDaily(page);
+  await openDaily(page);
+  await page.getByRole("tab", { name: "Knowledge" }).click();
+
+  await expect(page.getByRole("heading", { name: "No collections yet" })).toBeVisible();
+  await page.getByRole("button", { name: "New collection" }).first().click();
+  await page.getByLabel("Collection name").fill(" Product context ");
+  await page.getByLabel("What should this context help with?").fill(" Product behavior and decisions ");
+  await page.locator("#collection-root-input").fill("Products/Alpha");
+  await page.locator("#add-root").click();
+  await page.locator("#collection-exclusion-input").fill("Products/Alpha/Archive");
+  await page.locator("#add-exclusion").click();
+  await page.getByRole("button", { name: "Review collection" }).click();
+
+  await expect(page.locator("#knowledge-preview")).toContainText("3 Markdown notes match; 2 eligible");
+  await expect(page.locator("#knowledge-preview")).toContainText("Nothing has been saved");
+  await page.getByRole("button", { name: "Create collection" }).click();
+  await expect(page.getByRole("heading", { name: "Product context" })).toBeVisible();
+
+  const preview = requests.find(request => request.path.endsWith("/collections/preview"));
+  expect(preview.body).toMatchObject({ label: " Product context ", roots: ["Products/Alpha"], exclusions: ["Products/Alpha/Archive"], enabled: true });
+  const create = requests.find(request => request.path === "/api/v2/knowledge/collections" && request.method === "POST");
+  expect(create.body).toEqual({ collection: { label: "Product context", purpose: "Product behavior and decisions", roots: ["Products/Alpha"], exclusions: ["Products/Alpha/Archive"], enabled: true }, preview_digest: "preview_knowledge_fixture", expected_updated_at: null });
+});
+
+test("Knowledge edits, pauses, and removes definitions without implying file changes", async ({ page }) => {
+  const requests = await mockDaily(page, { knowledgeCollections: [knowledgeCollection()] });
+  page.on("dialog", dialog => dialog.accept());
+  await openDaily(page);
+  await page.getByRole("tab", { name: "Knowledge" }).click();
+
+  await page.getByRole("button", { name: "Edit" }).click();
+  await page.getByLabel("What should this context help with?").fill("Current product decisions");
+  await page.getByRole("button", { name: "Review collection" }).click();
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByText("Current product decisions", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Pause" }).click();
+  await expect(page.getByText("Paused", { exact: true })).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("New candidates will not use it");
+  await page.getByRole("button", { name: "Remove" }).click();
+  await expect(page.getByRole("heading", { name: "No collections yet" })).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Markdown files were not changed");
+
+  const updates = requests.filter(request => request.path.endsWith("/knowledge_fixture") && request.method === "PUT");
+  expect(updates[0].body.expected_updated_at).toBe("2026-09-09T12:00:00Z");
+  expect(updates[1].body.collection.enabled).toBe(false);
+  const removal = requests.find(request => request.path.endsWith("/knowledge_fixture") && request.method === "DELETE");
+  expect(removal.body).toEqual({ expected_updated_at: "2026-09-10T11:00:00Z" });
+});
+
+test("Knowledge stays useful but read-only after a reload loses CSRF authority", async ({ page }) => {
+  await mockDaily(page, { knowledgeCollections: [knowledgeCollection()] });
+  await openDaily(page);
+  await page.getByRole("tab", { name: "Knowledge" }).click();
+  await page.reload();
+
+  await expect(page.getByRole("heading", { name: "Product context" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "New collection" }).first()).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Edit" })).toBeDisabled();
+  await expect(page.getByRole("status")).toContainText("Reviewing collections read-only");
+  await expect(page.getByRole("button", { name: "Unlock changes" })).toBeVisible();
+});
+
+test("Knowledge exposes collection load failures with a retry", async ({ page }) => {
+  await mockDaily(page, { knowledgeStatus: 503 });
+  await openDaily(page);
+  await page.getByRole("tab", { name: "Knowledge" }).click();
+
+  await expect(page.getByText("Collections could not be loaded: Knowledge fixture unavailable")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
 });

@@ -1,6 +1,6 @@
-# Daily Dashboard
+# Daily and Knowledge Dashboard
 
-The service exposes one authenticated browser workflow at `/`. It is a review surface for one calendar day, not a vault explorer or generic note editor.
+The service exposes one authenticated browser workflow at `/`, with a Daily review surface and optional Knowledge collection settings. It is not a vault explorer or generic note editor.
 
 ## Workflow
 
@@ -24,6 +24,14 @@ After setup, a compact recent-days rail keeps the Daily habit visible without be
 Dismiss removes the exact visible candidate from reminders without writing or deleting anything. Reopen restores that same revision and warns when raw source evidence has expired. A dismissed day must be reopened before regeneration. Evidence that arrives after a preserved revision is labeled separately; **Leave for later** explicitly defers that exact event so the older complete revision can still be reviewed and applied, and **Reopen** reverses the choice.
 
 Settings also exposes a reviewed, idempotent migration when legacy database or proposal-file state is detected. Migration mounts exist only in the Compose override and are never part of the ordinary runtime.
+
+## Knowledge collections
+
+The Knowledge tab defines small, named sets of folders that may later supply optional context to Daily generation. Daily remains useful with no collections. Each card shows only the collection name, purpose, included roots, exclusions, and whether it is active; it does not expose a file tree or note browser.
+
+Creating or editing a collection is review-first. The owner enters one to eight relative roots and optional exclusions, then reviews matched/eligible counts and any missing or oversized sources before Save is enabled. Missing reviewed roots are not created. Saving changes only SQLite configuration and never creates, moves, edits, or deletes Markdown. Pause controls whether future candidates may use the collection; Remove deletes only the definition.
+
+Folder discovery is a bounded typeahead inside collection path fields. It returns safe relative directory paths only—never filenames or Markdown content. Knowledge loads independently from Daily, remains visible but read-only after a reload until changes are unlocked, and has an addressable `?view=knowledge` URL with browser-history navigation.
 
 ## Boundaries
 
