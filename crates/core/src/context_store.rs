@@ -64,6 +64,7 @@ impl Store {
         );
         let roots = normalized_collection_paths(roots, 1, 8, "roots")?;
         let exclusions = normalized_collection_paths(exclusions, 0, 32, "exclusions")?;
+        ensure_collection_exclusions_within_roots(&roots, &exclusions)?;
         let revision_digest =
             collection_revision_digest(label, purpose, &roots, &exclusions, enabled)?;
         let mut conn = self.connect()?;
@@ -847,7 +848,10 @@ fn normalized_collection_paths(
     for value in paths {
         let value = value.trim();
         anyhow::ensure!(
-            !value.is_empty() && value.len() <= 1024 && !value.contains('\\'),
+            !value.is_empty()
+                && value.len() <= 1024
+                && !value.contains('\\')
+                && !value.contains('\0'),
             "Knowledge collection {label} contains an invalid path"
         );
         if value == "." {
@@ -861,6 +865,16 @@ fn normalized_collection_paths(
                     .components()
                     .all(|component| matches!(component, Component::Normal(_))),
             "Knowledge collection {label} must use relative paths without traversal"
+        );
+        anyhow::ensure!(
+            path.components().all(|component| {
+                component.as_os_str().to_str().is_some_and(|value| {
+                    ![".git", ".obsidian", ".trash", ".log-inbox"]
+                        .iter()
+                        .any(|protected| value.eq_ignore_ascii_case(protected))
+                })
+            }),
+            "Knowledge collection {label} cannot enter protected workspace metadata"
         );
         normalized.push(
             path.components()
@@ -876,6 +890,25 @@ fn normalized_collection_paths(
         "Knowledge collection {label} must be unique"
     );
     Ok(normalized)
+}
+
+fn ensure_collection_exclusions_within_roots(
+    roots: &[String],
+    exclusions: &[String],
+) -> Result<()> {
+    anyhow::ensure!(
+        exclusions.iter().all(|excluded| {
+            roots.iter().any(|root| {
+                root == "."
+                    || root == excluded
+                    || excluded
+                        .strip_prefix(root)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
+        }),
+        "each Knowledge collection exclusion must be inside an included root"
+    );
+    Ok(())
 }
 
 fn collection_revision_digest(
@@ -1268,6 +1301,34 @@ mod tests {
             store.list_knowledge_collections(&profile.id).unwrap(),
             vec![saved.clone()]
         );
+        assert!(
+            store
+                .save_knowledge_collection(
+                    None,
+                    &profile.id,
+                    "product CONTEXT",
+                    "Duplicate label",
+                    &["Products".to_owned()],
+                    &[],
+                    true,
+                    None,
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .save_knowledge_collection(
+                    None,
+                    &profile.id,
+                    "Duplicate roots",
+                    "Duplicate normalized paths",
+                    &["Products/Alpha".to_owned(), "Products//Alpha".to_owned()],
+                    &[],
+                    true,
+                    None,
+                )
+                .is_err()
+        );
 
         assert!(
             store
@@ -1340,7 +1401,12 @@ mod tests {
                 )
                 .is_err()
         );
-        for invalid in ["../escape", "/absolute", "folder\\windows"] {
+        for invalid in [
+            "../escape",
+            "/absolute",
+            "folder\\windows",
+            ".obsidian/private",
+        ] {
             assert!(
                 store
                     .save_knowledge_collection(
@@ -1356,6 +1422,20 @@ mod tests {
                     .is_err()
             );
         }
+        assert!(
+            store
+                .save_knowledge_collection(
+                    Some(&updated.id),
+                    &profile.id,
+                    "Product context",
+                    "Changed",
+                    &["Products".to_owned()],
+                    &["Engineering".to_owned()],
+                    false,
+                    Some(updated.updated_at),
+                )
+                .is_err()
+        );
         assert!(
             store
                 .delete_knowledge_collection(&updated.id, &profile.id, DateTime::<Utc>::UNIX_EPOCH,)

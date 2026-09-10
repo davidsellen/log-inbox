@@ -832,6 +832,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argon2",
+ "cap-fs-ext",
  "cap-std",
  "chrono",
  "chrono-tz",

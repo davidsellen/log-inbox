@@ -1,19 +1,41 @@
 use anyhow::{Context, Result};
-use cap_std::fs::Dir;
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, OpenOptions};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeSet,
     fs,
-    io::ErrorKind,
+    io::{ErrorKind, Read},
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
 const PROTECTED_COMPONENTS: &[&str] = &[".git", ".obsidian", ".trash", ".log-inbox"];
+const MAX_SCAN_ENTRIES: usize = 10_000;
+const MAX_SCAN_DEPTH: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkdownPathMode {
     ExistingFile,
     MayCreate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceFolder {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceMarkdownSource {
+    pub path: String,
+    pub byte_len: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceMarkdownDocument {
+    pub source: WorkspaceMarkdownSource,
+    pub content: String,
+    pub content_digest: String,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +165,138 @@ impl InspectedWorkspace {
             Ok(candidate)
         }
     }
+
+    pub fn list_markdown_folders(&self, maximum: usize) -> Result<Vec<WorkspaceFolder>> {
+        anyhow::ensure!(
+            (1..=10_000).contains(&maximum),
+            "folder catalog limit must be between 1 and 10000"
+        );
+        let mut folders = vec![WorkspaceFolder {
+            path: ".".to_owned(),
+        }];
+        let root = self.directory.try_clone()?;
+        let mut visited = 0;
+        collect_folders(root, Path::new(""), 0, maximum, &mut visited, &mut folders)?;
+        folders.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(folders)
+    }
+
+    pub fn list_markdown_sources(
+        &self,
+        roots: &[String],
+        exclusions: &[String],
+        maximum: usize,
+    ) -> Result<Vec<WorkspaceMarkdownSource>> {
+        anyhow::ensure!(
+            (1..=2_000).contains(&maximum),
+            "Markdown source limit must be between 1 and 2000"
+        );
+        let roots = normalized_relative_paths(roots, 1, 8, "roots")?;
+        let exclusions = normalized_relative_paths(exclusions, 0, 32, "exclusions")?;
+        ensure_exclusions_within_roots(&roots, &exclusions)?;
+        let mut scan = MarkdownSourceScan {
+            exclusions: &exclusions,
+            maximum,
+            visited: 0,
+            seen: BTreeSet::new(),
+            sources: Vec::new(),
+        };
+        for root in roots {
+            if path_is_excluded(&root, &exclusions) {
+                continue;
+            }
+            let directory = self.open_relative_directory(&root)?;
+            let prefix = if root == "." {
+                PathBuf::new()
+            } else {
+                PathBuf::from(&root)
+            };
+            collect_markdown_sources(directory, &prefix, prefix.components().count(), &mut scan)?;
+        }
+        scan.sources
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(scan.sources)
+    }
+
+    pub fn read_markdown_source(
+        &self,
+        relative_path: &Path,
+        maximum_bytes: u64,
+    ) -> Result<WorkspaceMarkdownDocument> {
+        anyhow::ensure!(
+            (1..=1024 * 1024).contains(&maximum_bytes),
+            "Markdown source byte limit must be between 1 and 1048576"
+        );
+        validate_relative_workspace_path(relative_path, "Markdown source")?;
+        anyhow::ensure!(
+            relative_path.extension().and_then(|value| value.to_str()) == Some("md"),
+            "Markdown source must end in .md"
+        );
+        let parent = relative_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let directory = self.open_relative_directory(&parent.to_string_lossy())?;
+        let file_name = relative_path
+            .file_name()
+            .context("Markdown source must name a file")?;
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let mut file = directory
+            .open_with(file_name, &options)
+            .with_context(|| format!("opening Markdown source: {}", relative_path.display()))?;
+        let metadata = file.metadata()?;
+        anyhow::ensure!(
+            metadata.is_file(),
+            "Markdown source is not a regular file: {}",
+            relative_path.display()
+        );
+        anyhow::ensure!(
+            metadata.len() <= maximum_bytes,
+            "Markdown source exceeds the configured byte limit: {}",
+            relative_path.display()
+        );
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.by_ref()
+            .take(maximum_bytes + 1)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= maximum_bytes,
+            "Markdown source changed beyond the configured byte limit: {}",
+            relative_path.display()
+        );
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let content = String::from_utf8(bytes).with_context(|| {
+            format!("Markdown source is not UTF-8: {}", relative_path.display())
+        })?;
+        Ok(WorkspaceMarkdownDocument {
+            source: WorkspaceMarkdownSource {
+                path: relative_path.to_string_lossy().into_owned(),
+                byte_len: metadata.len(),
+            },
+            content,
+            content_digest: digest,
+        })
+    }
+
+    fn open_relative_directory(&self, relative_path: &str) -> Result<Dir> {
+        if relative_path == "." {
+            return self.directory.try_clone().map_err(Into::into);
+        }
+        let path = Path::new(relative_path);
+        validate_relative_workspace_path(path, "collection root")?;
+        let mut directory = self.directory.try_clone()?;
+        for component in path.components() {
+            let name = component.as_os_str();
+            let metadata = directory.symlink_metadata(name)?;
+            anyhow::ensure!(
+                metadata.is_dir() && !metadata.is_symlink(),
+                "collection root is not a safe directory: {relative_path}"
+            );
+            directory = directory.open_dir_nofollow(name)?;
+        }
+        Ok(directory)
+    }
 }
 
 impl PartialEq for InspectedWorkspace {
@@ -152,6 +306,213 @@ impl PartialEq for InspectedWorkspace {
 }
 
 impl Eq for InspectedWorkspace {}
+
+fn collect_folders(
+    directory: Dir,
+    prefix: &Path,
+    depth: usize,
+    maximum: usize,
+    visited: &mut usize,
+    folders: &mut Vec<WorkspaceFolder>,
+) -> Result<()> {
+    anyhow::ensure!(
+        depth <= MAX_SCAN_DEPTH,
+        "workspace folder depth exceeds {MAX_SCAN_DEPTH}"
+    );
+    let mut entries = directory.entries()?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        *visited += 1;
+        anyhow::ensure!(
+            *visited <= MAX_SCAN_ENTRIES,
+            "workspace catalog exceeds {MAX_SCAN_ENTRIES} entries"
+        );
+        let name = entry.file_name();
+        let Some(name_text) = name.to_str() else {
+            continue;
+        };
+        let file_type = entry.file_type()?;
+        if !file_type.is_dir() || file_type.is_symlink() || is_protected_component(name_text) {
+            continue;
+        }
+        anyhow::ensure!(
+            folders.len() < maximum,
+            "workspace contains more than {maximum} safe folders"
+        );
+        let path = prefix.join(&name);
+        folders.push(WorkspaceFolder {
+            path: path.to_string_lossy().into_owned(),
+        });
+        collect_folders(
+            directory.open_dir_nofollow(&name)?,
+            &path,
+            depth + 1,
+            maximum,
+            visited,
+            folders,
+        )?;
+    }
+    Ok(())
+}
+
+struct MarkdownSourceScan<'a> {
+    exclusions: &'a [String],
+    maximum: usize,
+    visited: usize,
+    seen: BTreeSet<String>,
+    sources: Vec<WorkspaceMarkdownSource>,
+}
+
+fn collect_markdown_sources(
+    directory: Dir,
+    prefix: &Path,
+    depth: usize,
+    scan: &mut MarkdownSourceScan<'_>,
+) -> Result<()> {
+    anyhow::ensure!(
+        depth <= MAX_SCAN_DEPTH,
+        "Knowledge collection depth exceeds {MAX_SCAN_DEPTH}"
+    );
+    let mut entries = directory.entries()?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        scan.visited += 1;
+        anyhow::ensure!(
+            scan.visited <= MAX_SCAN_ENTRIES,
+            "Knowledge collection scan exceeds {MAX_SCAN_ENTRIES} entries"
+        );
+        let name = entry.file_name();
+        let Some(name_text) = name.to_str() else {
+            continue;
+        };
+        let path = prefix.join(&name);
+        let path_text = path.to_string_lossy().into_owned();
+        if path_is_excluded(&path_text, scan.exclusions) || is_protected_component(name_text) {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            collect_markdown_sources(directory.open_dir_nofollow(&name)?, &path, depth + 1, scan)?;
+        } else if file_type.is_file()
+            && Path::new(name_text)
+                .extension()
+                .and_then(|value| value.to_str())
+                == Some("md")
+            && scan.seen.insert(path_text.clone())
+        {
+            anyhow::ensure!(
+                scan.sources.len() < scan.maximum,
+                "Knowledge collection contains more than {} Markdown files",
+                scan.maximum
+            );
+            scan.sources.push(WorkspaceMarkdownSource {
+                path: path_text,
+                byte_len: entry.metadata()?.len(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn normalized_relative_paths(
+    paths: &[String],
+    minimum: usize,
+    maximum: usize,
+    label: &str,
+) -> Result<Vec<String>> {
+    anyhow::ensure!(
+        (minimum..=maximum).contains(&paths.len()),
+        "collection {label} must contain {minimum}-{maximum} paths"
+    );
+    let mut normalized = Vec::with_capacity(paths.len());
+    for value in paths {
+        let value = value.trim();
+        if value == "." {
+            normalized.push(value.to_owned());
+            continue;
+        }
+        let path = Path::new(value);
+        validate_relative_workspace_path(path, label)?;
+        normalized.push(
+            path.components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
+        );
+    }
+    normalized.sort();
+    normalized.dedup();
+    anyhow::ensure!(
+        normalized.len() == paths.len(),
+        "collection {label} must be unique"
+    );
+    Ok(normalized)
+}
+
+fn validate_relative_workspace_path(path: &Path, label: &str) -> Result<()> {
+    anyhow::ensure!(
+        !path.as_os_str().is_empty()
+            && !path.is_absolute()
+            && path.as_os_str().len() <= 1024
+            && !path.to_string_lossy().contains(['\\', '\0']),
+        "{label} must be a non-empty relative path"
+    );
+    let components = path.components().collect::<Vec<_>>();
+    anyhow::ensure!(
+        components
+            .iter()
+            .all(|component| matches!(component, Component::Normal(_))),
+        "{label} cannot contain traversal or platform prefixes"
+    );
+    for component in components {
+        let value = component
+            .as_os_str()
+            .to_str()
+            .context("workspace paths must be valid UTF-8")?;
+        anyhow::ensure!(
+            !is_protected_component(value),
+            "{label} enters protected workspace metadata: {value}"
+        );
+    }
+    Ok(())
+}
+
+fn is_protected_component(value: &str) -> bool {
+    PROTECTED_COMPONENTS
+        .iter()
+        .any(|protected| value.eq_ignore_ascii_case(protected))
+}
+
+fn path_is_excluded(path: &str, exclusions: &[String]) -> bool {
+    exclusions.iter().any(|excluded| {
+        excluded == "."
+            || path == excluded
+            || path
+                .strip_prefix(excluded)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    })
+}
+
+fn ensure_exclusions_within_roots(roots: &[String], exclusions: &[String]) -> Result<()> {
+    anyhow::ensure!(
+        exclusions
+            .iter()
+            .all(|excluded| roots.iter().any(|root| path_contains(root, excluded))),
+        "each collection exclusion must be inside an included root"
+    );
+    Ok(())
+}
+
+fn path_contains(root: &str, candidate: &str) -> bool {
+    root == "."
+        || root == candidate
+        || candidate
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
 
 fn root_binding(canonical_root: &Path, metadata: &fs::Metadata) -> String {
     let mut hasher = Sha256::new();
@@ -248,6 +609,91 @@ mod tests {
     }
 
     #[test]
+    fn catalogs_only_safe_folders_and_reads_bounded_collection_sources() {
+        let root = temp_root("workspace-knowledge");
+        for folder in [
+            "Products/Alpha/Decisions",
+            "Products/Alpha/Archive",
+            "Products/Alphabet",
+            ".hidden",
+            ".obsidian/Private",
+        ] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        fs::write(root.join("Products/Alpha/Overview.md"), "# Alpha\n").unwrap();
+        fs::write(
+            root.join("Products/Alpha/Decisions/Choice.md"),
+            "Keep it small.",
+        )
+        .unwrap();
+        fs::write(root.join("Products/Alpha/Archive/Old.md"), "old").unwrap();
+        fs::write(root.join("Products/Alphabet/Other.md"), "other").unwrap();
+        fs::write(root.join("Products/Alpha/ignore.txt"), "not Markdown").unwrap();
+        fs::write(root.join(".hidden/Included.md"), "hidden but allowed").unwrap();
+        fs::write(root.join(".obsidian/Private/Secret.md"), "protected").unwrap();
+        let workspace = InspectedWorkspace::inspect(&root).unwrap();
+
+        let folders = workspace
+            .list_markdown_folders(20)
+            .unwrap()
+            .into_iter()
+            .map(|folder| folder.path)
+            .collect::<Vec<_>>();
+        assert!(folders.contains(&".".to_owned()));
+        assert!(folders.contains(&".hidden".to_owned()));
+        assert!(folders.contains(&"Products/Alpha/Decisions".to_owned()));
+        assert!(!folders.iter().any(|path| path.contains(".obsidian")));
+        assert!(workspace.list_markdown_folders(1).is_err());
+
+        let sources = workspace
+            .list_markdown_sources(
+                &[
+                    "Products/Alpha".to_owned(),
+                    "Products//Alpha/Decisions".to_owned(),
+                ],
+                &["Products/Alpha/Archive".to_owned()],
+                10,
+            )
+            .unwrap();
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| source.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Products/Alpha/Decisions/Choice.md",
+                "Products/Alpha/Overview.md"
+            ]
+        );
+        assert!(
+            workspace
+                .list_markdown_sources(
+                    &["Products/Alpha".to_owned()],
+                    &["Products/Alphabet".to_owned()],
+                    10,
+                )
+                .is_err()
+        );
+        assert!(
+            workspace
+                .list_markdown_sources(&[".obsidian".to_owned()], &[], 10)
+                .is_err()
+        );
+
+        let document = workspace
+            .read_markdown_source(Path::new("Products/Alpha/Overview.md"), 100)
+            .unwrap();
+        assert_eq!(document.content, "# Alpha\n");
+        assert_eq!(document.content_digest.len(), 64);
+        assert!(
+            workspace
+                .read_markdown_source(Path::new("Products/Alpha/Overview.md"), 4)
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn rejects_traversal_non_markdown_and_protected_paths() {
         let root = temp_root("workspace-rejections");
         let workspace = InspectedWorkspace::inspect(&root).unwrap();
@@ -280,6 +726,7 @@ mod tests {
         fs::write(outside.join("note.md"), "outside").unwrap();
         symlink(root.join("Real"), root.join("InsideLink")).unwrap();
         symlink(&outside, root.join("OutsideLink")).unwrap();
+        symlink(root.join("Real/note.md"), root.join("LinkedNote.md")).unwrap();
         let workspace = InspectedWorkspace::inspect(&root).unwrap();
 
         for path in ["InsideLink/note.md", "OutsideLink/note.md"] {
@@ -289,6 +736,11 @@ mod tests {
                     .is_err()
             );
         }
+        assert!(
+            workspace
+                .read_markdown_source(Path::new("LinkedNote.md"), 1024)
+                .is_err()
+        );
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
     }
