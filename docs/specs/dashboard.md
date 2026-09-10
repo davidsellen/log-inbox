@@ -17,6 +17,8 @@ The screen states whether an action is read-only, saves app state, or writes Mar
 
 First run requires a reviewed workspace profile: timezone, relative Daily root, supported filename pattern, optional existing template, and link style. Preview validates and displays an example without saving. Save persists the profile but creates no folders or notes.
 
+After the workspace profile exists, the same dialog exposes candidate preparation and retention as a separate explicit save. Until that policy is saved, displayed defaults are inactive. Enabling preparation schedules review candidates after a day ends and shows recent run outcomes; it never writes Markdown. Saving also activates the disclosed raw-evidence, audit, and Apply-recovery retention periods even when preparation remains disabled.
+
 After setup, a compact recent-days rail keeps the Daily habit visible without becoming a calendar or vault browser. It always includes profile-local Today and adds only meaningful past dates, with one primary state such as Needs review, Update available, Review, or Applied. Evidence expiry is a secondary warning. Selecting a day opens the same single-day review surface.
 
 Dismiss removes the exact visible candidate from reminders without writing or deleting anything. Reopen restores that same revision and warns when raw source evidence has expired. A dismissed day must be reopened before regeneration.

@@ -58,6 +58,8 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
   let currentApplyStatus = applyStatus;
   let migrationCompleted = false;
   let dismissed = false;
+  let automationSaved = false;
+  let automationSettings = { workspace_id: "workspace_fixture", enabled: false, generation_time: "00:15", catch_up_days: 7, raw_retention_days: 30, audit_retention_days: 365, recovery_retention_days: 30, updated_at: "1970-01-01T00:00:00Z" };
   let activeProfile = workspaceProfile === undefined ? { id: "workspace_fixture", status: "active", root_binding: "binding_fixture", timezone: "Europe/Stockholm", daily_root: "Work Log", daily_pattern: "{year}/{month_name}/Daily log {month_name} {day}.md", template_path: null, link_style: "markdown", created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z" } : workspaceProfile;
   await page.route("http://daily.log-inbox.test/**", async route => {
     const request = route.request();
@@ -75,6 +77,13 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
       const saved = request.postDataJSON();
       activeProfile = { id: activeProfile?.id || "workspace_fixture", status: "active", root_binding: "binding_fixture", ...saved.settings, created_at: activeProfile?.created_at || "2026-09-01T00:00:00Z", updated_at: "2026-09-09T12:00:00Z" };
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ active_profile: activeProfile, destination_example: "Journal/2026-09-08.md", binding_matches: true, changes_saved: true }) });
+    }
+    if (url.pathname === "/api/v2/settings/automation" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ settings: automationSettings, saved: automationSaved, recent_runs: [], writes_markdown_automatically: false }) });
+    if (url.pathname === "/api/v2/settings/automation" && request.method() === "PUT") {
+      automationSaved = true;
+      automationSettings = { workspace_id: "workspace_fixture", ...request.postDataJSON(), updated_at: "2026-09-09T13:00:00Z" };
+      delete automationSettings.expected_updated_at;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ settings: automationSettings, saved: true, writes_markdown_automatically: false }) });
     }
     if (url.pathname === "/api/v2/migration/cutover" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ operation_id: "refocus_fixture", report_digest: "f".repeat(64), workspace_id: "workspace_fixture", root_binding: "binding_fixture", ready: true, cutover_status: migrationCompleted ? "completed" : "not_started", completed_operation_id: migrationCompleted ? "refocus_fixture" : null, items: migrationCompleted ? [] : migrationItems, blockers: [], warnings: migrationItems.length ? ["Malformed proposal will be preserved."] : [] }) });
     if (url.pathname === "/api/v2/migration/cutover" && request.method() === "POST") {
@@ -198,9 +207,9 @@ test("refocused Daily previews and saves first-run destination settings", async 
   await expect(page.getByRole("heading", { name: "Daily settings" })).toBeVisible();
   await page.getByLabel("Daily folder").fill("Journal");
   await page.getByLabel("File pattern").fill("{year}/{date}.md");
-  await page.getByRole("button", { name: "Preview" }).click();
+  await page.getByRole("button", { name: "Preview destination" }).click();
   await expect(page.locator("#settings-preview")).toContainText("Nothing has been saved or created");
-  await page.getByRole("button", { name: "Save settings" }).click();
+  await page.getByRole("button", { name: "Save destination" }).click();
 
   await expect(page.getByRole("heading", { name: "Daily settings" })).toHaveCount(0);
   await expect.poll(() => requests.find(request => request.path === "/api/v2/settings/workspace" && request.method === "PUT")?.body).toMatchObject({
@@ -208,6 +217,32 @@ test("refocused Daily previews and saves first-run destination settings", async 
     preview_digest: "preview_fixture",
     expected_profile_id: null
   });
+});
+
+test("refocused settings make scheduling and retention consent explicit", async ({ page }) => {
+  const requests = await mockDaily(page);
+  await openDaily(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(page.getByText(/never writes Markdown/i)).toBeVisible();
+  await expect(page.locator("#automation-status")).toContainText("inactive until you choose Save");
+  await page.getByLabel("Prepare candidates automatically").check();
+  await page.getByLabel("Preparation time").fill("06:45");
+  await page.getByLabel("Catch-up window (days)").fill("14");
+  await page.getByLabel("Raw evidence retention (days)").fill("60");
+  await page.getByRole("button", { name: "Save preparation & retention" }).click();
+
+  await expect.poll(() => requests.find(request => request.path === "/api/v2/settings/automation" && request.method === "PUT")?.body).toEqual({
+    enabled: true,
+    generation_time: "06:45",
+    catch_up_days: 14,
+    raw_retention_days: 60,
+    audit_retention_days: 365,
+    recovery_retention_days: 30,
+    expected_updated_at: null
+  });
+  await expect(page.locator("#automation-status")).toContainText("Automatic preparation is on");
+  await expect(page.locator("#automation-status")).toContainText("no Markdown is written automatically");
 });
 
 test("refocused Daily exposes server failures", async ({ page }) => {
