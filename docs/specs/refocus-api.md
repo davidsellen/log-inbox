@@ -55,6 +55,12 @@ The endpoint never creates a day, snapshot, revision, folder, or Markdown file. 
 
 Snapshot evidence carries an `available` flag. Expired raw evidence remains represented by its immutable ID, digest, and review decision; it makes `evidence_complete` false but does not by itself make the candidate stale. Only a live automated event absent from the snapshot, or a changed trusted manual-entry set, requires regeneration.
 
+### `GET /api/v2/daily/overview`
+
+Requires the session cookie and `logs:read`. It returns profile-local `today`, the IANA timezone and server time, summary counts, and at most 1–31 recent meaningful day records. Today is always present; untouched empty past dates are omitted. The bounded discovery window is returned as `window_start` and is derived from the larger of configured catch-up and raw-retention days, capped at 90 calendar days.
+
+Each day exposes independent generation, review, freshness, scheduling, new-evidence, and expired-evidence facts plus one display status. Counts are exact and do not load event messages. Apply state is considered only when it belongs to the exact current revision. A past day is missed only when it has unhandled automated evidence; manual-only days are shown as notes to review. Browser navigation uses the returned profile-local Today rather than the device calendar.
+
 ## Manual daily entries
 
 ### `POST /api/v2/daily/{YYYY-MM-DD}/manual`

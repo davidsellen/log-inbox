@@ -42,8 +42,11 @@ function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = 
       }
     },
     current_snapshot: { id: "snapshot_1", event_ids: ["evt_1"] },
-    current_snapshot_evidence: [{ event_id: "evt_1", position: 0, event_digest: "digest", disposition: null }],
+    current_snapshot_evidence: [{ event_id: "evt_1", available: true, position: 0, event_digest: "digest", disposition: null }],
     candidate_freshness: freshness,
+    new_evidence_count: freshness === "update_available" ? 1 : 0,
+    expired_evidence_count: 0,
+    evidence_complete: true,
     preview_markdown: "### My notes\n\n- Discussed the trade-off with the team.\n\n### Automated activity\n\n#### Daily workflow\n\n- **Outcome:** Built a predictable Daily review.",
     apply_status: applyStatus
   };
@@ -77,6 +80,7 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
       migrationCompleted = true;
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ operation_id: "refocus_fixture", status: "completed", backup_file: "backup.sqlite3", imported_items: migrationItems.length, cleaned_files: 0, preserved_items: migrationItems.length }) });
     }
+    if (url.pathname === "/api/v2/daily/overview" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ today: "2026-09-08", timezone: "Europe/Stockholm", missed_count: 1, days: [{ local_date: "2026-09-08", status: freshness === "update_available" ? "update_available" : "in_review", event_count: 1, manual_entry_count: 1, revision_number: 1, new_evidence_count: freshness === "update_available" ? 1 : 0, manual_entries_changed: false, expired_evidence_count: 0, schedule_state: null, schedule_error: null }, { local_date: "2026-09-07", status: "missed", event_count: 2, manual_entry_count: 0, revision_number: null, new_evidence_count: 0, manual_entries_changed: false, expired_evidence_count: 0, schedule_state: null, schedule_error: null }] }) });
     if (url.pathname.endsWith("/apply-preview") && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ workspace_id: "workspace_fixture", local_date: "2026-09-08", destination_path: "Work Log/2026/Sep/Daily log 2026-09-08.md", revision_id: "revision_1", revision_content_hash: "a".repeat(64), block_id: "day_fixture", will_create_note: false, template_used: null, previous_block: "<!-- log-inbox:daily:day_fixture:begin -->\nOld\n<!-- log-inbox:daily:day_fixture:end -->", next_block: "<!-- log-inbox:daily:day_fixture:begin -->\nReviewed Daily\n<!-- log-inbox:daily:day_fixture:end -->", expected_old_block_hash: "b".repeat(64), intended_new_block_hash: "c".repeat(64), expected_target_exists: true, expected_original_content_hash: "e".repeat(64), updated_content_hash: "d".repeat(64) }) });
     if (url.pathname.endsWith("/retry") && request.method() === "POST") {
       currentApplyStatus = { ...currentApplyStatus, state: "finalized", failure_reason: null, can_retry: false };
@@ -110,6 +114,8 @@ test("refocused Daily shows one date, destination, notes, and exact preview", as
   await expect(page.getByText("Discussed the trade-off with the team.", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Workstream 1 title")).toHaveValue("Daily workflow");
   await expect(page.locator("#preview")).toContainText("Built a predictable Daily review.");
+  await expect(page.getByRole("button", { name: /Mon, Sep 7 Needs review/i })).toBeVisible();
+  await expect(page.locator("#missed-summary")).toHaveText("1 missed");
 
   await page.getByLabel("Daily log date").fill("2026-09-07");
   await page.getByLabel("Daily log date").dispatchEvent("change");

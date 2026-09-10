@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, Request, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -134,6 +134,11 @@ struct EditDailyCandidateRequest {
 struct GenerateDailyRequest {
     #[serde(default)]
     replace_edited: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct DailyOverviewQuery {
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,6 +277,7 @@ fn build_router(state: AppState) -> Router {
             "/api/v2/migration/cutover",
             get(refocus_cutover_report).post(refocus_commit_cutover),
         )
+        .route("/api/v2/daily/overview", get(refocus_daily_overview))
         .route("/api/v2/daily/{date}", get(refocus_daily_day))
         .route(
             "/api/v2/daily/{date}/apply-preview",
@@ -799,6 +805,154 @@ async fn refocus_daily_day(
         "preview_markdown": preview_markdown,
         "apply_status": apply_status
     })))
+}
+
+async fn refocus_daily_overview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<DailyOverviewQuery>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "logs:read", false)?;
+    let profile = state
+        .store
+        .active_workspace_profile()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::conflict("review Daily settings first"))?;
+    active_refocus_workspace(&state)?;
+    let timezone = profile
+        .timezone
+        .parse::<chrono_tz::Tz>()
+        .map_err(|_| ApiError::internal("the saved workspace timezone is invalid"))?;
+    let today = Utc::now().with_timezone(&timezone).date_naive();
+    let limit = query.limit.unwrap_or(14).clamp(1, 31);
+    let automation = state
+        .store
+        .daily_automation_settings(&profile.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let scan_days = usize::from(
+        automation
+            .catch_up_days
+            .max(automation.raw_retention_days)
+            .min(90),
+    )
+    .max(limit);
+    let dates = (0..scan_days)
+        .map(|offset| today - Duration::days(offset as i64))
+        .collect::<Vec<_>>();
+    let overview_facts = state
+        .store
+        .daily_overview_facts(&profile.id, &profile.timezone, &dates)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut days = Vec::new();
+
+    for facts in overview_facts {
+        if days.len() >= limit {
+            break;
+        }
+        if facts.local_date != today
+            && facts.event_count == 0
+            && facts.manual_entry_count == 0
+            && facts.day.is_none()
+            && facts.schedule_run.is_none()
+        {
+            continue;
+        }
+        let status = daily_overview_status(
+            facts.local_date,
+            today,
+            facts.day.as_ref(),
+            facts.revision.as_ref(),
+            facts.apply_operation.as_ref(),
+            facts.schedule_run.as_ref(),
+            facts.event_count > 0,
+            facts.manual_entry_count > 0,
+            facts.new_evidence_count > 0 || facts.manual_entries_changed,
+        );
+        days.push(json!({
+            "local_date": facts.local_date,
+            "status": status,
+            "event_count": facts.event_count,
+            "manual_entry_count": facts.manual_entry_count,
+            "generation_status": facts.day.as_ref().map(|day| day.generation_status.as_str()),
+            "review_status": facts.day.as_ref().map(|day| day.review_status.as_str()),
+            "freshness": facts.day.as_ref().map(|day| day.freshness.as_str()),
+            "revision_number": facts.revision.as_ref().map(|revision| revision.revision_number),
+            "new_evidence_count": facts.new_evidence_count,
+            "manual_entries_changed": facts.manual_entries_changed,
+            "expired_evidence_count": facts.expired_evidence_count,
+            "evidence_complete": facts.expired_evidence_count == 0,
+            "schedule_state": facts.schedule_run.as_ref().map(|run| run.state.as_str()),
+            "schedule_attempts": facts.schedule_run.as_ref().map(|run| run.attempts),
+            "schedule_retry_at": facts.schedule_run.as_ref().map(|run| run.next_attempt_at),
+            "schedule_error": facts.schedule_run.as_ref().and_then(|run| run.last_error.as_deref()),
+        }));
+    }
+
+    let missed_count = days.iter().filter(|day| day["status"] == "missed").count();
+    let update_count = days
+        .iter()
+        .filter(|day| day["status"] == "update_available")
+        .count();
+    let failed_count = days
+        .iter()
+        .filter(|day| day["status"] == "generation_failed")
+        .count();
+    Ok(Json(json!({
+        "workspace_id": profile.id,
+        "server_now": Utc::now(),
+        "today": today,
+        "timezone": profile.timezone,
+        "missed_count": missed_count,
+        "update_count": update_count,
+        "failed_count": failed_count,
+        "window_start": today - Duration::days((scan_days - 1) as i64),
+        "days": days,
+    })))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn daily_overview_status(
+    date: NaiveDate,
+    today: NaiveDate,
+    day: Option<&DailyDay>,
+    revision: Option<&ProposalRevision>,
+    apply: Option<&ApplyOperation>,
+    schedule_run: Option<&log_inbox_core::models::DailyScheduleRun>,
+    has_automated_input: bool,
+    has_manual_input: bool,
+    update_available: bool,
+) -> &'static str {
+    if apply.is_some_and(|operation| operation.state != "finalized") {
+        "apply_attention"
+    } else if day.is_some_and(|day| day.generation_status == "failed")
+        || schedule_run.is_some_and(|run| run.state == "failed")
+    {
+        "generation_failed"
+    } else if update_available || day.is_some_and(|day| day.freshness == "update_available") {
+        "update_available"
+    } else if apply.is_some_and(|operation| operation.state == "finalized")
+        || day.is_some_and(|day| day.review_status == "applied")
+    {
+        "applied"
+    } else if day.is_some_and(|day| day.review_status == "dismissed") {
+        "dismissed"
+    } else if day.is_some_and(|day| matches!(day.generation_status.as_str(), "queued" | "running"))
+    {
+        "generating"
+    } else if revision.is_some() {
+        "in_review"
+    } else if has_automated_input
+        && date < today
+        && !schedule_run.is_some_and(|run| matches!(run.state.as_str(), "pending" | "claimed"))
+    {
+        "missed"
+    } else if has_manual_input {
+        "notes_unreviewed"
+    } else if schedule_run.is_some_and(|run| matches!(run.state.as_str(), "pending" | "claimed")) {
+        "scheduled"
+    } else {
+        "not_started"
+    }
 }
 
 async fn refocus_daily_apply_preview(
@@ -2317,6 +2471,24 @@ mod knowledge_destination_tests {
             &["still-live", "arrived-late"],
             &snapshot
         ));
+    }
+
+    #[test]
+    fn overview_marks_only_unhandled_automated_past_days_as_missed() {
+        let today = NaiveDate::from_ymd_opt(2026, 9, 10).unwrap();
+        let yesterday = NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+        assert_eq!(
+            daily_overview_status(yesterday, today, None, None, None, None, true, false, false),
+            "missed"
+        );
+        assert_eq!(
+            daily_overview_status(yesterday, today, None, None, None, None, false, true, false),
+            "notes_unreviewed"
+        );
+        assert_eq!(
+            daily_overview_status(today, today, None, None, None, None, false, false, false),
+            "not_started"
+        );
     }
 
     fn test_state() -> AppState {

@@ -270,6 +270,20 @@ pub struct DailyScheduleRun {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DailyOverviewFacts {
+    pub local_date: NaiveDate,
+    pub day: Option<DailyDay>,
+    pub revision: Option<ProposalRevision>,
+    pub apply_operation: Option<ApplyOperation>,
+    pub schedule_run: Option<DailyScheduleRun>,
+    pub event_count: u64,
+    pub manual_entry_count: u64,
+    pub manual_entries_changed: bool,
+    pub new_evidence_count: u64,
+    pub expired_evidence_count: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DailyTemplateSnapshot {
     pub workspace_id: String,

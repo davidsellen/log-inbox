@@ -17,6 +17,8 @@ The screen states whether an action is read-only, saves app state, or writes Mar
 
 First run requires a reviewed workspace profile: timezone, relative Daily root, supported filename pattern, optional existing template, and link style. Preview validates and displays an example without saving. Save persists the profile but creates no folders or notes.
 
+After setup, a compact recent-days rail keeps the Daily habit visible without becoming a calendar or vault browser. It always includes profile-local Today and adds only meaningful past dates, with one primary state such as Needs review, Update available, Review, or Applied. Evidence expiry is a secondary warning. Selecting a day opens the same single-day review surface.
+
 Settings also exposes a reviewed, idempotent migration when legacy database or proposal-file state is detected. Migration mounts exist only in the Compose override and are never part of the ordinary runtime.
 
 ## Boundaries

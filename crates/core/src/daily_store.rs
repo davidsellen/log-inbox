@@ -1,9 +1,10 @@
 use crate::{
     daily::resolve_day,
     models::{
-        ApplyOperation, DailyAutomationSettings, DailyDay, DailyRevisionContent, DailyScheduleRun,
-        DailyTemplateSnapshot, DailyWorkstream, EvidenceSnapshot, ManualDailyEntry,
-        PrepareApplyOperation, ProposalRevision, SnapshotEvidence,
+        ApplyOperation, DailyAutomationSettings, DailyDay, DailyOverviewFacts,
+        DailyRevisionContent, DailyScheduleRun, DailyTemplateSnapshot, DailyWorkstream,
+        EvidenceSnapshot, ManualDailyEntry, PrepareApplyOperation, ProposalRevision,
+        SnapshotEvidence,
     },
     store::Store,
 };
@@ -16,6 +17,141 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 impl Store {
+    pub fn daily_overview_facts(
+        &self,
+        workspace_id: &str,
+        timezone: &str,
+        dates: &[NaiveDate],
+    ) -> Result<Vec<DailyOverviewFacts>> {
+        anyhow::ensure!(
+            !dates.is_empty() && dates.len() <= 90,
+            "Daily overview requires between 1 and 90 dates"
+        );
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        let mut facts = Vec::with_capacity(dates.len());
+        for &local_date in dates {
+            let day = transaction
+                .query_row(
+                    "SELECT workspace_id, local_date, timezone, start_utc, end_utc, destination_path, template_revision, block_id, generation_status, review_status, freshness, current_revision_id, created_at, updated_at FROM daily_days WHERE workspace_id = ?1 AND local_date = ?2",
+                    params![workspace_id, local_date.to_string()],
+                    daily_day_from_row,
+                )
+                .optional()?;
+            let resolved = match day.as_ref() {
+                Some(day) => (day.start_utc, day.end_utc),
+                None => {
+                    let day = resolve_day(local_date, timezone)?;
+                    (day.start_utc, day.end_utc)
+                }
+            };
+            let event_count = transaction.query_row(
+                "SELECT COUNT(*) FROM log_events WHERE timestamp >= ?1 AND timestamp < ?2",
+                params![resolved.0.to_rfc3339(), resolved.1.to_rfc3339()],
+                |row| row.get(0),
+            )?;
+            let mut manual_statement = transaction.prepare(
+                "SELECT id FROM manual_daily_entries WHERE workspace_id = ?1 AND local_date = ?2 ORDER BY created_at, id",
+            )?;
+            let manual_ids = manual_statement
+                .query_map(params![workspace_id, local_date.to_string()], |row| {
+                    row.get(0)
+                })?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            drop(manual_statement);
+            let revision = match day
+                .as_ref()
+                .and_then(|day| day.current_revision_id.as_deref())
+            {
+                Some(revision_id) => transaction
+                    .query_row(
+                        "SELECT id, workspace_id, local_date, snapshot_id, revision_number, origin, content_json, content_hash, created_at FROM proposal_revisions WHERE id = ?1",
+                        params![revision_id],
+                        proposal_revision_from_row,
+                    )
+                    .optional()?,
+                None => None,
+            };
+            let stored_manual_ids = match revision.as_ref() {
+                Some(revision) if revision.origin != "advanced_markdown" => {
+                    serde_json::from_value::<DailyRevisionContent>(revision.content.clone())
+                        .context("stored Daily revision is invalid")?
+                        .manual_entry_ids
+                }
+                _ => Vec::new(),
+            };
+            let manual_entries_changed = revision.is_some() && stored_manual_ids != manual_ids;
+            let (new_evidence_count, expired_evidence_count) = match revision.as_ref() {
+                Some(revision) => {
+                    let new_count = transaction.query_row(
+                        r#"SELECT COUNT(*) FROM log_events AS event
+                           WHERE event.timestamp >= ?1 AND event.timestamp < ?2
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM evidence_snapshot_events AS evidence
+                                 WHERE evidence.snapshot_id = ?3 AND evidence.event_id = event.id
+                             )"#,
+                        params![
+                            resolved.0.to_rfc3339(),
+                            resolved.1.to_rfc3339(),
+                            revision.snapshot_id.as_deref().unwrap_or("")
+                        ],
+                        |row| row.get(0),
+                    )?;
+                    let expired_count = match revision.snapshot_id.as_deref() {
+                        Some(snapshot_id) => transaction.query_row(
+                            "SELECT COUNT(*) FROM evidence_snapshot_events WHERE snapshot_id = ?1 AND live_event_id IS NULL",
+                            params![snapshot_id],
+                            |row| row.get(0),
+                        )?,
+                        None => 0,
+                    };
+                    (new_count, expired_count)
+                }
+                None => (0, 0),
+            };
+            let apply_operation = match revision.as_ref() {
+                Some(revision) => transaction
+                    .query_row(
+                        r#"SELECT id, workspace_id, local_date, revision_id,
+                                  revision_content_hash, destination_path,
+                                  expected_old_block_hash, intended_new_block_hash,
+                                  recovery_payload, recovery_path, state, failure_reason,
+                                  created_at, updated_at, expected_target_exists,
+                                  expected_original_content_hash, intended_updated_content_hash,
+                                  temporary_name
+                           FROM apply_operations
+                           WHERE workspace_id = ?1 AND local_date = ?2 AND revision_id = ?3
+                           ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT 1"#,
+                        params![workspace_id, local_date.to_string(), revision.id],
+                        apply_operation_from_row,
+                    )
+                    .optional()?,
+                None => None,
+            };
+            let schedule_run = transaction
+                .query_row(
+                    "SELECT workspace_id, local_date, state, attempts, scheduled_at, timezone, settings_revision, next_attempt_at, claim_token, lease_expires_at, claimed_at, completed_at, last_error, updated_at FROM daily_schedule_runs WHERE workspace_id = ?1 AND local_date = ?2",
+                    params![workspace_id, local_date.to_string()],
+                    daily_schedule_run_from_row,
+                )
+                .optional()?;
+            facts.push(DailyOverviewFacts {
+                local_date,
+                day,
+                revision,
+                apply_operation,
+                schedule_run,
+                event_count,
+                manual_entry_count: manual_ids.len() as u64,
+                manual_entries_changed,
+                new_evidence_count,
+                expired_evidence_count,
+            });
+        }
+        transaction.commit()?;
+        Ok(facts)
+    }
+
     pub fn daily_automation_settings(&self, workspace_id: &str) -> Result<DailyAutomationSettings> {
         let stored = self
             .connect()?
@@ -2244,6 +2380,46 @@ mod tests {
                 .freshness,
             "current"
         );
+    }
+
+    #[test]
+    fn daily_overview_counts_all_events_without_loading_their_payloads() {
+        let store = Store::open(std::env::temp_dir().join(format!(
+            "log-inbox-daily-overview-{}.sqlite3",
+            Uuid::new_v4()
+        )))
+        .expect("store opens");
+        let profile = store
+            .create_pending_workspace_profile(
+                "overview-binding",
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+            )
+            .and_then(|profile| store.activate_workspace_profile(&profile.id))
+            .expect("profile activates");
+        let date = NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+        for sequence in 0..501 {
+            store
+                .insert_event(LogEventInput {
+                    source: "codex/test".to_owned(),
+                    level: Some("info".to_owned()),
+                    timestamp: Some("2026-09-09T12:00:00Z".parse().unwrap()),
+                    message: format!("event {sequence}"),
+                    metadata: None,
+                    fingerprint: None,
+                })
+                .expect("event stores");
+        }
+
+        let overview = store
+            .daily_overview_facts(&profile.id, "UTC", &[date])
+            .expect("overview reads");
+        assert_eq!(overview.len(), 1);
+        assert_eq!(overview[0].event_count, 501);
+        assert_eq!(overview[0].new_evidence_count, 0);
     }
 
     fn apply_operation_fixture() -> (Store, PrepareApplyOperation) {
