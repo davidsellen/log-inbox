@@ -1,5 +1,6 @@
 use log_inbox_core::models::{
-    DailyRevisionContent, ManualDailyEntry, SnapshotEvidence, StoredLogEvent,
+    DailyFact, DailyRevisionContent, DailyWorkstream, ManualDailyEntry, SnapshotEvidence,
+    StoredLogEvent,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -426,7 +427,7 @@ fn build_prompt(
 ) -> Result<String, String> {
     let prompt_events = events_for_prompt(&args.mode, events)
         .into_iter()
-        .map(prompt_event)
+        .map(|event| prompt_event(event, args))
         .collect::<Vec<_>>();
     let event_slice =
         serde_json::to_string_pretty(&prompt_events).map_err(|error| error.to_string())?;
@@ -589,21 +590,27 @@ fn normalized_reference_value(value: &str, label: &str) -> String {
     stable_identity(value)
 }
 
-fn event_groups(events: &[StoredLogEvent]) -> BTreeMap<String, Vec<StoredLogEvent>> {
+fn event_groups(
+    events: &[StoredLogEvent],
+    args: &SuggestMarkdownSummaryArgs,
+) -> BTreeMap<String, Vec<StoredLogEvent>> {
     let mut groups = BTreeMap::new();
     for event in events {
         groups
-            .entry(event_group_key(event))
+            .entry(resolved_event_group_key(event, args))
             .or_insert_with(Vec::new)
             .push(event.clone());
     }
     groups
 }
 
-fn prompt_event(event: &StoredLogEvent) -> PromptEvent<'_> {
+fn prompt_event<'a>(
+    event: &'a StoredLogEvent,
+    args: &SuggestMarkdownSummaryArgs,
+) -> PromptEvent<'a> {
     let (message, message_complete) = bounded_prefix(&event.message, MAX_PROMPT_MESSAGE_BYTES);
     PromptEvent {
-        group_id: event_group_key(event),
+        group_id: resolved_event_group_key(event, args),
         id: &event.id,
         timestamp: &event.timestamp,
         source: &event.source,
@@ -613,6 +620,18 @@ fn prompt_event(event: &StoredLogEvent) -> PromptEvent<'_> {
         metadata: bounded_metadata(&event.metadata),
         fingerprint: event.fingerprint.as_deref(),
     }
+}
+
+fn resolved_event_group_key(event: &StoredLogEvent, args: &SuggestMarkdownSummaryArgs) -> String {
+    let raw = event_group_key(event);
+    args.vault_context
+        .get("group_aliases")
+        .and_then(Value::as_object)
+        .and_then(|aliases| aliases.get(&raw))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&raw)
+        .to_owned()
 }
 
 fn bounded_prefix(value: &str, max_bytes: usize) -> (&str, bool) {
@@ -660,8 +679,8 @@ fn parse_proposal(
             .map(|event| event.id.clone())
             .collect::<Vec<_>>();
         let draft = parse_strict_daily_draft(content, &expected_event_ids)?;
-        validate_daily_workstream_groups(&draft, events)?;
-        validate_durable_lifecycle_evidence(&draft, events)?;
+        validate_daily_workstream_groups(&draft, events, args)?;
+        validate_durable_lifecycle_evidence(&draft, events, args)?;
         return Ok(SummaryProposal {
             target_note: default_target_note(args),
             link_candidates: allowed_canonical_links(args),
@@ -729,8 +748,9 @@ fn workstream_links(value: &Value, args: &SuggestMarkdownSummaryArgs) -> Vec<Str
 fn validate_daily_workstream_groups(
     draft: &StructuredDailyDraft,
     events: &[StoredLogEvent],
+    args: &SuggestMarkdownSummaryArgs,
 ) -> Result<(), String> {
-    let expected = event_groups(events);
+    let expected = event_groups(events, args);
     if draft.workstreams.len() != expected.len() {
         return Err(format!(
             "daily draft returned {} workstreams for {} evidence groups",
@@ -767,6 +787,7 @@ fn validate_daily_workstream_groups(
 fn validate_durable_lifecycle_evidence(
     draft: &StructuredDailyDraft,
     events: &[StoredLogEvent],
+    args: &SuggestMarkdownSummaryArgs,
 ) -> Result<(), String> {
     let workstreams = draft
         .workstreams
@@ -774,7 +795,7 @@ fn validate_durable_lifecycle_evidence(
         .map(|workstream| (workstream.id.as_str(), workstream))
         .collect::<BTreeMap<_, _>>();
     for event in events {
-        let group_id = event_group_key(event);
+        let group_id = resolved_event_group_key(event, args);
         let workstream = workstreams
             .get(group_id.as_str())
             .expect("workstream groups were validated");
@@ -832,7 +853,7 @@ fn render_strict_daily_markdown(
     args: &SuggestMarkdownSummaryArgs,
     events: &[StoredLogEvent],
 ) -> String {
-    let groups = event_groups(events);
+    let groups = event_groups(events, args);
     draft
         .workstreams
         .iter()
@@ -1061,6 +1082,44 @@ fn links_for_group(args: &SuggestMarkdownSummaryArgs, group_id: &str) -> Vec<Str
         .flatten()
         .filter_map(Value::as_str)
         .map(ToOwned::to_owned)
+        .collect()
+}
+
+pub(crate) fn daily_revision_content(
+    draft: StructuredDailyDraft,
+    manual_entry_ids: Vec<String>,
+    args: &SuggestMarkdownSummaryArgs,
+) -> DailyRevisionContent {
+    DailyRevisionContent {
+        schema_version: 1,
+        workstreams: draft
+            .workstreams
+            .into_iter()
+            .map(|workstream| DailyWorkstream {
+                canonical_links: links_for_group(args, &workstream.id),
+                id: workstream.id,
+                title: workstream.title,
+                evidence_event_ids: workstream.evidence_event_ids,
+                outcome: revision_facts(workstream.outcome),
+                decision: revision_facts(workstream.decision),
+                trade_off: revision_facts(workstream.trade_off),
+                validation: revision_facts(workstream.validation),
+                blocker: revision_facts(workstream.blocker),
+                follow_up: revision_facts(workstream.follow_up),
+            })
+            .collect(),
+        manual_entry_ids,
+        open_questions: draft.open_questions,
+    }
+}
+
+fn revision_facts(facts: Vec<StructuredFact>) -> Vec<DailyFact> {
+    facts
+        .into_iter()
+        .map(|fact| DailyFact {
+            text: fact.text,
+            evidence_event_ids: fact.evidence_event_ids,
+        })
         .collect()
 }
 
@@ -1776,7 +1835,14 @@ mod tests {
             reviewed: false,
         };
 
-        let projected = prompt_event(&event);
+        let projected = prompt_event(
+            &event,
+            &SuggestMarkdownSummaryArgs {
+                vault_context: json!({}),
+                mode: "daily-consolidation".to_owned(),
+                task: None,
+            },
+        );
         assert!(!projected.message_complete);
         assert!(!projected.message.ends_with("END"));
         assert_eq!(
@@ -2014,6 +2080,86 @@ mod tests {
                 "https://dev.azure.com/org/project/pullrequest/9374?api-version=7.1"
             )),
             "repo:sweetone|pull-request:9374"
+        );
+    }
+
+    #[test]
+    fn reviewed_group_aliases_merge_evidence_and_authorize_revision_links() {
+        let now = Utc::now();
+        let events = [
+            StoredLogEvent {
+                id: "evt_one".to_owned(),
+                received_at: now,
+                timestamp: now,
+                source: "codex/test".to_owned(),
+                level: "info".to_owned(),
+                message: "First alias".to_owned(),
+                metadata: Map::from_iter([
+                    ("repo".to_owned(), json!("repo-one")),
+                    ("work_item".to_owned(), json!("10")),
+                ]),
+                fingerprint: None,
+                truncated: false,
+                reviewed: false,
+            },
+            StoredLogEvent {
+                id: "evt_two".to_owned(),
+                received_at: now,
+                timestamp: now,
+                source: "codex/test".to_owned(),
+                level: "info".to_owned(),
+                message: "Second alias".to_owned(),
+                metadata: Map::from_iter([
+                    ("repo".to_owned(), json!("repo-two")),
+                    ("work_item".to_owned(), json!("11")),
+                ]),
+                fingerprint: None,
+                truncated: false,
+                reviewed: false,
+            },
+        ];
+        let raw_one = event_group_key(&events[0]);
+        let raw_two = event_group_key(&events[1]);
+        let group_aliases = Map::from_iter([
+            (raw_one, json!("canonical:alpha")),
+            (raw_two, json!("canonical:alpha")),
+        ]);
+        let args = SuggestMarkdownSummaryArgs {
+            vault_context: json!({
+                "candidate_notes": ["[[Products/Alpha]]"],
+                "group_aliases": group_aliases,
+                "workstream_links": {
+                    "canonical:alpha": ["[[Products/Alpha]]"]
+                }
+            }),
+            mode: "daily-consolidation".to_owned(),
+            task: None,
+        };
+        let proposal = parse_proposal(
+            r#"{
+              "workstreams": [{
+                "id": "canonical:alpha",
+                "title": "Alpha",
+                "evidence_event_ids": ["evt_one", "evt_two"],
+                "outcome": [{"text": "Handled both aliases", "evidence_event_ids": ["evt_one", "evt_two"]}],
+                "decision": [], "trade_off": [], "validation": [], "blocker": [], "follow_up": []
+              }],
+              "open_questions": []
+            }"#,
+            &args,
+            &events,
+            "test",
+        )
+        .expect("reviewed aliases merge");
+        let revision = daily_revision_content(
+            proposal.structured_draft.expect("structured draft"),
+            Vec::new(),
+            &args,
+        );
+        assert_eq!(revision.workstreams.len(), 1);
+        assert_eq!(
+            revision.workstreams[0].canonical_links,
+            ["[[Products/Alpha]]"]
         );
     }
 

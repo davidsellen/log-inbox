@@ -857,6 +857,51 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 20 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE context_snapshots (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    local_date TEXT NOT NULL,
+                    snapshot_digest TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(workspace_id, local_date, snapshot_digest),
+                    FOREIGN KEY(workspace_id, local_date)
+                        REFERENCES daily_days(workspace_id, local_date) ON DELETE CASCADE
+                );
+
+                CREATE TABLE proposal_context_snapshots (
+                    revision_id TEXT PRIMARY KEY,
+                    context_snapshot_id TEXT NOT NULL,
+                    FOREIGN KEY(revision_id) REFERENCES proposal_revisions(id) ON DELETE CASCADE,
+                    FOREIGN KEY(context_snapshot_id) REFERENCES context_snapshots(id)
+                );
+
+                CREATE INDEX idx_context_snapshots_day
+                    ON context_snapshots(workspace_id, local_date, created_at DESC);
+
+                CREATE TRIGGER context_snapshots_immutable
+                BEFORE UPDATE ON context_snapshots
+                BEGIN
+                    SELECT RAISE(ABORT, 'context snapshots are immutable');
+                END;
+
+                CREATE TRIGGER proposal_context_snapshots_immutable
+                BEFORE UPDATE ON proposal_context_snapshots
+                BEGIN
+                    SELECT RAISE(ABORT, 'proposal context bindings are immutable');
+                END;
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (20, 'immutable Knowledge context snapshots', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -2308,10 +2353,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 19);
+        assert_eq!(store.schema_version().expect("version reads"), 20);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 19);
+        assert_eq!(store.schema_version().expect("version remains"), 20);
     }
 
     #[test]
@@ -2379,7 +2424,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 19);
+        assert_eq!(verification.schema_version, 20);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());

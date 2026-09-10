@@ -361,6 +361,15 @@ impl Store {
                  )"#,
             params![audit_cutoff.to_rfc3339()],
         )?;
+        let orphan_context_snapshots_deleted = transaction.execute(
+            r#"DELETE FROM context_snapshots
+               WHERE created_at < ?1
+                 AND NOT EXISTS (
+                     SELECT 1 FROM proposal_context_snapshots
+                     WHERE proposal_context_snapshots.context_snapshot_id = context_snapshots.id
+                 )"#,
+            params![audit_cutoff.to_rfc3339()],
+        )? as u64;
         let imported_artifacts_deleted = transaction.execute(
             r#"DELETE FROM legacy_migration_artifacts
                WHERE parse_status = 'valid'
@@ -380,6 +389,7 @@ impl Store {
             reopened_dismissals_deleted,
             stale_revisions_deleted,
             orphan_snapshots_deleted,
+            orphan_context_snapshots_deleted,
             finalized_recovery_scrubbed,
             imported_artifacts_deleted,
             reopened_deferrals_deleted,
@@ -1110,6 +1120,27 @@ impl Store {
             workspace_id,
             local_date,
             snapshot_id,
+            None,
+            origin,
+            content,
+            None,
+        )
+    }
+
+    pub fn create_proposal_revision_with_context(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        snapshot_id: Option<&str>,
+        context_snapshot_id: &str,
+        origin: &str,
+        content: &Value,
+    ) -> Result<ProposalRevision> {
+        self.create_proposal_revision_internal(
+            workspace_id,
+            local_date,
+            snapshot_id,
+            Some(context_snapshot_id),
             origin,
             content,
             None,
@@ -1133,17 +1164,46 @@ impl Store {
             workspace_id,
             local_date,
             snapshot_id,
+            None,
             origin,
             content,
             Some(expected_current_revision_id),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_proposal_revision_if_current_with_context(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        snapshot_id: Option<&str>,
+        context_snapshot_id: &str,
+        origin: &str,
+        content: &Value,
+        expected_current_revision_id: &str,
+    ) -> Result<ProposalRevision> {
+        anyhow::ensure!(
+            !expected_current_revision_id.trim().is_empty(),
+            "expected current revision ID is required"
+        );
+        self.create_proposal_revision_internal(
+            workspace_id,
+            local_date,
+            snapshot_id,
+            Some(context_snapshot_id),
+            origin,
+            content,
+            Some(expected_current_revision_id),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn create_proposal_revision_internal(
         &self,
         workspace_id: &str,
         local_date: NaiveDate,
         snapshot_id: Option<&str>,
+        context_snapshot_id: Option<&str>,
         origin: &str,
         content: &Value,
         expected_current_revision_id: Option<&str>,
@@ -1169,6 +1229,19 @@ impl Store {
         } else {
             None
         };
+        let context_snapshot = if let Some(context_snapshot_id) = context_snapshot_id {
+            let context_snapshot = self
+                .context_snapshot(context_snapshot_id)?
+                .context("proposal Knowledge context snapshot does not exist")?;
+            anyhow::ensure!(
+                context_snapshot.workspace_id == workspace_id
+                    && context_snapshot.local_date == local_date,
+                "proposal Knowledge context snapshot belongs to a different day"
+            );
+            Some(context_snapshot)
+        } else {
+            None
+        };
         if origin != "advanced_markdown" {
             let structured: DailyRevisionContent = serde_json::from_value(content.clone())
                 .context("proposal revision does not match the structured daily schema")?;
@@ -1178,6 +1251,7 @@ impl Store {
                 origin,
                 &structured,
                 snapshot.as_ref(),
+                context_snapshot.as_ref(),
             )?;
         }
         let content_json = serde_json::to_string(content)?;
@@ -1209,6 +1283,12 @@ impl Store {
             "INSERT INTO proposal_revisions (id, workspace_id, local_date, snapshot_id, revision_number, origin, content_json, content_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![id, workspace_id, local_date.to_string(), snapshot_id, revision_number, origin, content_json, content_hash, now],
         )?;
+        if let Some(context_snapshot_id) = context_snapshot_id {
+            transaction.execute(
+                "INSERT INTO proposal_context_snapshots (revision_id, context_snapshot_id) VALUES (?1, ?2)",
+                params![id, context_snapshot_id],
+            )?;
+        }
         transaction.execute(
             "UPDATE daily_days SET current_revision_id = ?1, generation_status = 'ready', review_status = 'in_review', freshness = 'current', updated_at = ?2 WHERE workspace_id = ?3 AND local_date = ?4",
             params![id, now, workspace_id, local_date.to_string()],
@@ -1661,6 +1741,7 @@ impl Store {
         origin: &str,
         content: &DailyRevisionContent,
         snapshot: Option<&EvidenceSnapshot>,
+        context_snapshot: Option<&crate::models::ContextSnapshot>,
     ) -> Result<()> {
         anyhow::ensure!(
             content.schema_version == 1,
@@ -1704,7 +1785,8 @@ impl Store {
             );
             return Ok(());
         };
-        validate_workstream_evidence(&content.workstreams, &snapshot.event_ids)
+        validate_workstream_evidence(&content.workstreams, &snapshot.event_ids)?;
+        validate_context_links(&content.workstreams, context_snapshot)
     }
 
     fn proposal_revision(&self, id: &str) -> Result<Option<ProposalRevision>> {
@@ -2172,17 +2254,10 @@ fn validate_workstream_evidence(
             "workstream ID and title are required"
         );
         anyhow::ensure!(
-            workstream.canonical_links.iter().all(|link| {
-                link.strip_prefix("[[")
-                    .and_then(|value| value.strip_suffix("]]"))
-                    .is_some_and(|name| {
-                        !name.trim().is_empty()
-                            && name.len() <= 512
-                            && !name
-                                .chars()
-                                .any(|character| matches!(character, '\r' | '\n' | '[' | ']'))
-                    })
-            }),
+            workstream
+                .canonical_links
+                .iter()
+                .all(|link| crate::context_store::valid_canonical_wikilink(link)),
             "canonical links must be bounded wikilinks"
         );
         anyhow::ensure!(
@@ -2246,6 +2321,51 @@ fn validate_workstream_evidence(
         covered == expected,
         "proposal does not cover the complete snapshot"
     );
+    Ok(())
+}
+
+fn validate_context_links(
+    workstreams: &[DailyWorkstream],
+    context_snapshot: Option<&crate::models::ContextSnapshot>,
+) -> Result<()> {
+    for workstream in workstreams {
+        let allowed = context_snapshot
+            .and_then(|snapshot| snapshot.payload.get("workstream_links"))
+            .and_then(serde_json::Value::as_object)
+            .and_then(|links| links.get(&workstream.id))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<HashSet<_>>();
+        anyhow::ensure!(
+            workstream
+                .canonical_links
+                .iter()
+                .all(|link| allowed.contains(link.as_str())),
+            "canonical link is not authorized by the frozen Knowledge context"
+        );
+        if !workstream.canonical_links.is_empty() {
+            let expected_evidence = context_snapshot
+                .and_then(|snapshot| snapshot.payload.get("workstream_evidence"))
+                .and_then(serde_json::Value::as_object)
+                .and_then(|groups| groups.get(&workstream.id))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<HashSet<_>>();
+            let actual_evidence = workstream
+                .evidence_event_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>();
+            anyhow::ensure!(
+                !expected_evidence.is_empty() && actual_evidence == expected_evidence,
+                "canonical link is not authorized for this workstream evidence"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -3354,6 +3474,13 @@ mod tests {
                 std::slice::from_ref(&orphan_event.id),
             )
             .unwrap();
+        let orphan_context_snapshot = store
+            .create_context_snapshot(
+                &profile.id,
+                history_date,
+                &serde_json::json!({"schema_version": 1, "workstream_links": {}}),
+            )
+            .unwrap();
 
         let report = store
             .run_retention_maintenance(&settings, Utc::now() + Duration::days(31))
@@ -3361,6 +3488,7 @@ mod tests {
         assert_eq!(report.finalized_recovery_scrubbed, 1);
         assert_eq!(report.stale_revisions_deleted, 1);
         assert_eq!(report.orphan_snapshots_deleted, 1);
+        assert_eq!(report.orphan_context_snapshots_deleted, 1);
         let scrubbed = store.apply_operation(&input.id).unwrap().unwrap();
         assert_eq!(scrubbed.recovery_payload, Some(Vec::new()));
         assert_eq!(scrubbed.recovery_path, None);
@@ -3380,6 +3508,12 @@ mod tests {
         assert!(
             store
                 .evidence_snapshot(&orphan_snapshot.id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .context_snapshot(&orphan_context_snapshot.id)
                 .unwrap()
                 .is_none()
         );

@@ -1,8 +1,8 @@
 use crate::{
     models::{
-        ContextMapping, ExpiredMigrationBackup, IgnoredContextIdentity, KnowledgeCollection,
-        LegacyCutoverImport, LegacyMigrationArtifact, LinkSelector, MigrationItem,
-        MigrationJournalEntry,
+        ContextMapping, ContextSnapshot, ExpiredMigrationBackup, IgnoredContextIdentity,
+        KnowledgeCollection, LegacyCutoverImport, LegacyMigrationArtifact, LinkSelector,
+        MigrationItem, MigrationJournalEntry,
     },
     store::Store,
     workspace::normalize_knowledge_collection_paths,
@@ -23,10 +23,69 @@ const SELECTOR_FIELDS: &[&str] = &[
     "service",
     "module",
     "work_item",
+    "pull_request",
     "branch",
 ];
 
 impl Store {
+    pub fn create_context_snapshot(
+        &self,
+        workspace_id: &str,
+        local_date: chrono::NaiveDate,
+        payload: &serde_json::Value,
+    ) -> Result<ContextSnapshot> {
+        self.daily_day(workspace_id, local_date)?
+            .context("daily day is required before its context snapshot")?;
+        let payload_json = serde_json::to_string(payload)?;
+        validate_context_snapshot_payload(payload)?;
+        anyhow::ensure!(
+            payload_json.len() <= 1024 * 1024,
+            "Knowledge context snapshot exceeds 1048576 bytes"
+        );
+        let snapshot_digest = format!("{:x}", Sha256::digest(payload_json.as_bytes()));
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        let candidate_id = format!("context_snapshot_{}", Uuid::new_v4().simple());
+        transaction.execute(
+            "INSERT OR IGNORE INTO context_snapshots (id, workspace_id, local_date, snapshot_digest, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![candidate_id, workspace_id, local_date.to_string(), snapshot_digest, payload_json, Utc::now().to_rfc3339()],
+        )?;
+        let id = transaction.query_row(
+            "SELECT id FROM context_snapshots WHERE workspace_id = ?1 AND local_date = ?2 AND snapshot_digest = ?3",
+            params![workspace_id, local_date.to_string(), snapshot_digest],
+            |row| row.get::<_, String>(0),
+        )?;
+        transaction.commit()?;
+        self.context_snapshot(&id)?
+            .context("context snapshot missing after creation")
+    }
+
+    pub fn context_snapshot(&self, id: &str) -> Result<Option<ContextSnapshot>> {
+        self.connect()?
+            .query_row(
+                "SELECT id, workspace_id, local_date, snapshot_digest, payload_json, created_at FROM context_snapshots WHERE id = ?1",
+                params![id],
+                context_snapshot_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn proposal_context_snapshot(&self, revision_id: &str) -> Result<Option<ContextSnapshot>> {
+        self.connect()?
+            .query_row(
+                r#"SELECT snapshot.id, snapshot.workspace_id, snapshot.local_date,
+                          snapshot.snapshot_digest, snapshot.payload_json, snapshot.created_at
+                   FROM proposal_context_snapshots AS link
+                   JOIN context_snapshots AS snapshot ON snapshot.id = link.context_snapshot_id
+                   WHERE link.revision_id = ?1"#,
+                params![revision_id],
+                context_snapshot_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn list_knowledge_collections(
         &self,
         workspace_id: &str,
@@ -952,15 +1011,120 @@ fn validate_selector_field(field: &str) -> Result<()> {
 fn validate_markdown_path(value: &str) -> Result<()> {
     let path = Path::new(value);
     anyhow::ensure!(
-        !path.is_absolute() && path.extension().and_then(|value| value.to_str()) == Some("md"),
+        value == value.trim()
+            && value.len() <= 511
+            && !value.chars().any(|character| matches!(
+                character,
+                '\\' | '\r' | '\n' | '[' | ']' | '|' | '#' | '^'
+            ))
+            && !path.is_absolute()
+            && path.extension().and_then(|value| value.to_str()) == Some("md"),
         "canonical note must be a relative Markdown path"
     );
+    let components = path.components().collect::<Vec<_>>();
     anyhow::ensure!(
-        path.components()
+        components
+            .iter()
             .all(|component| matches!(component, Component::Normal(_))),
         "canonical note path cannot contain traversal"
     );
+    let normalized = components
+        .iter()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    anyhow::ensure!(
+        normalized == value,
+        "canonical note path must be normalized"
+    );
+    anyhow::ensure!(
+        components.iter().all(|component| {
+            let value = component.as_os_str().to_string_lossy();
+            ![".git", ".obsidian", ".trash", ".log-inbox"]
+                .iter()
+                .any(|protected| value.eq_ignore_ascii_case(protected))
+        }),
+        "canonical note path enters protected workspace metadata"
+    );
     Ok(())
+}
+
+fn validate_context_snapshot_payload(payload: &serde_json::Value) -> Result<()> {
+    anyhow::ensure!(
+        payload
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(1),
+        "unsupported Knowledge context snapshot schema"
+    );
+    let links = payload
+        .get("workstream_links")
+        .and_then(serde_json::Value::as_object)
+        .context("Knowledge context snapshot requires workstream_links")?;
+    anyhow::ensure!(links.len() <= 500, "too many Knowledge workstream links");
+    for (workstream_id, values) in links {
+        anyhow::ensure!(
+            !workstream_id.trim().is_empty() && workstream_id.len() <= 512,
+            "invalid Knowledge workstream ID"
+        );
+        let values = values
+            .as_array()
+            .context("Knowledge workstream links must be arrays")?;
+        anyhow::ensure!(
+            values.len() <= 16,
+            "too many links for a Knowledge workstream"
+        );
+        for link in values {
+            let link = link
+                .as_str()
+                .context("Knowledge workstream link must be a string")?;
+            anyhow::ensure!(valid_canonical_wikilink(link), "invalid Knowledge wikilink");
+        }
+    }
+    if let Some(evidence) = payload.get("workstream_evidence") {
+        let evidence = evidence
+            .as_object()
+            .context("Knowledge workstream evidence must be an object")?;
+        anyhow::ensure!(
+            evidence.len() <= 500,
+            "too many Knowledge workstream evidence groups"
+        );
+        for (workstream_id, values) in evidence {
+            anyhow::ensure!(
+                links.contains_key(workstream_id),
+                "Knowledge evidence group has no authorized links"
+            );
+            let values = values
+                .as_array()
+                .context("Knowledge workstream evidence must be arrays")?;
+            anyhow::ensure!(
+                !values.is_empty() && values.len() <= 500,
+                "invalid Knowledge workstream evidence count"
+            );
+            for event_id in values {
+                let event_id = event_id
+                    .as_str()
+                    .context("Knowledge evidence ID must be a string")?;
+                anyhow::ensure!(
+                    !event_id.trim().is_empty() && event_id.len() <= 512,
+                    "invalid Knowledge evidence ID"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn valid_canonical_wikilink(link: &str) -> bool {
+    link.strip_prefix("[[")
+        .and_then(|value| value.strip_suffix("]]"))
+        .is_some_and(|target| {
+            !target.trim().is_empty()
+                && link.len() <= 512
+                && !target
+                    .chars()
+                    .any(|character| matches!(character, '\r' | '\n' | '[' | ']' | '|' | '#' | '^'))
+        })
 }
 
 fn validate_source_provenance(identity: Option<&str>, digest: Option<&str>) -> Result<()> {
@@ -1042,6 +1206,38 @@ fn context_mapping_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Context
     })
 }
 
+fn context_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextSnapshot> {
+    let local_date: String = row.get(2)?;
+    let payload_json: String = row.get(4)?;
+    let created_at: String = row.get(5)?;
+    Ok(ContextSnapshot {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        local_date: chrono::NaiveDate::parse_from_str(&local_date, "%Y-%m-%d").map_err(
+            |error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            },
+        )?,
+        snapshot_digest: row.get(3)?,
+        payload: serde_json::from_str(&payload_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, error.into())
+        })?,
+        created_at: DateTime::parse_from_rfc3339(&created_at)
+            .map(|value| value.with_timezone(&Utc))
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            })?,
+    })
+}
+
 fn knowledge_collection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeCollection> {
     let roots_json: String = row.get(4)?;
     let exclusions_json: String = row.get(5)?;
@@ -1118,7 +1314,7 @@ fn parse_time(value: String) -> rusqlite::Result<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{LegacyCutoverImport, WorkspaceProfile};
+    use crate::models::{LegacyCutoverImport, LogEventInput, WorkspaceProfile};
 
     fn active_profile(store: &Store) -> WorkspaceProfile {
         let profile = store
@@ -1132,6 +1328,250 @@ mod tests {
             )
             .unwrap();
         store.activate_workspace_profile(&profile.id).unwrap()
+    }
+
+    #[test]
+    fn freezes_context_snapshots_and_binds_them_to_exact_revisions() {
+        let store = Store::open(std::env::temp_dir().join(format!(
+            "log-inbox-context-snapshot-{}.sqlite3",
+            Uuid::new_v4()
+        )))
+        .expect("store opens");
+        let profile = active_profile(&store);
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+        store
+            .ensure_daily_day(date, "Work Log/2026-09-09.md", None)
+            .expect("day exists");
+        let event = store
+            .insert_event(LogEventInput {
+                source: "codex/test".to_owned(),
+                level: None,
+                timestamp: Some(
+                    chrono::DateTime::parse_from_rfc3339("2026-09-09T12:00:00Z")
+                        .unwrap()
+                        .with_timezone(&Utc),
+                ),
+                message: "Implemented Alpha".to_owned(),
+                metadata: None,
+                fingerprint: None,
+            })
+            .expect("event exists");
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "resolver_version": "exact-v1",
+            "workstream_links": {"repo:alpha": ["[[Products/Alpha]]"]},
+            "workstream_evidence": {"repo:alpha": [event.id.clone()]}
+        });
+        let snapshot = store
+            .create_context_snapshot(&profile.id, date, &payload)
+            .expect("context freezes");
+        let same = store
+            .create_context_snapshot(&profile.id, date, &payload)
+            .expect("same context is idempotent");
+        assert_eq!(same.id, snapshot.id);
+        assert_eq!(same.payload, payload);
+
+        let evidence = store
+            .create_evidence_snapshot(&profile.id, date, std::slice::from_ref(&event.id))
+            .expect("evidence freezes");
+        let content = serde_json::json!({
+            "schema_version": 1,
+            "workstreams": [{
+                "id": "repo:alpha",
+                "title": "Alpha",
+                "evidence_event_ids": [event.id.clone()],
+                "canonical_links": ["[[Products/Alpha]]"],
+                "outcome": [{"text": "Implemented Alpha", "evidence_event_ids": [event.id.clone()]}],
+                "decision": [],
+                "trade_off": [],
+                "validation": [],
+                "blocker": [],
+                "follow_up": []
+            }],
+            "manual_entry_ids": [],
+            "open_questions": []
+        });
+        let revision = store
+            .create_proposal_revision_with_context(
+                &profile.id,
+                date,
+                Some(&evidence.id),
+                &snapshot.id,
+                "generated",
+                &content,
+            )
+            .expect("revision binds context");
+        assert_eq!(
+            store
+                .proposal_context_snapshot(&revision.id)
+                .expect("binding reads")
+                .expect("binding exists")
+                .id,
+            snapshot.id
+        );
+        assert!(
+            store
+                .connect()
+                .unwrap()
+                .execute(
+                    "UPDATE proposal_context_snapshots SET context_snapshot_id = ?1 WHERE revision_id = ?2",
+                    params![snapshot.id, revision.id],
+                )
+                .is_err()
+        );
+        let mut unauthorized = content.clone();
+        unauthorized["workstreams"][0]["canonical_links"] =
+            serde_json::json!(["[[Products/Invented]]"]);
+        assert!(
+            store
+                .create_proposal_revision_if_current_with_context(
+                    &profile.id,
+                    date,
+                    Some(&evidence.id),
+                    &snapshot.id,
+                    "structured_edit",
+                    &unauthorized,
+                    &revision.id,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("not authorized")
+        );
+        assert!(
+            store
+                .connect()
+                .unwrap()
+                .execute(
+                    "UPDATE context_snapshots SET payload_json = '{}' WHERE id = ?1",
+                    params![snapshot.id],
+                )
+                .is_err()
+        );
+
+        let other_date = chrono::NaiveDate::from_ymd_opt(2026, 9, 10).unwrap();
+        store
+            .ensure_daily_day(other_date, "Work Log/2026-09-10.md", None)
+            .unwrap();
+        assert!(
+            store
+                .create_proposal_revision_with_context(
+                    &profile.id,
+                    other_date,
+                    None,
+                    &snapshot.id,
+                    "manual",
+                    &content,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("different day")
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_context_and_cross_workstream_link_reassignment() {
+        let store = Store::open(std::env::temp_dir().join(format!(
+            "log-inbox-context-authorization-{}.sqlite3",
+            Uuid::new_v4()
+        )))
+        .expect("store opens");
+        let profile = active_profile(&store);
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+        store
+            .ensure_daily_day(date, "Work Log/2026-09-09.md", None)
+            .unwrap();
+        assert!(
+            store
+                .create_context_snapshot(&profile.id, date, &serde_json::json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("schema")
+        );
+        assert!(
+            store
+                .create_context_snapshot(
+                    &profile.id,
+                    date,
+                    &serde_json::json!({
+                        "schema_version": 1,
+                        "workstream_links": {"alpha": ["[[Products/Alpha#section]]"]}
+                    }),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("wikilink")
+        );
+
+        let first = store
+            .insert_event(LogEventInput {
+                source: "codex/test".to_owned(),
+                level: None,
+                timestamp: Some("2026-09-09T10:00:00Z".parse().unwrap()),
+                message: "Alpha work".to_owned(),
+                metadata: None,
+                fingerprint: None,
+            })
+            .unwrap();
+        let second = store
+            .insert_event(LogEventInput {
+                source: "codex/test".to_owned(),
+                level: None,
+                timestamp: Some("2026-09-09T11:00:00Z".parse().unwrap()),
+                message: "Beta work".to_owned(),
+                metadata: None,
+                fingerprint: None,
+            })
+            .unwrap();
+        let evidence = store
+            .create_evidence_snapshot(&profile.id, date, &[first.id.clone(), second.id.clone()])
+            .unwrap();
+        let context = store
+            .create_context_snapshot(
+                &profile.id,
+                date,
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "workstream_links": {"alpha": ["[[Products/Alpha]]"]},
+                    "workstream_evidence": {"alpha": [first.id.clone()]}
+                }),
+            )
+            .unwrap();
+        let fact = |text: &str, event_id: &str| serde_json::json!({"text": text, "evidence_event_ids": [event_id]});
+        let content = serde_json::json!({
+            "schema_version": 1,
+            "workstreams": [
+                {
+                    "id": "alpha", "title": "Alpha",
+                    "evidence_event_ids": [second.id.clone()],
+                    "canonical_links": ["[[Products/Alpha]]"],
+                    "outcome": [fact("Beta relabeled as Alpha", &second.id)],
+                    "decision": [], "trade_off": [], "validation": [], "blocker": [], "follow_up": []
+                },
+                {
+                    "id": "beta", "title": "Beta",
+                    "evidence_event_ids": [first.id.clone()],
+                    "canonical_links": [],
+                    "outcome": [fact("Alpha relabeled as Beta", &first.id)],
+                    "decision": [], "trade_off": [], "validation": [], "blocker": [], "follow_up": []
+                }
+            ],
+            "manual_entry_ids": [],
+            "open_questions": []
+        });
+        assert!(
+            store
+                .create_proposal_revision_with_context(
+                    &profile.id,
+                    date,
+                    Some(&evidence.id),
+                    &context.id,
+                    "structured_edit",
+                    &content,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("workstream evidence")
+        );
     }
 
     #[test]

@@ -27,7 +27,7 @@ Settings also exposes a reviewed, idempotent migration when legacy database or p
 
 ## Knowledge collections
 
-The Knowledge tab defines small, named sets of folders that may later supply optional context to Daily generation. Daily remains useful with no collections. Each card shows only the collection name, purpose, included roots, exclusions, and whether it is active; it does not expose a file tree or note browser.
+The Knowledge tab defines small, named sets of folders used to resolve exact canonical note links for new Daily candidates. Daily remains useful with no collections. The current stage reads bounded titles, aliases, and typed references but does not send note text to the model. Each card shows only the collection name, purpose, included roots, exclusions, and whether it is used for exact links; it does not expose a file tree or note browser.
 
 Creating or editing a collection is review-first. The owner enters one to eight relative roots and optional exclusions, then reviews matched/eligible counts and any missing or oversized sources before Save is enabled. Missing reviewed roots are not created. Saving changes only SQLite configuration and never creates, moves, edits, or deletes Markdown. Pause controls whether future candidates may use the collection; Remove deletes only the definition.
 

@@ -74,6 +74,7 @@ Requires the session cookie and `logs:read`. The URL contains a calendar date, n
 - frozen day state, current immutable proposal revision and its evidence snapshot when present;
 - server-derived candidate freshness, separate new/expired evidence counts, and exact active late-evidence deferrals, so late evidence is never presented as part of an older current draft and raw retention is not mistaken for a new arrival;
 - deterministic `preview_markdown` rendered from the structured current revision, trusted manual entries, and evidence dispositions.
+- a deliberately limited `current_context_snapshot` status projection when exact Knowledge matching participated: snapshot identity/digest, resolver version, used/resolved counts, and non-sensitive diagnostic counts. Raw collection roots, note metadata, mappings, and source content are never returned by this logs-only route.
 
 The endpoint never creates a day, snapshot, revision, folder, or Markdown file. Missing workspace review or a replaced mount is `409 Conflict`; malformed dates are `400 Bad Request`.
 
@@ -110,7 +111,9 @@ When new automated evidence exists and the current revision contains structured 
 
 If source evidence from the current snapshot has expired, generation preserves that complete revision and refuses to replace it from a partial event set. Owner-authored manual notes can still be attached without a model call. The owner may explicitly leave each newly arrived event for later; active deferrals are excluded from regeneration and Apply freshness checks only for that exact revision and event digest.
 
-Automated evidence always uses the strict structured model contract, even if an ingest producer claims `entry_kind=manual`. Manual-only days create a reviewable revision without an LLM. Model absence, oversized input, provider failure, invalid JSON, schema mismatch, missing evidence, or unsafe grouping returns `422 Unprocessable Entity`; raw log text is never substituted as a candidate. Generation changes SQLite review state only. It does not create a folder or Markdown file.
+Automated evidence always uses the strict structured model contract, even if an ingest producer claims `entry_kind=manual`. Before the model call, enabled Knowledge collections are read through the workspace capability and used only for reviewed mappings or unique exact title, alias, and typed-reference matches. The server freezes compact resolution provenance and the exact per-workstream link/evidence authorization with the resulting revision; it does not send note text at this stage. Knowledge resolution failure degrades explicitly to evidence-only generation and is recorded as a bounded diagnostic without returning internal paths or errors.
+
+Manual-only days create a reviewable revision without an LLM. Model absence, oversized input, provider failure, invalid JSON, schema mismatch, missing evidence, or unsafe grouping returns `422 Unprocessable Entity`; raw log text is never substituted as a candidate. Generation changes SQLite review state only. It does not create a folder or Markdown file.
 
 ## Review evidence
 

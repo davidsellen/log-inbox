@@ -47,8 +47,14 @@ Raw events expire from `received_at`, while snapshot IDs, digests, ordering, and
 
 Accepted redacted content is stored completely. Ingestion rejects values above the API limits rather than accepting partial evidence. LLM prompt projections have smaller independent limits and never overwrite stored content.
 
-## Vault Link Rules
+## Knowledge Collections and Mappings
 
-`vault_link_rules` stores user-owned selectors and canonical note IDs. Selectors are encoded as structured JSON so one rule can combine multiple fields while note names and folder conventions remain outside the application schema.
+`knowledge_collections` stores workspace-scoped, reviewed include roots and exclusions with a semantic revision digest. Definitions never contain Markdown content and never create, move, or delete workspace files.
 
-Vault-scoped semantic destinations are stored together as versioned JSON preferences keyed by stable vault ID. They contain role, user-owned base path, constrained path template, write mode, and enabled state. Complete structures are validated and replaced atomically. Catalog revisions include note and folder state to protect saves from stale selections; revisions are not used as vault identity. Imported and exported templates contain configuration only and never Markdown contents.
+`context_mappings` stores workspace-scoped user-owned selectors and normalized canonical Markdown paths. All selectors in one mapping must match one evidence event. Exact mappings are preferred; legacy `contains` selectors remain explicit and deterministic. A missing, protected, ambiguous, or otherwise invalid reviewed target authorizes no fallback link. Mapping a repository or product can authorize a link, but only reviewed work-item or pull-request identities can merge otherwise distinct workstreams.
+
+`ignored_context_identities` preserves reviewed migration state for the later curated-diagnostics workflow. It is not yet interpreted as a retrieval instruction.
+
+`context_snapshots` stores an immutable, size-bounded resolution record for one workspace day. It contains semantic collection/mapping revisions, a compact catalog-resolution digest, only the canonical notes actually resolved, resolution reasons, group aliases, and exact per-workstream link/evidence authorization. It does not retain the full note catalog or note bodies. `proposal_context_snapshots` immutably binds one proposal revision to one context snapshot; stale unreferenced snapshots expire with audit retention.
+
+Legacy `vault_link_rules`, semantic destination preferences, and catalog records are migration inputs only and have no runtime API or writer authority.

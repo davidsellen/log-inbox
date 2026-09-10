@@ -1009,6 +1009,13 @@ async fn refocus_daily_day(
             .map_err(|error| ApiError::internal(error.to_string()))?,
         None => Vec::new(),
     };
+    let current_context_snapshot = match current_revision.as_ref() {
+        Some(revision) => state
+            .store
+            .proposal_context_snapshot(&revision.id)
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+        None => None,
+    };
     let active_deferrals = match current_revision.as_ref() {
         Some(revision) => state
             .store
@@ -1098,6 +1105,7 @@ async fn refocus_daily_day(
         "manual_entries": manual_entries,
         "current_revision": current_revision,
         "current_snapshot": current_snapshot,
+        "current_context_snapshot": current_context_snapshot.as_ref().map(public_context_snapshot),
         "current_snapshot_evidence": current_snapshot_evidence,
         "active_late_evidence_deferrals": active_deferrals,
         "candidate_freshness": candidate_freshness,
@@ -1377,6 +1385,33 @@ fn public_apply_operation(operation: &ApplyOperation) -> Value {
         "created_at": operation.created_at,
         "updated_at": operation.updated_at,
         "can_retry": matches!(operation.state.as_str(), "failed" | "reconciliation_required" | "prepared" | "writing" | "written")
+    })
+}
+
+fn public_context_snapshot(snapshot: &log_inbox_core::models::ContextSnapshot) -> Value {
+    let diagnostics = snapshot.payload.get("diagnostics");
+    let count = |field: &str| {
+        diagnostics
+            .and_then(|value| value.get(field))
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+    };
+    json!({
+        "id": snapshot.id,
+        "snapshot_digest": snapshot.snapshot_digest,
+        "created_at": snapshot.created_at,
+        "resolver_version": snapshot.payload.get("resolver_version").and_then(Value::as_str),
+        "used_note_count": snapshot.payload.get("used_notes").and_then(Value::as_array).map(Vec::len).unwrap_or_default(),
+        "resolved_group_count": snapshot.payload.get("resolved_groups").and_then(Value::as_array).map(Vec::len).unwrap_or_default(),
+        "diagnostics": {
+            "missing_root_count": diagnostics.and_then(|value| value.get("missing_roots")).and_then(Value::as_array).map(Vec::len).unwrap_or_default(),
+            "oversized_note_count": count("oversized_note_count"),
+            "unreadable_note_count": count("unreadable_note_count"),
+            "invalid_note_count": count("invalid_note_count"),
+            "invalid_mapping_count": count("invalid_mapping_count"),
+            "ambiguous_group_count": count("ambiguous_group_count"),
+            "resolution_failed": diagnostics.and_then(|value| value.get("resolution_error_code")).is_some(),
+        }
     })
 }
 
@@ -2225,9 +2260,24 @@ async fn generate_daily_candidate(
                 content.manual_entry_ids = manual_entry_ids;
                 let content = serde_json::to_value(content)
                     .map_err(|error| ApiError::internal(error.to_string()))?;
-                return state
+                let context_snapshot = state
                     .store
-                    .create_proposal_revision_if_current(
+                    .proposal_context_snapshot(&current.id)
+                    .map_err(|error| ApiError::internal(error.to_string()))?;
+                let revision = if let Some(context_snapshot) = context_snapshot.as_ref() {
+                    state
+                        .store
+                        .create_proposal_revision_if_current_with_context(
+                            &profile.id,
+                            local_date,
+                            Some(snapshot_id),
+                            &context_snapshot.id,
+                            "structured_edit",
+                            &content,
+                            &current.id,
+                        )
+                } else {
+                    state.store.create_proposal_revision_if_current(
                         &profile.id,
                         local_date,
                         Some(snapshot_id),
@@ -2235,7 +2285,8 @@ async fn generate_daily_candidate(
                         &content,
                         &current.id,
                     )
-                    .map_err(|error| ApiError::conflict(error.to_string()));
+                };
+                return revision.map_err(|error| ApiError::conflict(error.to_string()));
             }
             return Err(ApiError::conflict(
                 "Some source evidence for this candidate has expired. Log Inbox will not replace a complete reviewed record from partial evidence. The existing revision is preserved; restore the missing source evidence before regenerating.",
@@ -2278,8 +2329,67 @@ async fn generate_daily_candidate(
         .store
         .create_evidence_snapshot(&profile.id, local_date, &event_ids)
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    let collections = state
+        .store
+        .list_knowledge_collections(&profile.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mappings = state
+        .store
+        .list_context_mappings(&profile.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let knowledge_configuration_digest =
+        knowledge::configuration_digest(&workspace, &collections, &mappings)
+            .map_err(ApiError::internal)?;
+    let (desired_context_payload, mut vault_context) =
+        match knowledge::resolve_knowledge(&workspace, &collections, &mappings, &evidence.events) {
+            Ok(Some(resolution)) => (Some(resolution.snapshot_payload), resolution.vault_context),
+            Ok(None) => (
+                None,
+                json!({
+                    "candidate_notes": [],
+                    "workstream_links": {}
+                }),
+            ),
+            Err(_) => (
+                Some(json!({
+                    "schema_version": 1,
+                    "resolver_version": "exact-v1",
+                    "root_binding": workspace.root_binding(),
+                    "configuration_digest": knowledge_configuration_digest,
+                    "workstream_links": {},
+                    "workstream_evidence": {},
+                    "diagnostics": { "resolution_error_code": "resolution_failed" }
+                })),
+                json!({
+                    "candidate_notes": [],
+                    "workstream_links": {},
+                    "knowledge": {
+                        "resolver_version": "exact-v1",
+                        "context_is_background_only": true,
+                        "excerpts": []
+                    }
+                }),
+            ),
+        };
+    let desired_context_digest = desired_context_payload
+        .as_ref()
+        .map(knowledge::context_snapshot_digest)
+        .transpose()
+        .map_err(ApiError::unprocessable)?;
+    let current_context_snapshot = match current.as_ref() {
+        Some(revision) => state
+            .store
+            .proposal_context_snapshot(&revision.id)
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+        None => None,
+    };
+    let context_is_current = current_context_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.snapshot_digest.as_str())
+        == desired_context_digest.as_deref();
     if let Some(current) = current.as_ref()
         && current.snapshot_id.as_deref() == Some(snapshot.id.as_str())
+        && context_is_current
     {
         let mut content = serde_json::from_value::<DailyRevisionContent>(current.content.clone())
             .map_err(|error| ApiError::internal(error.to_string()))?;
@@ -2289,9 +2399,20 @@ async fn generate_daily_candidate(
         content.manual_entry_ids = manual_entry_ids;
         let content =
             serde_json::to_value(content).map_err(|error| ApiError::internal(error.to_string()))?;
-        let revised = state
-            .store
-            .create_proposal_revision_if_current(
+        let revised = if let Some(context_snapshot) = current_context_snapshot.as_ref() {
+            state
+                .store
+                .create_proposal_revision_if_current_with_context(
+                    &profile.id,
+                    local_date,
+                    Some(&snapshot.id),
+                    &context_snapshot.id,
+                    "structured_edit",
+                    &content,
+                    &current.id,
+                )
+        } else {
+            state.store.create_proposal_revision_if_current(
                 &profile.id,
                 local_date,
                 Some(&snapshot.id),
@@ -2299,7 +2420,8 @@ async fn generate_daily_candidate(
                 &content,
                 &current.id,
             )
-            .map_err(|error| ApiError::conflict(error.to_string()))?;
+        }
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
         return Ok(revised);
     }
     if current
@@ -2316,12 +2438,20 @@ async fn generate_daily_candidate(
         .store
         .set_daily_generation_status(&profile.id, local_date, "running")
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    if let Some(context) = vault_context.as_object_mut() {
+        context.insert(
+            "daily_note".to_owned(),
+            Value::String(window.destination_path.clone()),
+        );
+        if let Some(digest) = desired_context_digest.as_ref() {
+            context.insert(
+                "link_context_revision".to_owned(),
+                Value::String(digest.clone()),
+            );
+        }
+    }
     let args = llm::SuggestMarkdownSummaryArgs {
-        vault_context: json!({
-            "daily_note": window.destination_path,
-            "candidate_notes": [],
-            "workstream_links": {}
-        }),
+        vault_context,
         mode: "daily-consolidation".to_owned(),
         task: Some(
             "Create a concise, evidence-backed daily engineering record. Preserve distinct outcomes, decisions, trade-offs, validation, blockers, and follow-up."
@@ -2330,7 +2460,7 @@ async fn generate_daily_candidate(
     };
     let proposal = match llm::generate_automated_daily_summary(
         state.llm_config.as_ref(),
-        args,
+        args.clone(),
         evidence.events,
     )
     .await
@@ -2347,27 +2477,36 @@ async fn generate_daily_candidate(
     let draft = proposal
         .structured_draft
         .ok_or_else(|| ApiError::internal("daily generator omitted structured content"))?;
-    let content = json!({
-        "schema_version": 1,
-        "workstreams": draft.workstreams,
-        "manual_entry_ids": manual_entry_ids,
-        "open_questions": draft.open_questions
-    });
+    let content = serde_json::to_value(llm::daily_revision_content(draft, manual_entry_ids, &args))
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     let origin = if current.is_some() {
         "regenerated"
     } else {
         "generated"
     };
-    let revision = state
-        .store
-        .create_proposal_revision(
+    let revision = if let Some(payload) = desired_context_payload.as_ref() {
+        let context_snapshot = state
+            .store
+            .create_context_snapshot(&profile.id, local_date, payload)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        state.store.create_proposal_revision_with_context(
+            &profile.id,
+            local_date,
+            Some(&snapshot.id),
+            &context_snapshot.id,
+            origin,
+            &content,
+        )
+    } else {
+        state.store.create_proposal_revision(
             &profile.id,
             local_date,
             Some(&snapshot.id),
             origin,
             &content,
         )
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+    }
+    .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(revision)
 }
 
@@ -2570,9 +2709,24 @@ async fn refocus_edit_daily_candidate(
     }
     let content = serde_json::to_value(input.content)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let revision = state
+    let context_snapshot = state
         .store
-        .create_proposal_revision_if_current(
+        .proposal_context_snapshot(&current.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let revision = if let Some(context_snapshot) = context_snapshot.as_ref() {
+        state
+            .store
+            .create_proposal_revision_if_current_with_context(
+                &profile.id,
+                local_date,
+                current.snapshot_id.as_deref(),
+                &context_snapshot.id,
+                "structured_edit",
+                &content,
+                &input.expected_revision_id,
+            )
+    } else {
+        state.store.create_proposal_revision_if_current(
             &profile.id,
             local_date,
             current.snapshot_id.as_deref(),
@@ -2580,16 +2734,17 @@ async fn refocus_edit_daily_candidate(
             &content,
             &input.expected_revision_id,
         )
-        .map_err(|error| {
-            if error
-                .to_string()
-                .contains("current proposal revision changed")
-            {
-                ApiError::conflict("the Daily candidate changed; reload and try again")
-            } else {
-                ApiError::bad_request(error.to_string())
-            }
-        })?;
+    }
+    .map_err(|error| {
+        if error
+            .to_string()
+            .contains("current proposal revision changed")
+        {
+            ApiError::conflict("the Daily candidate changed; reload and try again")
+        } else {
+            ApiError::bad_request(error.to_string())
+        }
+    })?;
     Ok(Json(revision))
 }
 
@@ -3023,6 +3178,41 @@ mod knowledge_destination_tests {
             daily_overview_status(today, today, None, None, None, None, false, false, false),
             "not_started"
         );
+    }
+
+    #[test]
+    fn daily_context_projection_never_exposes_catalog_or_mapping_metadata() {
+        let snapshot = log_inbox_core::models::ContextSnapshot {
+            id: "context_1".to_owned(),
+            workspace_id: "workspace_1".to_owned(),
+            local_date: NaiveDate::from_ymd_opt(2026, 9, 9).unwrap(),
+            snapshot_digest: "a".repeat(64),
+            payload: json!({
+                "schema_version": 1,
+                "resolver_version": "exact-v1",
+                "root_binding": "private-root-binding",
+                "catalog_note_count": 42,
+                "used_notes": [{"path": "Private/Alpha.md", "title": "Alpha"}],
+                "resolved_groups": [{"canonical_note_path": "Private/Alpha.md"}],
+                "mappings": [{"selectors": [{"field": "repo", "value": "secret"}]}],
+                "workstream_links": {},
+                "diagnostics": {"missing_roots": ["Private/Missing"]}
+            }),
+            created_at: Utc::now(),
+        };
+        let projected = public_context_snapshot(&snapshot);
+        let text = projected.to_string();
+        assert_eq!(projected["used_note_count"], 1);
+        assert_eq!(projected["resolved_group_count"], 1);
+        assert_eq!(projected["diagnostics"]["missing_root_count"], 1);
+        for private in [
+            "Private/Alpha.md",
+            "Private/Missing",
+            "private-root-binding",
+            "secret",
+        ] {
+            assert!(!text.contains(private));
+        }
     }
 
     fn test_state() -> AppState {

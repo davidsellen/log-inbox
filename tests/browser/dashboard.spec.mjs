@@ -418,7 +418,7 @@ test("Knowledge edits, pauses, and removes definitions without implying file cha
 
   await page.getByRole("button", { name: "Pause" }).click();
   await expect(page.getByText("Paused", { exact: true })).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("will remain unused when Daily context is enabled");
+  await expect(page.getByRole("status")).toContainText("paused and will not be used by Daily");
   await page.getByRole("button", { name: "Remove" }).click();
   await expect(page.getByRole("heading", { name: "No collections yet" })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("Markdown files were not changed");

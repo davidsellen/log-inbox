@@ -7,10 +7,11 @@ The model turns one server-resolved day of bounded automated evidence into a str
 1. The server resolves the selected calendar day and reads its eligible events.
 2. Rust groups events using namespaced repository, work-item, pull-request, task, session, and source identities.
 3. The service freezes event IDs and content digests in an immutable evidence snapshot.
-4. The configured OpenAI-compatible endpoint receives the bounded automated projection.
-5. Rust validates the response schema, group membership, evidence coverage, factual evidence IDs, canonical links, and text limits.
-6. A valid result becomes an immutable proposal revision in SQLite. Invalid, incomplete, or unavailable model output is a visible failure.
-7. The server renders the reviewed structure deterministically for preview. Only explicit dashboard Apply invokes the Markdown writer.
+4. When Knowledge collections or mappings are enabled, the server resolves reviewed mappings and unique exact title, alias, or typed-reference matches. Conflicting matches produce no link. Repository-wide mappings may authorize a link but cannot merge distinct work items; only reviewed work-item/PR relationships may alias groups.
+5. The configured OpenAI-compatible endpoint receives the bounded automated projection and server-authorized canonical links. Note text is not retrieved or sent in the current exact-link stage.
+6. Rust validates the response schema, group membership, evidence coverage, factual evidence IDs, canonical links, and text limits.
+7. A valid result becomes an immutable proposal revision bound to its evidence and optional Knowledge snapshots in SQLite. Invalid, incomplete, or unavailable model output is a visible failure.
+8. The server renders the reviewed structure deterministically for preview. Only explicit dashboard Apply invokes the Markdown writer.
 
 Manual-only days need no model. Mixed days send only automated evidence to the provider and keep manual prose verbatim in a separate section. There is no raw-log or free-form Markdown fallback.
 
@@ -20,7 +21,7 @@ Each supplied workstream may contain evidence-backed Outcome, Decision, Trade-of
 
 Model-controlled text is escaped. Active links come only from server-owned validated context. Provider requests, responses, retries, concurrency, and total input are bounded independently from raw evidence retention.
 
-Optional Knowledge retrieval and UI-managed model connections are M4 and M5 roadmap work; a useful Daily candidate does not depend on them.
+Optional Knowledge text retrieval and UI-managed model connections remain M4 and M5 roadmap work; a useful Daily candidate does not depend on them. The active exact-link stage reads bounded note metadata only. It freezes a compact resolution digest, the notes actually linked, matching reasons, group aliases, and link authorization instead of retaining the complete catalog in a proposal snapshot.
 
 ## Knowledge source safety
 

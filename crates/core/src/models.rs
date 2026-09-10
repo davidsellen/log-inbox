@@ -144,6 +144,16 @@ pub struct KnowledgeCollection {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContextSnapshot {
+    pub id: String,
+    pub workspace_id: String,
+    pub local_date: NaiveDate,
+    pub snapshot_digest: String,
+    pub payload: Value,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackupVerification {
     pub path: PathBuf,
@@ -334,6 +344,7 @@ pub struct RetentionReport {
     pub reopened_dismissals_deleted: u64,
     pub stale_revisions_deleted: u64,
     pub orphan_snapshots_deleted: u64,
+    pub orphan_context_snapshots_deleted: u64,
     pub finalized_recovery_scrubbed: u64,
     pub imported_artifacts_deleted: u64,
     pub reopened_deferrals_deleted: u64,
