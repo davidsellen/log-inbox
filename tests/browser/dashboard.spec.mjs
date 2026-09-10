@@ -6,7 +6,9 @@ const dailyHtml = await readFile(
   "utf8"
 );
 
-function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = "current", applyStatus = null, dismissed = false } = {}) {
+function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = "current", applyStatus = null, dismissed = false, lateEvidence = false, lateDeferred = false } = {}) {
+  const events = [{ id: "evt_1", source: "codex/fedora", timestamp: `${date}T09:00:00Z`, message: "Validated the Daily workflow." }];
+  if (lateEvidence) events.push({ id: "evt_late", source: "codex/fedora", timestamp: `${date}T10:00:00Z`, message: "Late deployment evidence." });
   return {
     workspace_id: "workspace_fixture",
     local_date: date,
@@ -16,8 +18,8 @@ function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = 
     destination_path: `Work Log/2026/Sep/Daily log ${date}.md`,
     day: { generation_status: "ready", review_status: dismissed ? "dismissed" : "in_review" },
     automated_evidence: {
-      events: [{ id: "evt_1", source: "codex/fedora", timestamp: `${date}T09:00:00Z`, message: "Validated the Daily workflow." }],
-      returned_count: 1,
+      events,
+      returned_count: events.length,
       truncated: false,
       limit: 500
     },
@@ -43,8 +45,9 @@ function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = 
     },
     current_snapshot: { id: "snapshot_1", event_ids: ["evt_1"] },
     current_snapshot_evidence: [{ event_id: "evt_1", available: true, position: 0, event_digest: "digest", disposition: null }],
-    candidate_freshness: freshness,
-    new_evidence_count: freshness === "update_available" ? 1 : 0,
+    active_late_evidence_deferrals: lateDeferred ? [{ workspace_id: "workspace_fixture", local_date: date, revision_id: "revision_1", event_id: "evt_late", available: true, event_digest: "late_digest", deferred_at: `${date}T11:00:00Z`, reopened_at: null }] : [],
+    candidate_freshness: lateEvidence ? (lateDeferred ? "current" : "update_available") : freshness,
+    new_evidence_count: lateEvidence ? (lateDeferred ? 0 : 1) : (freshness === "update_available" ? 1 : 0),
     expired_evidence_count: 0,
     evidence_complete: true,
     preview_markdown: "### My notes\n\n- Discussed the trade-off with the team.\n\n### Automated activity\n\n#### Daily workflow\n\n- **Outcome:** Built a predictable Daily review.",
@@ -52,7 +55,7 @@ function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = 
   };
 }
 
-async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshness = "current", workspaceProfile = undefined, applyStatus = null, migrationItems = [] } = {}) {
+async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshness = "current", workspaceProfile = undefined, applyStatus = null, migrationItems = [], lateEvidence = false } = {}) {
   const requests = [];
   let loggedIn = false;
   let currentApplyStatus = applyStatus;
@@ -60,6 +63,7 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
   let dismissed = false;
   let automationSaved = false;
   let automationSettings = { workspace_id: "workspace_fixture", enabled: false, generation_time: "00:15", catch_up_days: 7, raw_retention_days: 30, audit_retention_days: 365, recovery_retention_days: 30, updated_at: "1970-01-01T00:00:00Z" };
+  let lateDeferred = false;
   let activeProfile = workspaceProfile === undefined ? { id: "workspace_fixture", status: "active", root_binding: "binding_fixture", timezone: "Europe/Stockholm", daily_root: "Work Log", daily_pattern: "{year}/{month_name}/Daily log {month_name} {day}.md", template_path: null, link_style: "markdown", created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z" } : workspaceProfile;
   await page.route("http://daily.log-inbox.test/**", async route => {
     const request = route.request();
@@ -100,7 +104,11 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
     const match = url.pathname.match(/^\/api\/v2\/daily\/(\d{4}-\d{2}-\d{2})$/);
     if (match && request.method() === "GET") {
       if (dailyStatus !== 200) return route.fulfill({ status: dailyStatus, contentType: "application/json", body: JSON.stringify({ error: "Daily fixture unavailable" }) });
-      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dailyResponse(match[1], { origin, freshness, applyStatus: currentApplyStatus, dismissed })) });
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dailyResponse(match[1], { origin, freshness, applyStatus: currentApplyStatus, dismissed, lateEvidence, lateDeferred })) });
+    }
+    if (url.pathname.endsWith("/late-evidence/evt_late") && ["POST", "DELETE"].includes(request.method())) {
+      lateDeferred = request.method() === "POST";
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ deferral: { revision_id: "revision_1", event_id: "evt_late", reopened_at: lateDeferred ? null : "2026-09-08T12:00:00Z" } }) });
     }
     if (url.pathname.endsWith("/dismiss") && ["POST", "DELETE"].includes(request.method())) {
       dismissed = request.method() === "POST";
@@ -295,4 +303,22 @@ test("refocused Daily dismisses and reopens the exact visible candidate", async 
   const dismissRequests = requests.filter(request => request.path.endsWith("/dismiss"));
   expect(dismissRequests.map(request => request.method)).toEqual(["POST", "DELETE"]);
   expect(dismissRequests[0].body).toEqual({ expected_revision_id: "revision_1" });
+});
+
+test("refocused Daily explicitly leaves late evidence for later and reopens it", async ({ page }) => {
+  const requests = await mockDaily(page, { lateEvidence: true });
+  await openDaily(page);
+
+  await page.getByText("Review source events and include or omit them").click();
+  await expect(page.getByText("Late deployment evidence.")).toBeVisible();
+  await page.getByRole("button", { name: "Leave for later" }).click();
+  await expect(page.getByText("Left for later — not part of this revision")).toBeVisible();
+  await expect(page.locator("#evidence-count")).toContainText("1 left for later");
+  await expect(page.getByRole("status")).toContainText("preserved revision can now be reviewed and applied");
+  await page.getByRole("button", { name: "Reopen", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Leave for later" })).toBeVisible();
+
+  const lateRequests = requests.filter(request => request.path.endsWith("/late-evidence/evt_late"));
+  expect(lateRequests.map(request => request.method)).toEqual(["POST", "DELETE"]);
+  expect(lateRequests[0].body).toEqual({ expected_revision_id: "revision_1" });
 });

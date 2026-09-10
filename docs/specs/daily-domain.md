@@ -45,7 +45,7 @@ An empty calendar date is not a missed day. A missed day has eligible unresolved
 
 An evidence snapshot is immutable and belongs to one day. It contains an ordered list of event IDs plus a digest of each redacted ingestion envelope. Event time determines day attribution; receipt time determines raw retention. A generation attempt always names one snapshot.
 
-If any event in the current snapshot has expired, generation never replaces that revision from the surviving subset. An unchanged request returns the preserved revision, and manual-note-only changes may create a new structured revision against the original snapshot. New automated evidence requires restoration of the missing source evidence before regeneration; no partial model summary is presented as a complete replacement.
+If any event in the current snapshot has expired, generation never replaces that revision from the surviving subset. An unchanged request returns the preserved revision, and manual-note-only changes may create a new structured revision against the original snapshot. New automated evidence requires restoration of the missing source evidence before regeneration, or an explicit event-by-event deferral bound to the preserved revision; no partial model summary is presented as a complete replacement.
 
 Future-dated events outside the configured tolerance are quarantined. They remain inspectable but cannot enter automatic generation until explicitly resolved. Expired evidence cannot be reconstructed from a surviving summary.
 
@@ -66,6 +66,8 @@ A review decision addresses one evidence digest in one snapshot. Its disposition
 Editing rendered Markdown does not create review decisions. Applying is allowed only when every snapshot item has a disposition and every factual evidence reference validates against that snapshot.
 
 A dismissal is an explicit reversible resolution of one exact proposal revision and content hash. It suppresses reminders without changing the revision, evidence, or Markdown. A later event makes the day Update available instead of inheriting the dismissal. Reopening restores review of the same revision and discloses any expired source evidence.
+
+A late-evidence deferral is a separate reversible resolution of one event ID and digest against one current revision. It means “leave this event for a future reconciliation,” not Include, Omit, reviewed, or deleted. Active deferrals are excluded from that revision's freshness and Apply checks. They close automatically when a new revision becomes current, and later events never inherit them.
 
 ### Apply operation
 

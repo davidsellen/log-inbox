@@ -48,7 +48,7 @@ Requires the session cookie and `logs:read`. The URL contains a calendar date, n
 - bounded automated evidence and truncation state;
 - trusted owner-authored manual entries stored outside ingest;
 - frozen day state, current immutable proposal revision and its evidence snapshot when present;
-- server-derived candidate freshness and separate new/expired evidence counts, so late evidence is never presented as part of an older current draft and raw retention is not mistaken for a new arrival;
+- server-derived candidate freshness, separate new/expired evidence counts, and exact active late-evidence deferrals, so late evidence is never presented as part of an older current draft and raw retention is not mistaken for a new arrival;
 - deterministic `preview_markdown` rendered from the structured current revision, trusted manual entries, and evidence dispositions.
 
 The endpoint never creates a day, snapshot, revision, folder, or Markdown file. Missing workspace review or a replaced mount is `409 Conflict`; malformed dates are `400 Bad Request`.
@@ -84,6 +84,8 @@ Requires `draft:generate`, the session cookie, an allowed Host/Origin, and the m
 
 When new automated evidence exists and the current revision contains structured edits, the server returns `409 Conflict` unless `replace_edited` is explicitly true. The Daily UI asks for confirmation before sending that authorization. A successful replacement remains a new immutable `regenerated` revision; the edited revision is retained in history.
 
+If source evidence from the current snapshot has expired, generation preserves that complete revision and refuses to replace it from a partial event set. Owner-authored manual notes can still be attached without a model call. The owner may explicitly leave each newly arrived event for later; active deferrals are excluded from regeneration and Apply freshness checks only for that exact revision and event digest.
+
 Automated evidence always uses the strict structured model contract, even if an ingest producer claims `entry_kind=manual`. Manual-only days create a reviewable revision without an LLM. Model absence, oversized input, provider failure, invalid JSON, schema mismatch, missing evidence, or unsafe grouping returns `422 Unprocessable Entity`; raw log text is never substituted as a candidate. Generation changes SQLite review state only. It does not create a folder or Markdown file.
 
 ## Review evidence
@@ -95,6 +97,10 @@ Requires `review:write` and CSRF. Body names the exact `expected_revision_id`, a
 ### `DELETE /api/v2/daily/{YYYY-MM-DD}/evidence/{event_id}`
 
 Requires `review:write` and CSRF. Body contains the exact `expected_revision_id`. It reopens the evidence by clearing its disposition and related decision fields. Both review routes return the complete ordered snapshot decision list. They do not rewrite the immutable candidate revision or Markdown.
+
+### `POST|DELETE /api/v2/daily/{YYYY-MM-DD}/late-evidence/{event_id}`
+
+Requires `review:write` and CSRF. POST explicitly leaves one live event that arrived after the named current revision for later; DELETE reopens that exact deferral. Snapshot evidence cannot be deferred through this route. A deferral never deletes or marks the event reviewed, never changes candidate content, and applies only while its bound revision remains current. Replacing the revision automatically closes its deferrals.
 
 ### `POST /api/v2/daily/{YYYY-MM-DD}/dismiss`
 

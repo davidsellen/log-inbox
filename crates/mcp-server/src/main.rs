@@ -305,6 +305,10 @@ fn build_router(state: AppState) -> Router {
             put(refocus_decide_daily_evidence).delete(refocus_reopen_daily_evidence),
         )
         .route(
+            "/api/v2/daily/{date}/late-evidence/{event_id}",
+            post(refocus_defer_daily_evidence).delete(refocus_reopen_deferred_daily_evidence),
+        )
+        .route(
             "/api/v2/daily/{date}/candidate",
             put(refocus_edit_daily_candidate),
         )
@@ -724,9 +728,21 @@ async fn refocus_daily_day(
             .map_err(|error| ApiError::internal(error.to_string()))?,
         None => Vec::new(),
     };
+    let active_deferrals = match current_revision.as_ref() {
+        Some(revision) => state
+            .store
+            .active_daily_evidence_deferrals(&profile.id, local_date, &revision.id)
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+        None => Vec::new(),
+    };
+    let deferred_event_ids = active_deferrals
+        .iter()
+        .map(|deferral| deferral.event_id.as_str())
+        .collect::<HashSet<_>>();
     let live_event_ids = evidence
         .events
         .iter()
+        .filter(|event| !deferred_event_ids.contains(event.id.as_str()))
         .map(|event| event.id.as_str())
         .collect::<Vec<_>>();
     let live_manual_ids = manual_entries
@@ -802,6 +818,7 @@ async fn refocus_daily_day(
         "current_revision": current_revision,
         "current_snapshot": current_snapshot,
         "current_snapshot_evidence": current_snapshot_evidence,
+        "active_late_evidence_deferrals": active_deferrals,
         "candidate_freshness": candidate_freshness,
         "new_evidence_count": new_evidence_count,
         "expired_evidence_count": expired_evidence_count,
@@ -932,7 +949,7 @@ fn daily_overview_status(
         || schedule_run.is_some_and(|run| run.state == "failed")
     {
         "generation_failed"
-    } else if update_available || day.is_some_and(|day| day.freshness == "update_available") {
+    } else if update_available {
         "update_available"
     } else if apply.is_some_and(|operation| operation.state == "finalized")
         || day.is_some_and(|day| day.review_status == "applied")
@@ -1643,9 +1660,17 @@ fn daily_apply_material(
             "Daily evidence exceeds the supported 500-event Apply limit.",
         ));
     }
+    let deferred_event_ids = state
+        .store
+        .active_daily_evidence_deferrals(&profile.id, local_date, &revision.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .into_iter()
+        .map(|deferral| deferral.event_id)
+        .collect::<HashSet<_>>();
     let live_event_ids = live
         .events
         .iter()
+        .filter(|event| !deferred_event_ids.contains(&event.id))
         .map(|event| event.id.as_str())
         .collect::<Vec<_>>();
     let snapshot_event_ids = snapshot
@@ -1857,7 +1882,7 @@ async fn generate_daily_candidate(
         local_date,
         &window.destination_path,
     )?;
-    let evidence = state
+    let mut evidence = state
         .store
         .get_events_between(window.start_utc, window.end_utc, 500)
         .map_err(|error| ApiError::internal(error.to_string()))?;
@@ -1877,6 +1902,18 @@ async fn generate_daily_candidate(
         .store
         .current_proposal_revision(&profile.id, local_date)
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    if let Some(current) = current.as_ref() {
+        let deferred_event_ids = state
+            .store
+            .active_daily_evidence_deferrals(&profile.id, local_date, &current.id)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .into_iter()
+            .map(|deferral| deferral.event_id)
+            .collect::<HashSet<_>>();
+        evidence
+            .events
+            .retain(|event| !deferred_event_ids.contains(&event.id));
+    }
 
     if let Some(current) = current.as_ref()
         && let Some(snapshot_id) = current.snapshot_id.as_deref()
@@ -2098,6 +2135,52 @@ async fn refocus_reopen_daily_evidence(
         .snapshot_evidence(&snapshot.id)
         .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(evidence))
+}
+
+async fn refocus_defer_daily_evidence(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((date, event_id)): AxumPath<(String, String)>,
+    Json(input): Json<ExpectedRevisionRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "review:write", true)?;
+    require_cutover_for_daily_mutation(&state)?;
+    let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let profile = active_refocus_workspace(&state)?;
+    let deferral = state
+        .store
+        .defer_daily_evidence(
+            &profile.id,
+            local_date,
+            &input.expected_revision_id,
+            &event_id,
+        )
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    Ok(Json(json!({ "deferral": deferral })))
+}
+
+async fn refocus_reopen_deferred_daily_evidence(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((date, event_id)): AxumPath<(String, String)>,
+    Json(input): Json<ExpectedRevisionRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "review:write", true)?;
+    require_cutover_for_daily_mutation(&state)?;
+    let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let profile = active_refocus_workspace(&state)?;
+    let deferral = state
+        .store
+        .reopen_deferred_daily_evidence(
+            &profile.id,
+            local_date,
+            &input.expected_revision_id,
+            &event_id,
+        )
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    Ok(Json(json!({ "deferral": deferral })))
 }
 
 async fn refocus_dismiss_daily(
@@ -3159,7 +3242,7 @@ mod knowledge_destination_tests {
                 .manual_entry_ids
                 .contains(&manual.id)
         );
-        state
+        let late = state
             .store
             .insert_event(log_inbox_core::models::LogEventInput {
                 timestamp: Some("2026-09-09T11:00:00Z".parse().unwrap()),
@@ -3185,6 +3268,14 @@ mod knowledge_destination_tests {
                 .id,
             manual_revision.id
         );
+        state
+            .store
+            .defer_daily_evidence(&profile.id, date, &manual_revision.id, &late.id)
+            .expect("owner can leave the exact late event for later");
+        let preserved = generate_daily_candidate(&state, date, false)
+            .await
+            .expect("deferred late evidence no longer blocks the preserved revision");
+        assert_eq!(preserved.id, manual_revision.id);
     }
 
     #[tokio::test]
