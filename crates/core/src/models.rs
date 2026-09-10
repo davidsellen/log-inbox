@@ -301,6 +301,18 @@ pub struct DailyDismissal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DailyEvidenceDeferral {
+    pub workspace_id: String,
+    pub local_date: NaiveDate,
+    pub revision_id: String,
+    pub event_id: String,
+    pub available: bool,
+    pub event_digest: String,
+    pub deferred_at: DateTime<Utc>,
+    pub reopened_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RetentionReport {
     pub raw_events_deleted: u64,
     pub sessions_deleted: u64,
@@ -310,6 +322,7 @@ pub struct RetentionReport {
     pub orphan_snapshots_deleted: u64,
     pub finalized_recovery_scrubbed: u64,
     pub imported_artifacts_deleted: u64,
+    pub reopened_deferrals_deleted: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

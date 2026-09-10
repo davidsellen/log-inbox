@@ -797,6 +797,37 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 18 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE daily_evidence_deferrals (
+                    workspace_id TEXT NOT NULL,
+                    local_date TEXT NOT NULL,
+                    revision_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    live_event_id TEXT,
+                    event_digest TEXT NOT NULL,
+                    deferred_at TEXT NOT NULL,
+                    reopened_at TEXT,
+                    PRIMARY KEY(revision_id, event_id),
+                    CHECK(live_event_id IS NULL OR live_event_id = event_id),
+                    FOREIGN KEY(workspace_id, local_date)
+                        REFERENCES daily_days(workspace_id, local_date) ON DELETE CASCADE,
+                    FOREIGN KEY(revision_id) REFERENCES proposal_revisions(id) ON DELETE CASCADE,
+                    FOREIGN KEY(live_event_id) REFERENCES log_events(id) ON DELETE SET NULL
+                );
+
+                CREATE INDEX idx_daily_evidence_deferrals_day
+                    ON daily_evidence_deferrals(workspace_id, local_date, revision_id, reopened_at);
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (18, 'explicit late evidence deferrals', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -2248,10 +2279,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 17);
+        assert_eq!(store.schema_version().expect("version reads"), 18);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 17);
+        assert_eq!(store.schema_version().expect("version remains"), 18);
     }
 
     #[test]
@@ -2319,7 +2350,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 17);
+        assert_eq!(verification.schema_version, 18);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());

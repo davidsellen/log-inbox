@@ -2297,6 +2297,7 @@ fn reconcile_retention(state: &AppState, now: DateTime<Utc>) -> Result<(), ApiEr
         + report.sessions_deleted
         + report.schedule_runs_deleted
         + report.reopened_dismissals_deleted
+        + report.reopened_deferrals_deleted
         + report.stale_revisions_deleted
         + report.orphan_snapshots_deleted
         + report.finalized_recovery_scrubbed
@@ -2308,6 +2309,7 @@ fn reconcile_retention(state: &AppState, now: DateTime<Utc>) -> Result<(), ApiEr
             sessions = report.sessions_deleted,
             schedule_runs = report.schedule_runs_deleted,
             reopened_dismissals = report.reopened_dismissals_deleted,
+            reopened_deferrals = report.reopened_deferrals_deleted,
             stale_revisions = report.stale_revisions_deleted,
             orphan_snapshots = report.orphan_snapshots_deleted,
             finalized_recovery = report.finalized_recovery_scrubbed,

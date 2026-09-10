@@ -1,10 +1,10 @@
 use crate::{
     daily::resolve_day,
     models::{
-        ApplyOperation, DailyAutomationSettings, DailyDay, DailyDismissal, DailyOverviewFacts,
-        DailyRevisionContent, DailyScheduleRun, DailyTemplateSnapshot, DailyWorkstream,
-        EvidenceSnapshot, ManualDailyEntry, PrepareApplyOperation, ProposalRevision,
-        RetentionReport, SnapshotEvidence,
+        ApplyOperation, DailyAutomationSettings, DailyDay, DailyDismissal, DailyEvidenceDeferral,
+        DailyOverviewFacts, DailyRevisionContent, DailyScheduleRun, DailyTemplateSnapshot,
+        DailyWorkstream, EvidenceSnapshot, ManualDailyEntry, PrepareApplyOperation,
+        ProposalRevision, RetentionReport, SnapshotEvidence,
     },
     store::Store,
 };
@@ -89,11 +89,22 @@ impl Store {
                              AND NOT EXISTS (
                                  SELECT 1 FROM evidence_snapshot_events AS evidence
                                  WHERE evidence.snapshot_id = ?3 AND evidence.event_id = event.id
+                             )
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM daily_evidence_deferrals AS deferral
+                                 WHERE deferral.workspace_id = ?4
+                                   AND deferral.local_date = ?5
+                                   AND deferral.revision_id = ?6
+                                   AND deferral.event_id = event.id
+                                   AND deferral.reopened_at IS NULL
                              )"#,
                         params![
                             resolved.0.to_rfc3339(),
                             resolved.1.to_rfc3339(),
-                            revision.snapshot_id.as_deref().unwrap_or("")
+                            revision.snapshot_id.as_deref().unwrap_or(""),
+                            workspace_id,
+                            local_date.to_string(),
+                            revision.id,
                         ],
                         |row| row.get(0),
                     )?;
@@ -288,6 +299,10 @@ impl Store {
             "DELETE FROM daily_dismissals WHERE reopened_at IS NOT NULL AND reopened_at < ?1",
             params![audit_cutoff.to_rfc3339()],
         )? as u64;
+        let reopened_deferrals_deleted = transaction.execute(
+            "DELETE FROM daily_evidence_deferrals WHERE reopened_at IS NOT NULL AND reopened_at < ?1",
+            params![audit_cutoff.to_rfc3339()],
+        )? as u64;
         let finalized_recovery_scrubbed = transaction.execute(
             r#"UPDATE apply_operations
                SET recovery_payload = X'', recovery_path = NULL, temporary_name = ''
@@ -367,6 +382,7 @@ impl Store {
             orphan_snapshots_deleted,
             finalized_recovery_scrubbed,
             imported_artifacts_deleted,
+            reopened_deferrals_deleted,
         })
     }
 
@@ -805,6 +821,139 @@ impl Store {
             .map_err(Into::into)
     }
 
+    pub fn defer_daily_evidence(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        expected_revision_id: &str,
+        event_id: &str,
+    ) -> Result<DailyEvidenceDeferral> {
+        let day = self
+            .daily_day(workspace_id, local_date)?
+            .context("daily day was not found")?;
+        let revision = self
+            .current_proposal_revision(workspace_id, local_date)?
+            .context("daily candidate was not found")?;
+        anyhow::ensure!(
+            revision.id == expected_revision_id,
+            "current proposal revision changed"
+        );
+        if let Some(snapshot_id) = revision.snapshot_id.as_deref() {
+            anyhow::ensure!(
+                !self
+                    .evidence_snapshot(snapshot_id)?
+                    .context("current evidence snapshot is missing")?
+                    .event_ids
+                    .iter()
+                    .any(|stored| stored == event_id),
+                "snapshot evidence must be reviewed instead of deferred"
+            );
+        }
+        let event = self
+            .get_events_by_ids(&[event_id.to_owned()])?
+            .into_iter()
+            .next()
+            .context("late evidence event does not exist")?;
+        anyhow::ensure!(
+            event.timestamp >= day.start_utc && event.timestamp < day.end_utc,
+            "late evidence belongs to a different day"
+        );
+        let now = Utc::now().to_rfc3339();
+        self.connect()?.execute(
+            r#"INSERT INTO daily_evidence_deferrals
+               (workspace_id, local_date, revision_id, event_id, live_event_id,
+                event_digest, deferred_at, reopened_at)
+               VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, NULL)
+               ON CONFLICT(revision_id, event_id) DO UPDATE SET
+                 deferred_at = excluded.deferred_at, reopened_at = NULL"#,
+            params![
+                workspace_id,
+                local_date.to_string(),
+                expected_revision_id,
+                event_id,
+                evidence_event_digest(&event)?,
+                now,
+            ],
+        )?;
+        self.daily_evidence_deferral(expected_revision_id, event_id)?
+            .context("late evidence deferral is missing")
+    }
+
+    pub fn reopen_deferred_daily_evidence(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        expected_revision_id: &str,
+        event_id: &str,
+    ) -> Result<DailyEvidenceDeferral> {
+        let current = self
+            .current_proposal_revision(workspace_id, local_date)?
+            .context("daily candidate was not found")?;
+        anyhow::ensure!(
+            current.id == expected_revision_id,
+            "current proposal revision changed"
+        );
+        let changed = self.connect()?.execute(
+            r#"UPDATE daily_evidence_deferrals
+               SET reopened_at = ?1
+               WHERE workspace_id = ?2 AND local_date = ?3
+                 AND revision_id = ?4 AND event_id = ?5
+                 AND reopened_at IS NULL"#,
+            params![
+                Utc::now().to_rfc3339(),
+                workspace_id,
+                local_date.to_string(),
+                expected_revision_id,
+                event_id,
+            ],
+        )?;
+        anyhow::ensure!(changed == 1, "late evidence deferral is not active");
+        self.daily_evidence_deferral(expected_revision_id, event_id)?
+            .context("late evidence deferral is missing")
+    }
+
+    pub fn active_daily_evidence_deferrals(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        revision_id: &str,
+    ) -> Result<Vec<DailyEvidenceDeferral>> {
+        let conn = self.connect()?;
+        let mut statement = conn.prepare(
+            r#"SELECT workspace_id, local_date, revision_id, event_id,
+                      live_event_id IS NOT NULL, event_digest, deferred_at, reopened_at
+               FROM daily_evidence_deferrals
+               WHERE workspace_id = ?1 AND local_date = ?2
+                 AND revision_id = ?3 AND reopened_at IS NULL
+               ORDER BY deferred_at, event_id"#,
+        )?;
+        statement
+            .query_map(
+                params![workspace_id, local_date.to_string(), revision_id],
+                daily_evidence_deferral_from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    fn daily_evidence_deferral(
+        &self,
+        revision_id: &str,
+        event_id: &str,
+    ) -> Result<Option<DailyEvidenceDeferral>> {
+        self.connect()?
+            .query_row(
+                r#"SELECT workspace_id, local_date, revision_id, event_id,
+                          live_event_id IS NOT NULL, event_digest, deferred_at, reopened_at
+                   FROM daily_evidence_deferrals
+                   WHERE revision_id = ?1 AND event_id = ?2"#,
+                params![revision_id, event_id],
+                daily_evidence_deferral_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn create_manual_daily_entry(
         &self,
         workspace_id: &str,
@@ -1063,6 +1212,13 @@ impl Store {
         transaction.execute(
             "UPDATE daily_days SET current_revision_id = ?1, generation_status = 'ready', review_status = 'in_review', freshness = 'current', updated_at = ?2 WHERE workspace_id = ?3 AND local_date = ?4",
             params![id, now, workspace_id, local_date.to_string()],
+        )?;
+        transaction.execute(
+            r#"UPDATE daily_evidence_deferrals
+               SET reopened_at = ?1
+               WHERE workspace_id = ?2 AND local_date = ?3
+                 AND revision_id != ?4 AND reopened_at IS NULL"#,
+            params![now, workspace_id, local_date.to_string(), id],
         )?;
         transaction.commit()?;
         self.proposal_revision(&id)?
@@ -1941,6 +2097,36 @@ fn daily_dismissal_from_row(row: &Row<'_>) -> rusqlite::Result<DailyDismissal> {
     })
 }
 
+fn daily_evidence_deferral_from_row(row: &Row<'_>) -> rusqlite::Result<DailyEvidenceDeferral> {
+    let local_date: String = row.get(1)?;
+    let deferred_at: String = row.get(6)?;
+    let reopened_at: Option<String> = row.get(7)?;
+    Ok(DailyEvidenceDeferral {
+        workspace_id: row.get(0)?,
+        local_date: parse_date(&local_date).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, error.into())
+        })?,
+        revision_id: row.get(2)?,
+        event_id: row.get(3)?,
+        available: row.get(4)?,
+        event_digest: row.get(5)?,
+        deferred_at: parse_time(&deferred_at).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, error.into())
+        })?,
+        reopened_at: reopened_at
+            .map(|value| {
+                parse_time(&value).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })
+            })
+            .transpose()?,
+    })
+}
+
 fn snapshot_evidence_from_row(row: &Row<'_>) -> rusqlite::Result<SnapshotEvidence> {
     let decided_at: Option<String> = row.get(8)?;
     Ok(SnapshotEvidence {
@@ -2575,7 +2761,7 @@ mod tests {
         store
             .ensure_daily_day(date, "Work Log/2026-09-09.md", None)
             .expect("day freezes");
-        store
+        let revision = store
             .create_proposal_revision(
                 &profile.id,
                 date,
@@ -2585,7 +2771,7 @@ mod tests {
             )
             .expect("revision stores");
 
-        store
+        let late = store
             .insert_event(LogEventInput {
                 source: "codex/test".to_owned(),
                 level: Some("info".to_owned()),
@@ -2603,6 +2789,30 @@ mod tests {
                 .freshness,
             "update_available"
         );
+        let deferral = store
+            .defer_daily_evidence(&profile.id, date, &revision.id, &late.id)
+            .expect("late evidence can be explicitly deferred");
+        assert!(deferral.available);
+        assert_eq!(
+            store
+                .daily_overview_facts(&profile.id, "UTC", &[date])
+                .unwrap()[0]
+                .new_evidence_count,
+            0
+        );
+        store
+            .reopen_deferred_daily_evidence(&profile.id, date, &revision.id, &late.id)
+            .expect("deferral reopens");
+        assert_eq!(
+            store
+                .daily_overview_facts(&profile.id, "UTC", &[date])
+                .unwrap()[0]
+                .new_evidence_count,
+            1
+        );
+        store
+            .defer_daily_evidence(&profile.id, date, &revision.id, &late.id)
+            .expect("deferral can be restored");
 
         store
             .create_manual_daily_entry(&profile.id, date, "Late manual note", &[])
@@ -2616,6 +2826,12 @@ mod tests {
                 &serde_json::json!("Updated Daily"),
             )
             .expect("replacement revision stores");
+        assert!(
+            store
+                .active_daily_evidence_deferrals(&profile.id, date, &revision.id)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             store
                 .daily_day(&profile.id, date)
