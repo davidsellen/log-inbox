@@ -137,6 +137,75 @@ fn marker_ranges(text: &str, begin: &str, end: &str) -> Result<Option<(usize, us
     }
 }
 
+pub fn strip_managed_daily_blocks(text: &str) -> Result<String, String> {
+    let mut ranges = Vec::new();
+    let mut open: Option<(String, usize)> = None;
+    let mut fence: Option<char> = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\r', '\n']);
+        let trimmed = content.trim();
+        let fence_char = trimmed
+            .strip_prefix("```")
+            .map(|_| '`')
+            .or_else(|| trimmed.strip_prefix("~~~").map(|_| '~'));
+        if let Some(character) = fence_char {
+            match fence {
+                None => fence = Some(character),
+                Some(active) if active == character => fence = None,
+                Some(_) => {}
+            }
+        } else if fence.is_none()
+            && let Some((block_id, marker)) = daily_marker(trimmed)
+        {
+            match (marker, open.take()) {
+                ("begin", None) => open = Some((block_id.to_owned(), offset)),
+                ("end", Some((active_id, start))) if active_id == block_id => {
+                    ranges.push((start, offset + line.len()));
+                }
+                ("begin", Some(_)) => {
+                    return Err("managed Daily blocks are nested or duplicated".to_owned());
+                }
+                _ => return Err("managed Daily markers are missing or out of order".to_owned()),
+            }
+        }
+        offset += line.len();
+    }
+    if fence.is_some() {
+        return Err("unterminated fenced code prevents safe Knowledge extraction".to_owned());
+    }
+    if open.is_some() {
+        return Err("managed Daily markers are missing or out of order".to_owned());
+    }
+    if ranges.is_empty() {
+        return Ok(text.to_owned());
+    }
+    let mut stripped = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for (start, end) in ranges {
+        stripped.push_str(&text[cursor..start]);
+        cursor = end;
+    }
+    stripped.push_str(&text[cursor..]);
+    Ok(stripped)
+}
+
+fn daily_marker(value: &str) -> Option<(&str, &str)> {
+    let body = value
+        .strip_prefix("<!-- log-inbox:daily:")?
+        .strip_suffix(" -->")?;
+    let (block_id, marker) = body.rsplit_once(':')?;
+    if block_id.is_empty()
+        || !block_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || !matches!(marker, "begin" | "end")
+    {
+        return None;
+    }
+    Some((block_id, marker))
+}
+
 fn normalize_line_endings(value: &str, eol: &str) -> String {
     value
         .replace("\r\n", "\n")
@@ -416,6 +485,35 @@ mod tests {
         assert!(result.starts_with("# Daily log\n\n<!-- log-inbox:daily:day_test:begin -->"));
         assert!(result.contains("### My notes\n\n- Done."));
         assert!(plan.previous_block.is_none());
+    }
+
+    #[test]
+    fn strips_multiple_managed_blocks_but_preserves_marker_examples_in_fences() {
+        let input = concat!(
+            "# Product\n\n",
+            "<!-- log-inbox:daily:first:begin -->\nGenerated one\n",
+            "<!-- log-inbox:daily:first:end -->\n\n",
+            "```md\n<!-- log-inbox:daily:example:begin -->\nexample\n",
+            "<!-- log-inbox:daily:example:end -->\n```\n\n",
+            "<!-- log-inbox:daily:second:begin -->\nGenerated two\n",
+            "<!-- log-inbox:daily:second:end -->\n",
+        );
+        let stripped = strip_managed_daily_blocks(input).expect("managed blocks strip");
+        assert!(!stripped.contains("Generated one"));
+        assert!(!stripped.contains("Generated two"));
+        assert!(stripped.contains("log-inbox:daily:example:begin"));
+        assert!(stripped.contains("example"));
+    }
+
+    #[test]
+    fn refuses_ambiguous_managed_blocks_and_unterminated_fences() {
+        assert!(
+            strip_managed_daily_blocks(
+                "<!-- log-inbox:daily:a:begin -->\n<!-- log-inbox:daily:b:end -->\n"
+            )
+            .is_err()
+        );
+        assert!(strip_managed_daily_blocks("```\nunfinished").is_err());
     }
 
     #[test]

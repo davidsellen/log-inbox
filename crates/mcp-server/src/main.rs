@@ -34,6 +34,7 @@ use std::{
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod daily_writer;
+pub mod knowledge;
 mod llm;
 mod migration;
 
