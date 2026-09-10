@@ -94,6 +94,38 @@ struct CatalogNote {
     collection_ids: BTreeSet<String>,
 }
 
+struct CatalogBuild {
+    notes: BTreeMap<String, CatalogNote>,
+    missing_roots: BTreeSet<String>,
+    oversized_note_count: usize,
+    unreadable_note_count: usize,
+    invalid_note_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct KnowledgeNoteOption {
+    pub path: String,
+    pub title: String,
+    pub collection_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UnresolvedIdentity {
+    pub field: String,
+    pub value: String,
+    pub normalized_value: String,
+    pub group_count: usize,
+    pub event_count: usize,
+    pub latest_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UnresolvedIdentityReview {
+    pub identities: Vec<UnresolvedIdentity>,
+    pub total_count: usize,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedKnowledgeNote {
     pub path: String,
@@ -183,47 +215,31 @@ pub fn parse_knowledge_note(
     })
 }
 
-pub fn resolve_knowledge(
+fn build_catalog(
     workspace: &InspectedWorkspace,
-    collections: &[KnowledgeCollection],
-    mappings: &[ContextMapping],
-    events: &[StoredLogEvent],
-) -> Result<Option<KnowledgeResolution>, String> {
-    let mut enabled_collections = collections
-        .iter()
-        .filter(|collection| collection.enabled)
-        .collect::<Vec<_>>();
-    enabled_collections.sort_by(|left, right| left.id.cmp(&right.id));
-    let mut enabled_mappings = mappings
-        .iter()
-        .filter(|mapping| mapping.enabled)
-        .collect::<Vec<_>>();
-    enabled_mappings.sort_by(|left, right| left.id.cmp(&right.id));
-    if enabled_collections.is_empty() && enabled_mappings.is_empty() {
-        return Ok(None);
-    }
-
-    let mut catalog = BTreeMap::<String, CatalogNote>::new();
+    enabled_collections: &[&KnowledgeCollection],
+) -> Result<CatalogBuild, String> {
+    let mut notes = BTreeMap::<String, CatalogNote>::new();
     let mut seen_paths = BTreeSet::new();
     let mut missing_roots = BTreeSet::new();
     let mut oversized_note_count = 0_usize;
     let mut unreadable_note_count = 0_usize;
     let mut invalid_note_count = 0_usize;
     let mut catalog_bytes = 0_u64;
-    for collection in &enabled_collections {
+    for collection in enabled_collections {
         let selection = workspace
             .preview_markdown_sources(&collection.roots, &collection.exclusions, MAX_CATALOG_NOTES)
             .map_err(|error| error.to_string())?;
         missing_roots.extend(selection.missing_roots);
         for source in selection.sources {
-            if let Some(existing) = catalog.get_mut(&source.path) {
+            if let Some(existing) = notes.get_mut(&source.path) {
                 existing.collection_ids.insert(collection.id.clone());
                 continue;
             }
             if !seen_paths.insert(source.path.clone()) {
                 continue;
             }
-            if catalog.len() >= MAX_CATALOG_NOTES {
+            if notes.len() >= MAX_CATALOG_NOTES {
                 return Err(format!(
                     "Knowledge catalog exceeds {MAX_CATALOG_NOTES} unique notes"
                 ));
@@ -256,7 +272,7 @@ pub fn resolve_knowledge(
                 }
             };
             note.usable_content.clear();
-            catalog.insert(
+            notes.insert(
                 source.path,
                 CatalogNote {
                     note,
@@ -265,6 +281,200 @@ pub fn resolve_knowledge(
             );
         }
     }
+    Ok(CatalogBuild {
+        notes,
+        missing_roots,
+        oversized_note_count,
+        unreadable_note_count,
+        invalid_note_count,
+    })
+}
+
+pub fn search_note_options(
+    workspace: &InspectedWorkspace,
+    collections: &[KnowledgeCollection],
+    query: &str,
+    limit: usize,
+) -> Result<Vec<KnowledgeNoteOption>, String> {
+    let mut enabled = collections
+        .iter()
+        .filter(|collection| collection.enabled)
+        .collect::<Vec<_>>();
+    enabled.sort_by(|left, right| left.id.cmp(&right.id));
+    let catalog = build_catalog(workspace, &enabled)?.notes;
+    let query = normalize_identity(query);
+    let mut matches = catalog
+        .values()
+        .filter(|entry| {
+            normalize_identity(&entry.note.title).contains(&query)
+                || normalize_identity(&entry.note.path).contains(&query)
+                || entry
+                    .note
+                    .aliases
+                    .iter()
+                    .any(|alias| normalize_identity(alias).contains(&query))
+        })
+        .map(|entry| KnowledgeNoteOption {
+            path: entry.note.path.clone(),
+            title: entry.note.title.clone(),
+            collection_ids: entry.collection_ids.iter().cloned().collect(),
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| {
+        normalize_identity(&left.title)
+            .cmp(&normalize_identity(&right.title))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    matches.truncate(limit);
+    Ok(matches)
+}
+
+pub fn find_note_option(
+    workspace: &InspectedWorkspace,
+    collections: &[KnowledgeCollection],
+    path: &str,
+) -> Result<Option<KnowledgeNoteOption>, String> {
+    let mut enabled = collections
+        .iter()
+        .filter(|collection| collection.enabled)
+        .collect::<Vec<_>>();
+    enabled.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(build_catalog(workspace, &enabled)?
+        .notes
+        .get(path)
+        .map(|entry| KnowledgeNoteOption {
+            path: entry.note.path.clone(),
+            title: entry.note.title.clone(),
+            collection_ids: entry.collection_ids.iter().cloned().collect(),
+        }))
+}
+
+pub fn curate_unresolved_identities(
+    events: &[StoredLogEvent],
+    mappings: &[ContextMapping],
+    ignored: &[log_inbox_core::models::IgnoredContextIdentity],
+    resolution: Option<&KnowledgeResolution>,
+    limit: usize,
+) -> UnresolvedIdentityReview {
+    let resolved_groups = resolution
+        .and_then(|resolution| resolution.snapshot_payload.get("resolved_groups"))
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|group| group.get("source_group_id").and_then(JsonValue::as_str))
+        .collect::<BTreeSet<_>>();
+    let mapped = mappings
+        .iter()
+        .filter(|mapping| mapping.enabled)
+        .flat_map(|mapping| mapping.selectors.iter())
+        .filter(|selector| selector.operator == "exact")
+        .map(|selector| (selector.field.as_str(), normalize_identity(&selector.value)))
+        .collect::<BTreeSet<_>>();
+    let ignored = ignored
+        .iter()
+        .map(|identity| (identity.field.as_str(), identity.normalized_value.as_str()))
+        .collect::<BTreeSet<_>>();
+    let mut candidates = BTreeMap::<(String, String), UnresolvedIdentity>::new();
+    let groups = group_events(events);
+    for (group_id, group_events) in groups {
+        if resolved_groups.contains(group_id.as_str()) {
+            continue;
+        }
+        for (field, value) in
+            group_identities(&group_events)
+                .into_iter()
+                .filter(|(field, value)| {
+                    automatic_identity_field(field)
+                        && !value.is_empty()
+                        && value.len() <= MAX_IDENTITY_BYTES
+                })
+        {
+            let normalized_value = normalize_identity(&value);
+            if mapped.contains(&(field.as_str(), normalized_value.clone()))
+                || ignored.contains(&(field.as_str(), normalized_value.as_str()))
+            {
+                continue;
+            }
+            let latest_at = group_events
+                .iter()
+                .map(|event| event.timestamp)
+                .max()
+                .expect("an evidence group is nonempty");
+            let candidate = candidates
+                .entry((field.clone(), normalized_value.clone()))
+                .or_insert_with(|| UnresolvedIdentity {
+                    field,
+                    value: value.clone(),
+                    normalized_value,
+                    group_count: 0,
+                    event_count: 0,
+                    latest_at,
+                });
+            candidate.group_count += 1;
+            candidate.event_count += group_events.len();
+            candidate.latest_at = candidate.latest_at.max(latest_at);
+            if value.len() < candidate.value.len() {
+                candidate.value = value;
+            }
+        }
+    }
+    let total_count = candidates.len();
+    let mut identities = candidates.into_values().collect::<Vec<_>>();
+    identities.sort_by(|left, right| {
+        identity_priority(&left.field)
+            .cmp(&identity_priority(&right.field))
+            .then_with(|| right.event_count.cmp(&left.event_count))
+            .then_with(|| left.normalized_value.cmp(&right.normalized_value))
+    });
+    identities.truncate(limit);
+    UnresolvedIdentityReview {
+        truncated: total_count > identities.len(),
+        identities,
+        total_count,
+    }
+}
+
+fn identity_priority(field: &str) -> usize {
+    match field {
+        "product" => 0,
+        "project" => 1,
+        "repo" => 2,
+        "app" => 3,
+        "service" => 4,
+        "module" => 5,
+        "work_item" => 6,
+        "pull_request" => 7,
+        _ => usize::MAX,
+    }
+}
+
+pub fn resolve_knowledge(
+    workspace: &InspectedWorkspace,
+    collections: &[KnowledgeCollection],
+    mappings: &[ContextMapping],
+    events: &[StoredLogEvent],
+) -> Result<Option<KnowledgeResolution>, String> {
+    let mut enabled_collections = collections
+        .iter()
+        .filter(|collection| collection.enabled)
+        .collect::<Vec<_>>();
+    enabled_collections.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut enabled_mappings = mappings
+        .iter()
+        .filter(|mapping| mapping.enabled)
+        .collect::<Vec<_>>();
+    enabled_mappings.sort_by(|left, right| left.id.cmp(&right.id));
+    if enabled_collections.is_empty() && enabled_mappings.is_empty() {
+        return Ok(None);
+    }
+
+    let CatalogBuild {
+        notes: catalog,
+        missing_roots,
+        oversized_note_count,
+        unreadable_note_count,
+        invalid_note_count,
+    } = build_catalog(workspace, &enabled_collections)?;
 
     let raw_groups = group_events(events);
     let mut group_aliases = BTreeMap::new();

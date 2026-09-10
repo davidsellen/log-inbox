@@ -60,6 +60,26 @@ Requires `settings:write`, CSRF, and the exact current `updated_at`. PUT also re
 
 Requires `knowledge:read`. This is a bounded folder-only typeahead for collection fields, not a vault browser: queries contain 2–100 characters, return at most 20 relative safe directory paths, and never expose filenames or Markdown content.
 
+### `GET /api/v2/knowledge/review?limit=...`
+
+Requires both `knowledge:read` and `logs:read`. It evaluates at most the 500 most recent retained events against enabled collections, saved mappings, and ignored names. The response returns at most 100 curated durable identities, saved mapping status, ignored names, bounded counts, and sanitized diagnostics. Source, branch, task/session, event messages, note bodies, complete catalog metadata, and migration provenance are not returned. If collection resolution is unavailable, names are not guessed and `review_status` is `unavailable`.
+
+### `GET /api/v2/knowledge/notes?query=...&limit=...`
+
+Requires `knowledge:read`. This is a bounded note-only typeahead for canonical mappings, not a file browser. It searches title, safe relative path, and aliases within enabled collections and returns at most 20 title/path options without aliases, references, frontmatter, or body content.
+
+### `POST /api/v2/knowledge/mappings`
+
+Requires `settings:write` and CSRF. It saves one exact durable identity to one existing note selected from an enabled collection. New UI mappings intentionally expose one field/value selector; imported multi-selector and legacy `contains` mappings remain readable and deterministic but are not created by this endpoint. Duplicate selectors conflict. The response explicitly states that the change affects new or regenerated candidates only.
+
+### `PUT|DELETE /api/v2/knowledge/mappings/{id}`
+
+Requires `settings:write`, CSRF, and the exact current `updated_at`. PUT replaces the reviewed single exact selector, target, and enabled state; editing an imported mapping clears its migration provenance. DELETE removes only the mapping. Stale, missing, cross-workspace, duplicate, or out-of-collection targets fail without changing the current Daily candidate or Markdown.
+
+### `POST /api/v2/knowledge/ignored` and `DELETE /api/v2/knowledge/ignored/{id}`
+
+Requires `settings:write` and CSRF. POST hides one reviewed durable field/value from the curated names list; it does not suppress evidence or model input. DELETE makes the name eligible for review again. Both operations affect no Markdown and do not rewrite a current candidate.
+
 ## Daily read model
 
 ### `GET /api/v2/daily/{YYYY-MM-DD}`

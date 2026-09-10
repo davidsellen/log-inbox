@@ -14,8 +14,8 @@ use log_inbox_core::{
     },
     daily::{render_daily_path, resolve_day, resolve_local_time},
     models::{
-        ApplyOperation, DailyDay, DailyRevisionContent, PrepareApplyOperation, ProposalRevision,
-        WorkspaceProfile,
+        ApplyOperation, ContextMapping, DailyDay, DailyRevisionContent, IgnoredContextIdentity,
+        LinkSelector, LogQuery, PrepareApplyOperation, ProposalRevision, WorkspaceProfile,
     },
     settings::Settings,
     store::Store,
@@ -45,6 +45,7 @@ struct AppState {
     legacy_proposal_dir: Option<PathBuf>,
     legacy_support_files: Vec<(String, PathBuf)>,
     apply_lock: Arc<Mutex<()>>,
+    knowledge_write_lock: Arc<Mutex<()>>,
     daily_generation_lock: Arc<tokio::sync::Mutex<()>>,
     refocus: RefocusConfig,
     workspace: InspectedWorkspace,
@@ -228,6 +229,51 @@ struct KnowledgeFolderQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+struct KnowledgeReviewQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnowledgeNoteQuery {
+    query: String,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextMappingDraft {
+    field: String,
+    value: String,
+    canonical_note_path: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveContextMappingRequest {
+    mapping: ContextMappingDraft,
+    expected_updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteContextMappingRequest {
+    expected_updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IgnoreContextIdentityRequest {
+    field: String,
+    value: String,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -266,6 +312,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .collect(),
         apply_lock: Arc::new(Mutex::new(())),
+        knowledge_write_lock: Arc::new(Mutex::new(())),
         daily_generation_lock: Arc::new(tokio::sync::Mutex::new(())),
         refocus,
         workspace,
@@ -318,6 +365,24 @@ fn build_router(state: AppState) -> Router {
             put(refocus_update_knowledge_collection).delete(refocus_delete_knowledge_collection),
         )
         .route("/api/v2/knowledge/folders", get(refocus_knowledge_folders))
+        .route("/api/v2/knowledge/review", get(refocus_knowledge_review))
+        .route("/api/v2/knowledge/notes", get(refocus_knowledge_notes))
+        .route(
+            "/api/v2/knowledge/mappings",
+            post(refocus_create_context_mapping),
+        )
+        .route(
+            "/api/v2/knowledge/mappings/{id}",
+            put(refocus_update_context_mapping).delete(refocus_delete_context_mapping),
+        )
+        .route(
+            "/api/v2/knowledge/ignored",
+            post(refocus_ignore_context_identity),
+        )
+        .route(
+            "/api/v2/knowledge/ignored/{id}",
+            axum::routing::delete(refocus_reopen_context_identity),
+        )
         .route(
             "/api/v2/migration/cutover",
             get(refocus_cutover_report).post(refocus_commit_cutover),
@@ -672,6 +737,372 @@ async fn refocus_knowledge_folders(
         .map(|folder| folder.path)
         .collect::<Vec<_>>();
     Ok(Json(json!({ "folders": folders, "limit": limit })))
+}
+
+async fn refocus_knowledge_review(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(input): Query<KnowledgeReviewQuery>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "knowledge:read", false)?;
+    authorize_refocus(&state, &headers, "logs:read", false)?;
+    let (profile, workspace) = active_refocus_context(&state)?;
+    let limit = input.limit.unwrap_or(50);
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::bad_request(
+            "Knowledge review limit must be between 1 and 100",
+        ));
+    }
+    let collections = state
+        .store
+        .list_knowledge_collections(&profile.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mappings = state
+        .store
+        .list_context_mappings(&profile.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let ignored = state
+        .store
+        .list_ignored_context_identities(&profile.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let evidence = state
+        .store
+        .query_logs(LogQuery {
+            source: None,
+            since: None,
+            level: None,
+            query: None,
+            limit: Some(500),
+        })
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let resolution =
+        knowledge::resolve_knowledge(&workspace, &collections, &mappings, &evidence.events);
+    let (review_status, unresolved, diagnostics) = match resolution.as_ref() {
+        Ok(resolution) => (
+            "ready",
+            knowledge::curate_unresolved_identities(
+                &evidence.events,
+                &mappings,
+                &ignored,
+                resolution.as_ref(),
+                limit,
+            ),
+            resolution
+                .as_ref()
+                .and_then(|resolution| resolution.snapshot_payload.get("diagnostics"))
+                .map(public_knowledge_diagnostics)
+                .unwrap_or_else(|| json!({})),
+        ),
+        Err(_) => (
+            "unavailable",
+            knowledge::UnresolvedIdentityReview {
+                identities: Vec::new(),
+                total_count: 0,
+                truncated: false,
+            },
+            json!({"resolution_failed": true}),
+        ),
+    };
+    let mappings = mappings
+        .into_iter()
+        .map(|mapping| {
+            let target_status = if !mapping.enabled {
+                "paused"
+            } else if workspace
+                .resolve_markdown_path(
+                    Path::new(&mapping.canonical_note_path),
+                    MarkdownPathMode::ExistingFile,
+                )
+                .is_ok()
+            {
+                "ready"
+            } else {
+                "target_missing"
+            };
+            json!({"mapping": public_context_mapping(&mapping), "target_status": target_status})
+        })
+        .collect::<Vec<_>>();
+    let ignored = ignored
+        .iter()
+        .map(public_ignored_context_identity)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "workspace_id": profile.id,
+        "review_status": review_status,
+        "unresolved": unresolved,
+        "mappings": mappings,
+        "ignored": ignored,
+        "diagnostics": diagnostics,
+        "evidence": {
+            "considered_count": evidence.events.len(),
+            "limit": evidence.limit,
+            "truncated": evidence.truncated,
+        }
+    })))
+}
+
+fn public_context_mapping(mapping: &ContextMapping) -> Value {
+    json!({
+        "id": mapping.id,
+        "selectors": mapping.selectors,
+        "canonical_note_path": mapping.canonical_note_path,
+        "enabled": mapping.enabled,
+        "created_at": mapping.created_at,
+        "updated_at": mapping.updated_at,
+        "imported": mapping.source_identity.is_some(),
+    })
+}
+
+fn public_ignored_context_identity(identity: &IgnoredContextIdentity) -> Value {
+    json!({
+        "id": identity.id,
+        "field": identity.field,
+        "value": identity.value,
+        "normalized_value": identity.normalized_value,
+        "created_at": identity.created_at,
+        "imported": identity.source_identity.is_some(),
+    })
+}
+
+fn public_knowledge_diagnostics(diagnostics: &Value) -> Value {
+    let count = |field: &str| {
+        diagnostics
+            .get(field)
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+    };
+    json!({
+        "missing_root_count": diagnostics.get("missing_roots").and_then(Value::as_array).map(Vec::len).unwrap_or_default(),
+        "oversized_note_count": count("oversized_note_count"),
+        "unreadable_note_count": count("unreadable_note_count"),
+        "invalid_note_count": count("invalid_note_count"),
+        "invalid_mapping_count": count("invalid_mapping_count"),
+        "ambiguous_group_count": count("ambiguous_group_count"),
+    })
+}
+
+async fn refocus_knowledge_notes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(input): Query<KnowledgeNoteQuery>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "knowledge:read", false)?;
+    let (profile, workspace) = active_refocus_context(&state)?;
+    let query = input.query.trim();
+    if !(2..=100).contains(&query.len()) {
+        return Err(ApiError::bad_request(
+            "note search requires 2-100 characters",
+        ));
+    }
+    let limit = input.limit.unwrap_or(20);
+    if !(1..=20).contains(&limit) {
+        return Err(ApiError::bad_request(
+            "note search limit must be between 1 and 20",
+        ));
+    }
+    let collections = state
+        .store
+        .list_knowledge_collections(&profile.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let notes = knowledge::search_note_options(&workspace, &collections, query, limit)
+        .map_err(|_| ApiError::unprocessable("Knowledge notes could not be searched"))?;
+    Ok(Json(json!({"notes": notes, "limit": limit})))
+}
+
+fn reviewed_mapping_target(
+    state: &AppState,
+    draft: &ContextMappingDraft,
+) -> Result<(WorkspaceProfile, String, String), ApiError> {
+    let (profile, workspace) = active_refocus_context(state)?;
+    let collections = state
+        .store
+        .list_knowledge_collections(&profile.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let target = draft.canonical_note_path.trim();
+    let note = knowledge::find_note_option(&workspace, &collections, target)
+        .map_err(|_| ApiError::unprocessable("Knowledge note could not be validated"))?
+        .ok_or_else(|| {
+            ApiError::conflict("Choose an existing note from an enabled Knowledge collection")
+        })?;
+    Ok((profile, draft.field.trim().to_lowercase(), note.path))
+}
+
+async fn refocus_create_context_mapping(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SaveContextMappingRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    authorize_refocus(&state, &headers, "settings:write", true)?;
+    if input.expected_updated_at.is_some() {
+        return Err(ApiError::bad_request(
+            "a new Knowledge link cannot have an expected timestamp",
+        ));
+    }
+    let (profile, field, canonical_note_path) = reviewed_mapping_target(&state, &input.mapping)?;
+    let _guard = state
+        .knowledge_write_lock
+        .lock()
+        .map_err(|_| ApiError::internal("Knowledge write lock is unavailable"))?;
+    ensure_unique_context_mapping(&state, &profile.id, &field, &input.mapping.value, None)?;
+    let mapping = state
+        .store
+        .save_context_mapping(&ContextMapping {
+            id: String::new(),
+            workspace_id: profile.id,
+            selectors: vec![LinkSelector {
+                field,
+                operator: "exact".to_owned(),
+                value: input.mapping.value,
+            }],
+            canonical_note_path,
+            enabled: input.mapping.enabled,
+            source_identity: None,
+            source_digest: None,
+            created_at: DateTime::<Utc>::UNIX_EPOCH,
+            updated_at: DateTime::<Utc>::UNIX_EPOCH,
+        })
+        .map_err(context_mapping_create_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"mapping": mapping, "affects_new_candidates_only": true})),
+    ))
+}
+
+async fn refocus_update_context_mapping(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<SaveContextMappingRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "settings:write", true)?;
+    let expected = input.expected_updated_at.ok_or_else(|| {
+        ApiError::bad_request("Knowledge link update requires its expected timestamp")
+    })?;
+    let (profile, field, canonical_note_path) = reviewed_mapping_target(&state, &input.mapping)?;
+    let _guard = state
+        .knowledge_write_lock
+        .lock()
+        .map_err(|_| ApiError::internal("Knowledge write lock is unavailable"))?;
+    ensure_unique_context_mapping(&state, &profile.id, &field, &input.mapping.value, Some(&id))?;
+    let mapping = state
+        .store
+        .update_context_mapping(
+            &id,
+            &profile.id,
+            &[LinkSelector {
+                field,
+                operator: "exact".to_owned(),
+                value: input.mapping.value,
+            }],
+            &canonical_note_path,
+            input.mapping.enabled,
+            expected,
+        )
+        .map_err(context_mapping_update_error)?;
+    Ok(Json(
+        json!({"mapping": mapping, "affects_new_candidates_only": true}),
+    ))
+}
+
+fn context_mapping_create_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("UNIQUE constraint failed") {
+        ApiError::conflict("This name already has a saved canonical link")
+    } else {
+        ApiError::bad_request(message)
+    }
+}
+
+fn ensure_unique_context_mapping(
+    state: &AppState,
+    workspace_id: &str,
+    field: &str,
+    value: &str,
+    except_id: Option<&str>,
+) -> Result<(), ApiError> {
+    let normalized = value.trim().to_lowercase();
+    let duplicate = state
+        .store
+        .list_context_mappings(workspace_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .into_iter()
+        .filter(|mapping| except_id != Some(mapping.id.as_str()))
+        .any(|mapping| {
+            mapping.selectors.len() == 1
+                && mapping.selectors[0].field == field
+                && mapping.selectors[0].operator == "exact"
+                && mapping.selectors[0].value.trim().to_lowercase() == normalized
+        });
+    if duplicate {
+        Err(ApiError::conflict(
+            "This name already has a saved canonical link",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn context_mapping_update_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("changed") || message.contains("UNIQUE constraint failed") {
+        ApiError::conflict("This Knowledge link changed or conflicts with another saved link")
+    } else {
+        ApiError::bad_request(message)
+    }
+}
+
+async fn refocus_delete_context_mapping(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<DeleteContextMappingRequest>,
+) -> Result<StatusCode, ApiError> {
+    authorize_refocus(&state, &headers, "settings:write", true)?;
+    let profile = active_refocus_workspace(&state)?;
+    state
+        .store
+        .delete_context_mapping(&id, &profile.id, input.expected_updated_at)
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn refocus_ignore_context_identity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<IgnoreContextIdentityRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    authorize_refocus(&state, &headers, "settings:write", true)?;
+    let profile = active_refocus_workspace(&state)?;
+    let field = input.field.trim().to_lowercase();
+    let value = input.value.trim().to_owned();
+    let identity = state
+        .store
+        .save_ignored_context_identity(&IgnoredContextIdentity {
+            id: String::new(),
+            workspace_id: profile.id,
+            field,
+            normalized_value: value.to_lowercase(),
+            value,
+            source_identity: None,
+            source_digest: None,
+            created_at: DateTime::<Utc>::UNIX_EPOCH,
+        })
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok((StatusCode::CREATED, Json(json!({"ignored": identity}))))
+}
+
+async fn refocus_reopen_context_identity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, ApiError> {
+    authorize_refocus(&state, &headers, "settings:write", true)?;
+    let profile = active_refocus_workspace(&state)?;
+    state
+        .store
+        .delete_ignored_context_identity(&id, &profile.id)
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 struct KnowledgeCollectionPreviewMaterial {
@@ -3231,6 +3662,7 @@ mod knowledge_destination_tests {
             legacy_proposal_dir: None,
             legacy_support_files: Vec::new(),
             apply_lock: Arc::new(Mutex::new(())),
+            knowledge_write_lock: Arc::new(Mutex::new(())),
             daily_generation_lock: Arc::new(tokio::sync::Mutex::new(())),
             refocus: RefocusConfig {
                 allowed_hosts: HashSet::from(["localhost:8788".to_owned()]),
@@ -3708,6 +4140,262 @@ mod knowledge_destination_tests {
         )
         .await;
         assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn knowledge_review_links_and_ignores_curated_names_without_browsing_files() {
+        let state = test_state();
+        std::fs::create_dir_all(state.workspace.canonical_root().join("Products")).unwrap();
+        std::fs::write(
+            state.workspace.canonical_root().join("Products/Alpha.md"),
+            "# Alpha\nprivate product details",
+        )
+        .unwrap();
+        state
+            .store
+            .set_owner_secret_hash(&hash_owner_secret("owner-secret-for-tests").unwrap())
+            .unwrap();
+        let profile = state
+            .store
+            .save_active_workspace_profile(
+                state.workspace.root_binding(),
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+                None,
+            )
+            .unwrap();
+        state
+            .store
+            .save_knowledge_collection(
+                None,
+                &profile.id,
+                "Products",
+                "Canonical product notes",
+                &["Products".to_owned()],
+                &[],
+                true,
+                None,
+            )
+            .unwrap();
+        state
+            .store
+            .insert_event(log_inbox_core::models::LogEventInput {
+                timestamp: Some("2026-09-09T12:00:00Z".parse().unwrap()),
+                source: "codex/private-host".to_owned(),
+                level: Some("info".to_owned()),
+                message: "private event body".to_owned(),
+                metadata: Some(serde_json::Map::from_iter([
+                    ("product".to_owned(), json!("Unmapped Product")),
+                    ("branch".to_owned(), json!("private-branch")),
+                ])),
+                fingerprint: None,
+            })
+            .unwrap();
+        let limited = generate_session_credentials();
+        state
+            .store
+            .create_dashboard_session(
+                &limited,
+                &["knowledge:read".to_owned()],
+                Utc::now(),
+                Duration::minutes(30),
+                Duration::hours(8),
+            )
+            .unwrap();
+        let app = build_router(state);
+        let limited_cookie = format!("log_inbox_session={}", limited.session_token);
+        let limited_review = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/knowledge/review",
+            json!({}),
+            Some(&limited_cookie),
+            None,
+        )
+        .await;
+        assert_eq!(limited_review.status(), StatusCode::UNAUTHORIZED);
+
+        let login = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/auth/login",
+            json!({"owner_secret": "owner-secret-for-tests"}),
+            None,
+            None,
+        )
+        .await;
+        let cookie = login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let csrf = response_json(login).await["csrf_token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let notes = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/knowledge/notes?query=alpha",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        let notes = response_json(notes).await;
+        assert_eq!(notes["notes"][0]["path"], "Products/Alpha.md");
+        assert!(!notes.to_string().contains("private product details"));
+
+        let review = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/knowledge/review",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(review.status(), StatusCode::OK);
+        let review = response_json(review).await;
+        assert_eq!(review["review_status"], "ready");
+        assert_eq!(review["unresolved"]["identities"][0]["field"], "product");
+        assert_eq!(
+            review["unresolved"]["identities"][0]["value"],
+            "Unmapped Product"
+        );
+        let review_text = review.to_string();
+        assert!(!review_text.contains("private event body"));
+        assert!(!review_text.contains("private-branch"));
+        assert!(!review_text.contains("codex/private-host"));
+
+        let outside = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/knowledge/mappings",
+            json!({
+                "mapping": {"field": "product", "value": "Unmapped Product", "canonical_note_path": "Elsewhere.md"},
+                "expected_updated_at": null
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(outside.status(), StatusCode::CONFLICT);
+        let created = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/knowledge/mappings",
+            json!({
+                "mapping": {"field": "product", "value": "Unmapped Product", "canonical_note_path": "Products/Alpha.md"},
+                "expected_updated_at": null
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = response_json(created).await;
+        let mapping_id = created["mapping"]["id"].as_str().unwrap();
+        let mapping_updated_at = created["mapping"]["updated_at"].clone();
+        let duplicate = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/knowledge/mappings",
+            json!({
+                "mapping": {"field": "product", "value": "unmapped product", "canonical_note_path": "Products/Alpha.md"},
+                "expected_updated_at": null
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+        let linked_review = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/knowledge/review",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        let linked_review = response_json(linked_review).await;
+        assert_eq!(linked_review["mappings"].as_array().unwrap().len(), 1);
+        assert!(
+            linked_review["unresolved"]["identities"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        let stale = json_response(
+            app.clone(),
+            "PUT",
+            &format!("/api/v2/knowledge/mappings/{mapping_id}"),
+            json!({
+                "mapping": {"field": "product", "value": "Unmapped Product", "canonical_note_path": "Products/Alpha.md", "enabled": false},
+                "expected_updated_at": DateTime::<Utc>::UNIX_EPOCH
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        let deleted = json_response(
+            app.clone(),
+            "DELETE",
+            &format!("/api/v2/knowledge/mappings/{mapping_id}"),
+            json!({"expected_updated_at": mapping_updated_at}),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+        let ignored = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/knowledge/ignored",
+            json!({"field": "product", "value": "Unmapped Product"}),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(ignored.status(), StatusCode::CREATED);
+        let ignored = response_json(ignored).await;
+        let ignored_id = ignored["ignored"]["id"].as_str().unwrap();
+        let ignored_review = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/knowledge/review",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        let ignored_review = response_json(ignored_review).await;
+        assert_eq!(ignored_review["ignored"].as_array().unwrap().len(), 1);
+        assert!(
+            ignored_review["unresolved"]["identities"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let reopened = json_response(
+            app.clone(),
+            "DELETE",
+            &format!("/api/v2/knowledge/ignored/{ignored_id}"),
+            json!({}),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(reopened.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]

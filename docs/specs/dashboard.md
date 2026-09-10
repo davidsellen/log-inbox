@@ -33,6 +33,8 @@ Creating or editing a collection is review-first. The owner enters one to eight 
 
 Folder discovery is a bounded typeahead inside collection path fields. It returns safe relative directory paths only—never filenames or Markdown content. Knowledge loads independently from Daily, remains visible but read-only after a reload until changes are unlocked, and has an addressable `?view=knowledge` URL with browser-history navigation.
 
+The next Knowledge surface is review-oriented rather than tree-oriented. Names to review contains only bounded durable product/project/repository/application/service/module/work-item/PR identities from recent retained evidence that are not already resolved or ignored. Source names, branches, task/session IDs, messages, and other transient diagnostics stay hidden. Choosing Link opens a bounded title/path note search within enabled collections; choosing Ignore only removes that name from this list. Saved links are grouped separately by canonical note and expose pause, change, and remove actions. All changes are explicit and affect only new or regenerated Daily candidates.
+
 ## Boundaries
 
 - No browser directory picker, IndexedDB vault, file tree, or general vault browsing.

@@ -747,6 +747,60 @@ impl Store {
             .map_err(Into::into)
     }
 
+    pub fn update_context_mapping(
+        &self,
+        id: &str,
+        workspace_id: &str,
+        selectors: &[LinkSelector],
+        canonical_note_path: &str,
+        enabled: bool,
+        expected_updated_at: DateTime<Utc>,
+    ) -> Result<ContextMapping> {
+        validate_id(id)?;
+        let selectors_json = serde_json::to_string(&normalized_selectors(selectors)?)?;
+        validate_markdown_path(canonical_note_path)?;
+        let now = Utc::now().to_rfc3339();
+        let changed = self.connect()?.execute(
+            r#"UPDATE context_mappings
+               SET selectors_json = ?1, canonical_note_path = ?2, enabled = ?3,
+                   source_identity = NULL, source_digest = NULL, updated_at = ?4
+               WHERE id = ?5 AND workspace_id = ?6 AND updated_at = ?7"#,
+            params![
+                selectors_json,
+                canonical_note_path,
+                enabled,
+                now,
+                id,
+                workspace_id,
+                expected_updated_at.to_rfc3339(),
+            ],
+        )?;
+        anyhow::ensure!(
+            changed == 1,
+            "context mapping changed; reload and try again"
+        );
+        self.context_mapping(id)?
+            .context("context mapping missing after update")
+    }
+
+    pub fn delete_context_mapping(
+        &self,
+        id: &str,
+        workspace_id: &str,
+        expected_updated_at: DateTime<Utc>,
+    ) -> Result<()> {
+        validate_id(id)?;
+        let changed = self.connect()?.execute(
+            "DELETE FROM context_mappings WHERE id = ?1 AND workspace_id = ?2 AND updated_at = ?3",
+            params![id, workspace_id, expected_updated_at.to_rfc3339()],
+        )?;
+        anyhow::ensure!(
+            changed == 1,
+            "context mapping changed; reload and try again"
+        );
+        Ok(())
+    }
+
     pub fn save_context_mapping(&self, mapping: &ContextMapping) -> Result<ContextMapping> {
         let selectors = normalized_selectors(&mapping.selectors)?;
         validate_markdown_path(&mapping.canonical_note_path)?;
@@ -856,6 +910,30 @@ impl Store {
                 ignored_context_from_row,
             )
             .map_err(Into::into)
+    }
+
+    pub fn list_ignored_context_identities(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<IgnoredContextIdentity>> {
+        let conn = self.connect()?;
+        let mut statement = conn.prepare(
+            "SELECT id, workspace_id, field, value, normalized_value, source_identity, source_digest, created_at FROM ignored_context_identities WHERE workspace_id = ?1 ORDER BY field, normalized_value",
+        )?;
+        statement
+            .query_map(params![workspace_id], ignored_context_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn delete_ignored_context_identity(&self, id: &str, workspace_id: &str) -> Result<()> {
+        validate_id(id)?;
+        let changed = self.connect()?.execute(
+            "DELETE FROM ignored_context_identities WHERE id = ?1 AND workspace_id = ?2",
+            params![id, workspace_id],
+        )?;
+        anyhow::ensure!(changed == 1, "ignored context identity was not found");
+        Ok(())
     }
 }
 
@@ -1616,11 +1694,38 @@ mod tests {
                 })
                 .is_err()
         );
+        let updated = store
+            .update_context_mapping(
+                &saved.id,
+                &profile.id,
+                &[LinkSelector {
+                    field: "pull_request".to_owned(),
+                    operator: "exact".to_owned(),
+                    value: "9374".to_owned(),
+                }],
+                "Products/Log Inbox.md",
+                false,
+                saved.updated_at,
+            )
+            .unwrap();
+        assert!(!updated.enabled);
+        assert!(
+            store
+                .update_context_mapping(
+                    &updated.id,
+                    &profile.id,
+                    &updated.selectors,
+                    &updated.canonical_note_path,
+                    true,
+                    saved.updated_at,
+                )
+                .is_err()
+        );
 
         let ignored = store
             .save_ignored_context_identity(&IgnoredContextIdentity {
                 id: "ignored_test".to_owned(),
-                workspace_id: profile.id,
+                workspace_id: profile.id.clone(),
                 field: "module".to_owned(),
                 value: "Noise".to_owned(),
                 normalized_value: "noise".to_owned(),
@@ -1630,6 +1735,23 @@ mod tests {
             })
             .unwrap();
         assert_eq!(ignored.normalized_value, "noise");
+        assert_eq!(
+            store.list_ignored_context_identities(&profile.id).unwrap(),
+            vec![ignored.clone()]
+        );
+        store
+            .delete_ignored_context_identity(&ignored.id, &profile.id)
+            .unwrap();
+        assert!(
+            store
+                .list_ignored_context_identities(&profile.id)
+                .unwrap()
+                .is_empty()
+        );
+        store
+            .delete_context_mapping(&updated.id, &profile.id, updated.updated_at)
+            .unwrap();
+        assert!(store.list_context_mappings(&profile.id).unwrap().is_empty());
     }
 
     #[test]
