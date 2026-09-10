@@ -17,6 +17,6 @@ The workspace contains user-owned Markdown. Log Inbox owns only the explicitly m
 - No model-selected destination or model-authorized link.
 - No silent overwrite when the file or managed block differs from the reviewed preview.
 
-Canonical product/engineering context is optional and must come from explicit workspace-scoped mappings or later reviewed Knowledge collections. Repository branding alone never establishes a product identity.
+Canonical product/engineering context is optional and must come from explicit workspace-scoped mappings or reviewed Knowledge collections. Repository branding alone never establishes a product identity.
 
 Atomic replacement and optimistic hashes reduce races but cannot guarantee conflict-free writes against an unrelated editor changing the file at the same instant. Conflicts stay visible and require reconciliation.

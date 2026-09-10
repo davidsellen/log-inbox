@@ -1,6 +1,6 @@
 # Daily Engineering Knowledge Roadmap
 
-Status: active implementation. Updated 2026-09-09. Baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
+Status: usable refocused release; personal-pilot validation active. Updated 2026-09-10. Initial baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
 
 This roadmap defines the target direction, delivered foundation, and remaining delivery order. The [README](../README.md) and runtime specs describe the active Daily release; milestone checkboxes record implemented and pending work.
 
@@ -120,7 +120,7 @@ Complete-day regeneration requires complete evidence coverage. After expiry, do 
 
 ## Delivery Milestones
 
-All milestone acceptance criteria below are pending. Deliver small reviewable changes, but do not expose an insecure intermediate runtime or enable both old and new writers against the same workspace.
+Checkboxes distinguish delivered behavior from evidence that still requires real use. Do not expose an insecure intermediate runtime or enable both old and new writers against the same workspace merely to advance a milestone.
 
 ### M0 — Freeze Contracts and Protect the Baseline
 
@@ -156,6 +156,7 @@ Exit gate: representative days can be reviewed accurately without Knowledge setu
 - [x] Remove browser-vault/browser-Apply APIs, IndexedDB code, per-task staging, obsolete semantic-structure APIs, separate proposal/daily/context/index mounts, and superseded configuration.
 - [x] Revise runtime docs/specs/examples together; remove obsolete styles and routes without keeping legacy runtime aliases.
 - [x] Make dashboard Apply the sole initial write interface; remove or disable legacy MCP Apply until its replacement is separately gated.
+- [x] Exercise Compose startup, authentication, generation, reviewed Apply, owner-content preservation, and restart persistence against a disposable workspace and deterministic provider.
 
 Exit gate: recovery, idempotency, preserved-content, authorization and containment tests pass on the declared supported storage; Compose/docs describe only the new contract. This is the first usable refocused release.
 
@@ -165,7 +166,7 @@ Exit gate: recovery, idempotency, preserved-content, authorization and containme
 - [x] Show recent statuses, meaningful missed-day counts, late-event updates and evidence-expiry warnings.
 - [x] Preserve edited candidates on new evidence; implement dismiss/reopen and retention-safe revisions/amendments.
 - [x] Coordinate cleanup across raw data, handled bodies, indexes, audit data and recovery copies.
-- [ ] Run a ten-active-day personal pilot; record correctness, review burden and operational problems.
+- [ ] Run a ten-active-day personal pilot using the [pilot guide](pilot.md); record correctness, review burden and operational problems.
 
 Exit gate: the pilot needs no database repair or manual proposal-folder cleanup, and no loss/authorization blocker remains.
 
@@ -181,7 +182,7 @@ Exit gate: the pilot needs no database repair or manual proposal-folder cleanup,
   - [x] Let the owner exclude an excerpt per workstream and regenerate into a new immutable revision without changing its canonical link.
 - [ ] Evaluate drafts with versus without context. Keep Knowledge optional.
   - [x] Add an opt-in blind paired-comparison workflow with identical frozen inputs, immutable shadow drafts, categorical owner feedback, and atomic selected-arm promotion.
-  - [ ] Run representative real-model comparisons and review usefulness, editing burden, latency, and configuration effort before accepting the result.
+  - [ ] Run representative real-model comparisons using the [pilot guide](pilot.md) and review usefulness, editing burden, latency, and configuration effort before accepting the result.
 
 Exit gate: representative cases show improved factual usefulness or reduced editing with manageable configuration effort.
 

@@ -27,6 +27,16 @@ docker compose up --build
 
 The first run may take several minutes while the model downloads. Services publish to loopback by default; use an authenticated secure route for nonlocal access.
 
+## Disposable workflow smoke test
+
+Run the same container boundary used by CI against a temporary app database and Markdown workspace:
+
+```bash
+tests/smoke/compose_daily.sh
+```
+
+The test uses a deterministic fake OpenAI-compatible provider and random loopback ports. It authenticates, saves workspace settings, generates and reviews one Daily candidate, applies it without replacing owner content, restarts the Daily service, verifies persisted state, and then removes its containers, network, volumes, and temporary files. It never mounts the configured workspace or ordinary `log-inbox-data` volume.
+
 ## Legacy migration
 
 Only an older installation with proposal/context files should use:

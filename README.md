@@ -14,7 +14,7 @@ Daily review is the product. Knowledge context is optional. Log Inbox is not a v
 
 ## Current status
 
-The authenticated Daily workflow, stable workspace profile, immutable revisions, recent-day catch-up, scheduled candidate preparation, exact managed-block preview, journaled Apply/recovery, and reviewed legacy-data cutover are implemented. The [roadmap](docs/roadmap.md) tracks the remaining retention, optional context, and integration work.
+The authenticated Daily workflow, stable workspace profile, immutable revisions, recent-day catch-up, scheduled candidate preparation, retention, optional bounded Knowledge context, exact managed-block preview, journaled Apply/recovery, and reviewed legacy-data cutover are implemented. The [roadmap](docs/roadmap.md) separates delivered behavior from the remaining pilot evidence and explicitly gated integration work.
 
 The browser never mounts or browses a local folder. The service receives one existing Markdown workspace as a host mount; Settings only defines the daily-note convention inside it. Log Inbox writes nothing until **Confirm Apply**, and then changes only its owned managed block.
 
@@ -77,6 +77,8 @@ Messages up to 1 MiB and metadata up to 512 KiB are accepted after secret redact
 6. Select **Confirm Apply** to write. Existing frontmatter and all content outside the Log Inbox block are preserved. Interrupted or conflicting writes remain visible and retryable.
 
 If an older date was missed, use the recent-days rail or select it directly and run the same flow. Optional scheduling prepares previous-day and catch-up candidates for review; it never auto-Applies Markdown. An explicitly saved retention policy is owned by the Daily service and never by the collector.
+
+Use the [personal pilot guide](docs/pilot.md) when evaluating the workflow over real engineering days or comparing drafts with and without Knowledge context.
 
 ## Upgrading older installations
 

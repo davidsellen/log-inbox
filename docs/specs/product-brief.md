@@ -1,6 +1,6 @@
 # Product Brief
 
-Status: planned refocus. See the [roadmap](../roadmap.md) for delivery order and acceptance gates. This brief describes the intended product, not a claim that the current runtime implements it.
+Status: first usable refocused release; personal-pilot validation remains open. See the [roadmap](../roadmap.md) for delivered behavior and acceptance gates.
 
 ## Problem
 
@@ -38,7 +38,7 @@ Keep manual notes separate from automated summaries. Report model failures visib
 - Show the resolved daily destination and block diff; Apply through one reviewed, recoverable writer.
 - Cut over through an idempotent migration that preserves source data on failure and removes obsolete runtime paths only when the replacement is ready.
 
-Scheduling, retention-aware late-event handling, and richer context retrieval follow the roadmap's gates. Remote provider support must bring its full privacy/security requirements forward if needed earlier.
+Scheduling, retention-aware late-event handling, bounded Knowledge context, and blind context comparison are implemented. Remote provider management and broader integrations remain gated by the roadmap's privacy, security, and pilot requirements.
 
 ## Success Criteria
 
