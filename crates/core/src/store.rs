@@ -671,6 +671,32 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 14 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                ALTER TABLE daily_schedule_runs ADD COLUMN scheduled_at TEXT;
+                ALTER TABLE daily_schedule_runs ADD COLUMN timezone TEXT;
+                ALTER TABLE daily_schedule_runs ADD COLUMN settings_revision TEXT;
+                ALTER TABLE daily_schedule_runs ADD COLUMN claim_token TEXT;
+                ALTER TABLE daily_schedule_runs ADD COLUMN lease_expires_at TEXT;
+
+                UPDATE daily_schedule_runs
+                SET scheduled_at = next_attempt_at,
+                    timezone = 'UTC',
+                    settings_revision = 'legacy-v13'
+                WHERE scheduled_at IS NULL;
+
+                CREATE UNIQUE INDEX idx_daily_schedule_runs_claim_token
+                    ON daily_schedule_runs(claim_token) WHERE claim_token IS NOT NULL;
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (14, 'safe Daily schedule claims', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -2100,10 +2126,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 13);
+        assert_eq!(store.schema_version().expect("version reads"), 14);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 13);
+        assert_eq!(store.schema_version().expect("version remains"), 14);
     }
 
     #[test]
@@ -2171,7 +2197,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 13);
+        assert_eq!(verification.schema_version, 14);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());

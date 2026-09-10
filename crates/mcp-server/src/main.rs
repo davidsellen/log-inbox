@@ -2046,15 +2046,37 @@ async fn reconcile_daily_schedule(state: &AppState, now: DateTime<Utc>) -> Resul
         ensure_refocus_daily_day(state, &profile, &workspace, local_date, &destination)?;
         state
             .store
-            .enqueue_daily_schedule_run(&profile.id, local_date, due_at)
+            .enqueue_daily_schedule_run(
+                &profile.id,
+                local_date,
+                due_at,
+                &profile.timezone,
+                &settings.updated_at.to_rfc3339(),
+            )
             .map_err(|error| ApiError::internal(error.to_string()))?;
-        let Some(_) = state
+        let Some(claim) = state
             .store
             .claim_daily_schedule_run(&profile.id, local_date, now)
             .map_err(|error| ApiError::internal(error.to_string()))?
         else {
             continue;
         };
+        let claim_token = claim
+            .claim_token
+            .as_deref()
+            .ok_or_else(|| ApiError::internal("claimed schedule run has no claim token"))?;
+        if state
+            .store
+            .current_proposal_revision(&profile.id, local_date)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .is_some()
+        {
+            state
+                .store
+                .finish_daily_schedule_run(&profile.id, local_date, claim_token, None, Utc::now())
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+            continue;
+        }
         state
             .store
             .set_daily_generation_status(&profile.id, local_date, "queued")
@@ -2063,7 +2085,13 @@ async fn reconcile_daily_schedule(state: &AppState, now: DateTime<Utc>) -> Resul
             Ok(_) => {
                 state
                     .store
-                    .finish_daily_schedule_run(&profile.id, local_date, None, Utc::now())
+                    .finish_daily_schedule_run(
+                        &profile.id,
+                        local_date,
+                        claim_token,
+                        None,
+                        Utc::now(),
+                    )
                     .map_err(|error| ApiError::internal(error.to_string()))?;
             }
             Err(error)
@@ -2072,7 +2100,13 @@ async fn reconcile_daily_schedule(state: &AppState, now: DateTime<Utc>) -> Resul
             {
                 state
                     .store
-                    .finish_daily_schedule_run(&profile.id, local_date, None, Utc::now())
+                    .finish_daily_schedule_run(
+                        &profile.id,
+                        local_date,
+                        claim_token,
+                        None,
+                        Utc::now(),
+                    )
                     .map_err(|error| ApiError::internal(error.to_string()))?;
             }
             Err(error) => {
@@ -2081,7 +2115,8 @@ async fn reconcile_daily_schedule(state: &AppState, now: DateTime<Utc>) -> Resul
                     .finish_daily_schedule_run(
                         &profile.id,
                         local_date,
-                        Some(&error.message),
+                        claim_token,
+                        Some(&bounded_schedule_error(&error.message)),
                         Utc::now(),
                     )
                     .map_err(|store_error| ApiError::internal(store_error.to_string()))?;
@@ -2089,6 +2124,25 @@ async fn reconcile_daily_schedule(state: &AppState, now: DateTime<Utc>) -> Resul
         }
     }
     Ok(())
+}
+
+fn bounded_schedule_error(message: &str) -> String {
+    let sanitized = message
+        .chars()
+        .map(|character| {
+            if character.is_control() && !matches!(character, '\n' | '\t') {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(512)
+        .collect::<String>();
+    if sanitized.trim().is_empty() {
+        "Daily generation failed".to_owned()
+    } else {
+        sanitized
+    }
 }
 
 fn authorize_refocus(
@@ -2525,6 +2579,7 @@ mod knowledge_destination_tests {
         assert_eq!(defaults.status(), StatusCode::OK);
         let defaults = response_json(defaults).await;
         assert_eq!(defaults["saved"], false);
+        assert_eq!(defaults["settings"]["enabled"], false);
         assert_eq!(defaults["settings"]["generation_time"], "00:15");
         assert_eq!(defaults["writes_markdown_automatically"], false);
 
@@ -2585,6 +2640,10 @@ mod knowledge_destination_tests {
                 "markdown",
                 None,
             )
+            .unwrap();
+        state
+            .store
+            .save_daily_automation_settings(&profile.id, true, "00:15", 7, 30, 30, 30, None)
             .unwrap();
         state
             .store

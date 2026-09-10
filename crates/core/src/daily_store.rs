@@ -27,7 +27,7 @@ impl Store {
             .optional()?;
         Ok(stored.unwrap_or_else(|| DailyAutomationSettings {
             workspace_id: workspace_id.to_owned(),
-            enabled: true,
+            enabled: false,
             generation_time: "00:15".to_owned(),
             catch_up_days: 7,
             raw_retention_days: 30,
@@ -123,18 +123,28 @@ impl Store {
         workspace_id: &str,
         local_date: NaiveDate,
         due_at: DateTime<Utc>,
+        timezone: &str,
+        settings_revision: &str,
     ) -> Result<DailyScheduleRun> {
+        anyhow::ensure!(!timezone.trim().is_empty(), "schedule timezone is required");
+        anyhow::ensure!(
+            !settings_revision.trim().is_empty(),
+            "schedule settings revision is required"
+        );
         let now = Utc::now().to_rfc3339();
         self.connect()?.execute(
             r#"INSERT INTO daily_schedule_runs
-               (workspace_id, local_date, state, attempts, next_attempt_at, updated_at)
-               VALUES (?1, ?2, 'pending', 0, ?3, ?4)
+               (workspace_id, local_date, state, attempts, next_attempt_at, updated_at,
+                scheduled_at, timezone, settings_revision)
+               VALUES (?1, ?2, 'pending', 0, ?3, ?4, ?3, ?5, ?6)
                ON CONFLICT(workspace_id, local_date) DO NOTHING"#,
             params![
                 workspace_id,
                 local_date.to_string(),
                 due_at.to_rfc3339(),
-                now
+                now,
+                timezone,
+                settings_revision,
             ],
         )?;
         self.daily_schedule_run(workspace_id, local_date)?
@@ -147,20 +157,24 @@ impl Store {
         local_date: NaiveDate,
         now: DateTime<Utc>,
     ) -> Result<Option<DailyScheduleRun>> {
-        let stale_before = now - Duration::minutes(30);
+        let claim_token = format!("schedule_claim_{}", Uuid::new_v4().simple());
+        let lease_expires_at = now + Duration::hours(2);
         let conn = self.connect()?;
         let changed = conn.execute(
             r#"UPDATE daily_schedule_runs
                SET state = 'claimed', attempts = attempts + 1, claimed_at = ?1,
-                   last_error = NULL, updated_at = ?1
-               WHERE workspace_id = ?2 AND local_date = ?3
+                   claim_token = ?2, lease_expires_at = ?3, last_error = NULL, updated_at = ?1
+               WHERE workspace_id = ?4 AND local_date = ?5
                  AND next_attempt_at <= ?1
-                 AND (state IN ('pending', 'failed') OR (state = 'claimed' AND claimed_at <= ?4))"#,
+                 AND attempts < 5
+                 AND (state IN ('pending', 'failed')
+                      OR (state = 'claimed' AND lease_expires_at <= ?1))"#,
             params![
                 now.to_rfc3339(),
+                claim_token,
+                lease_expires_at.to_rfc3339(),
                 workspace_id,
                 local_date.to_string(),
-                stale_before.to_rfc3339(),
             ],
         )?;
         if changed == 0 {
@@ -173,6 +187,7 @@ impl Store {
         &self,
         workspace_id: &str,
         local_date: NaiveDate,
+        claim_token: &str,
         error: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<DailyScheduleRun> {
@@ -180,10 +195,20 @@ impl Store {
             None => ("completed", Some(now.to_rfc3339()), now.to_rfc3339(), None),
             Some(error) => {
                 anyhow::ensure!(error.len() <= 2048, "schedule error is too large");
+                let attempts = self
+                    .daily_schedule_run(workspace_id, local_date)?
+                    .context("schedule run is missing")?
+                    .attempts;
+                let delay_minutes = match attempts {
+                    0 | 1 => 15,
+                    2 => 60,
+                    3 => 240,
+                    _ => 720,
+                };
                 (
                     "failed",
                     None,
-                    (now + Duration::minutes(15)).to_rfc3339(),
+                    (now + Duration::minutes(delay_minutes)).to_rfc3339(),
                     Some(error),
                 )
             }
@@ -192,7 +217,8 @@ impl Store {
             r#"UPDATE daily_schedule_runs
                SET state = ?1, completed_at = ?2, next_attempt_at = ?3,
                    last_error = ?4, updated_at = ?5
-               WHERE workspace_id = ?6 AND local_date = ?7 AND state = 'claimed'"#,
+               WHERE workspace_id = ?6 AND local_date = ?7 AND state = 'claimed'
+                 AND claim_token = ?8"#,
             params![
                 state,
                 completed_at,
@@ -201,6 +227,7 @@ impl Store {
                 now.to_rfc3339(),
                 workspace_id,
                 local_date.to_string(),
+                claim_token,
             ],
         )?;
         anyhow::ensure!(changed == 1, "schedule run is not claimed");
@@ -219,7 +246,7 @@ impl Store {
         );
         let conn = self.connect()?;
         let mut statement = conn.prepare(
-            "SELECT workspace_id, local_date, state, attempts, next_attempt_at, claimed_at, completed_at, last_error, updated_at FROM daily_schedule_runs WHERE workspace_id = ?1 ORDER BY local_date DESC LIMIT ?2",
+            "SELECT workspace_id, local_date, state, attempts, scheduled_at, timezone, settings_revision, next_attempt_at, claim_token, lease_expires_at, claimed_at, completed_at, last_error, updated_at FROM daily_schedule_runs WHERE workspace_id = ?1 ORDER BY local_date DESC LIMIT ?2",
         )?;
         let rows =
             statement.query_map(params![workspace_id, limit], daily_schedule_run_from_row)?;
@@ -234,7 +261,7 @@ impl Store {
     ) -> Result<Option<DailyScheduleRun>> {
         self.connect()?
             .query_row(
-                "SELECT workspace_id, local_date, state, attempts, next_attempt_at, claimed_at, completed_at, last_error, updated_at FROM daily_schedule_runs WHERE workspace_id = ?1 AND local_date = ?2",
+                "SELECT workspace_id, local_date, state, attempts, scheduled_at, timezone, settings_revision, next_attempt_at, claim_token, lease_expires_at, claimed_at, completed_at, last_error, updated_at FROM daily_schedule_runs WHERE workspace_id = ?1 AND local_date = ?2",
                 params![workspace_id, local_date.to_string()],
                 daily_schedule_run_from_row,
             )
@@ -1422,10 +1449,12 @@ fn daily_automation_settings_from_row(row: &Row<'_>) -> rusqlite::Result<DailyAu
 
 fn daily_schedule_run_from_row(row: &Row<'_>) -> rusqlite::Result<DailyScheduleRun> {
     let local_date: String = row.get(1)?;
-    let next_attempt_at: String = row.get(4)?;
-    let claimed_at: Option<String> = row.get(5)?;
-    let completed_at: Option<String> = row.get(6)?;
-    let updated_at: String = row.get(8)?;
+    let scheduled_at: String = row.get(4)?;
+    let next_attempt_at: String = row.get(7)?;
+    let lease_expires_at: Option<String> = row.get(9)?;
+    let claimed_at: Option<String> = row.get(10)?;
+    let completed_at: Option<String> = row.get(11)?;
+    let updated_at: String = row.get(13)?;
     Ok(DailyScheduleRun {
         workspace_id: row.get(0)?,
         local_date: parse_date(&local_date).map_err(|error| {
@@ -1433,15 +1462,31 @@ fn daily_schedule_run_from_row(row: &Row<'_>) -> rusqlite::Result<DailyScheduleR
         })?,
         state: row.get(2)?,
         attempts: row.get(3)?,
-        next_attempt_at: parse_time(&next_attempt_at).map_err(|error| {
+        scheduled_at: parse_time(&scheduled_at).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, error.into())
         })?,
+        timezone: row.get(5)?,
+        settings_revision: row.get(6)?,
+        next_attempt_at: parse_time(&next_attempt_at).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, error.into())
+        })?,
+        claim_token: row.get(8)?,
+        lease_expires_at: lease_expires_at
+            .map(|value| parse_time(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    9,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            })?,
         claimed_at: claimed_at
             .map(|value| parse_time(&value))
             .transpose()
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    5,
+                    10,
                     rusqlite::types::Type::Text,
                     error.into(),
                 )
@@ -1451,14 +1496,14 @@ fn daily_schedule_run_from_row(row: &Row<'_>) -> rusqlite::Result<DailyScheduleR
             .transpose()
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    6,
+                    11,
                     rusqlite::types::Type::Text,
                     error.into(),
                 )
             })?,
-        last_error: row.get(7)?,
+        last_error: row.get(12)?,
         updated_at: parse_time(&updated_at).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, error.into())
+            rusqlite::Error::FromSqlConversionFailure(13, rusqlite::types::Type::Text, error.into())
         })?,
     })
 }
@@ -1658,7 +1703,7 @@ mod tests {
         let defaults = store
             .daily_automation_settings(&profile.id)
             .expect("defaults resolve");
-        assert!(defaults.enabled);
+        assert!(!defaults.enabled);
         assert_eq!(defaults.generation_time, "00:15");
         assert_eq!(defaults.catch_up_days, 7);
 
@@ -1678,7 +1723,13 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
         let now = Utc::now();
         store
-            .enqueue_daily_schedule_run(&profile.id, date, now)
+            .enqueue_daily_schedule_run(
+                &profile.id,
+                date,
+                now,
+                "Europe/Stockholm",
+                &saved.updated_at.to_rfc3339(),
+            )
             .expect("run enqueues");
         let claimed = store
             .claim_daily_schedule_run(&profile.id, date, now)
@@ -1686,6 +1737,16 @@ mod tests {
             .expect("run claims");
         assert_eq!(claimed.state, "claimed");
         assert_eq!(claimed.attempts, 1);
+        assert_eq!(claimed.scheduled_at, now);
+        assert_eq!(claimed.timezone, "Europe/Stockholm");
+        let claim_token = claimed.claim_token.clone().expect("claim token exists");
+        assert!(
+            store
+                .finish_daily_schedule_run(&profile.id, date, "stale-claim-token", None, now,)
+                .unwrap_err()
+                .to_string()
+                .contains("not claimed")
+        );
         assert!(
             store
                 .claim_daily_schedule_run(&profile.id, date, now)
@@ -1693,7 +1754,13 @@ mod tests {
                 .is_none()
         );
         let failed = store
-            .finish_daily_schedule_run(&profile.id, date, Some("model unavailable"), now)
+            .finish_daily_schedule_run(
+                &profile.id,
+                date,
+                &claim_token,
+                Some("model unavailable"),
+                now,
+            )
             .expect("failure records");
         assert_eq!(failed.state, "failed");
         assert_eq!(failed.last_error.as_deref(), Some("model unavailable"));
