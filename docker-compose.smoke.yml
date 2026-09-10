@@ -1,0 +1,60 @@
+services:
+  fake-llm:
+    image: python:3.13-alpine
+    command: ["python", "/app/fake_llm.py"]
+    volumes:
+      - ./tests/smoke/fake_llm.py:/app/fake_llm.py:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 1s
+      timeout: 2s
+      retries: 20
+
+  collector:
+    image: log-inbox-collector:smoke
+    build:
+      context: .
+      dockerfile: docker/collector.Dockerfile
+      args:
+        APP_UID: "${LOG_INBOX_SMOKE_UID}"
+        APP_GID: "${LOG_INBOX_SMOKE_GID}"
+    environment:
+      LOG_INBOX_DATA_DIR: /data
+      LOG_INBOX_API_KEYS: smoke-ingest-key
+    ports:
+      - target: 8787
+        published: "0"
+        host_ip: 127.0.0.1
+    volumes:
+      - "${LOG_INBOX_SMOKE_DATA_DIR}:/data"
+
+  daily:
+    image: log-inbox-daily:smoke
+    build:
+      context: .
+      dockerfile: docker/mcp.Dockerfile
+      args:
+        APP_UID: "${LOG_INBOX_SMOKE_UID}"
+        APP_GID: "${LOG_INBOX_SMOKE_GID}"
+    environment:
+      LOG_INBOX_DATA_DIR: /data
+      LOG_INBOX_OWNER_SECRET: smoke-owner-secret-at-least-20-bytes
+      LOG_INBOX_ALLOWED_HOSTS: 127.0.0.1:8788
+      LOG_INBOX_ALLOWED_ORIGINS: http://127.0.0.1:8788
+      LOG_INBOX_WORKSPACE_DIR: /workspace
+      LOG_INBOX_LLM_BASE_URL: http://fake-llm:8000/v1
+      LOG_INBOX_LLM_MODEL: smoke-model
+      LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS: 10
+    ports:
+      - target: 8788
+        published: "0"
+        host_ip: 127.0.0.1
+    volumes:
+      - "${LOG_INBOX_SMOKE_DATA_DIR}:/data"
+      - "${LOG_INBOX_SMOKE_WORKSPACE_DIR}:/workspace"
+    userns_mode: host
+    depends_on:
+      collector:
+        condition: service_started
+      fake-llm:
+        condition: service_healthy
