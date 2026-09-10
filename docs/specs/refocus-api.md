@@ -48,10 +48,12 @@ Requires the session cookie and `logs:read`. The URL contains a calendar date, n
 - bounded automated evidence and truncation state;
 - trusted owner-authored manual entries stored outside ingest;
 - frozen day state, current immutable proposal revision and its evidence snapshot when present;
-- server-derived candidate freshness, so late evidence is never presented as part of an older current draft;
+- server-derived candidate freshness and separate new/expired evidence counts, so late evidence is never presented as part of an older current draft and raw retention is not mistaken for a new arrival;
 - deterministic `preview_markdown` rendered from the structured current revision, trusted manual entries, and evidence dispositions.
 
 The endpoint never creates a day, snapshot, revision, folder, or Markdown file. Missing workspace review or a replaced mount is `409 Conflict`; malformed dates are `400 Bad Request`.
+
+Snapshot evidence carries an `available` flag. Expired raw evidence remains represented by its immutable ID, digest, and review decision; it makes `evidence_complete` false but does not by itself make the candidate stale. Only a live automated event absent from the snapshot, or a changed trusted manual-entry set, requires regeneration.
 
 ## Manual daily entries
 

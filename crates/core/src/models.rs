@@ -293,6 +293,7 @@ pub struct EvidenceSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotEvidence {
     pub event_id: String,
+    pub available: bool,
     pub position: u64,
     pub event_digest: String,
     pub disposition: Option<String>,

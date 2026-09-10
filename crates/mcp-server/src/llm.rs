@@ -1866,6 +1866,7 @@ mod tests {
         };
         let decisions = vec![SnapshotEvidence {
             event_id: "evt_omit".to_owned(),
+            available: true,
             position: 1,
             event_digest: "digest".to_owned(),
             disposition: Some("omit".to_owned()),

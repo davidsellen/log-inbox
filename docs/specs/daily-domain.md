@@ -47,6 +47,8 @@ An evidence snapshot is immutable and belongs to one day. It contains an ordered
 
 Future-dated events outside the configured tolerance are quarantined. They remain inspectable but cannot enter automatic generation until explicitly resolved. Expired evidence cannot be reconstructed from a surviving summary.
 
+Raw expiry clears only the snapshot's live-event reference. The immutable evidence ID, digest, ordering, and recorded disposition survive, so an already reviewed exact revision may still be applied when no newer evidence exists. The UI must disclose incomplete evidence; regeneration that would require expired raw content must refuse or use an explicit amendment path.
+
 ### Workstream and proposal revision
 
 A proposal revision contains structured workstreams. A workstream has a stable revision-local ID, grouping identities, an optional reviewed canonical subject, adaptive factual fields, references, and the evidence IDs supporting each factual field.

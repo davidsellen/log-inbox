@@ -482,8 +482,9 @@ impl Store {
             .context("daily day is required before a manual entry")?;
         let id = format!("manual_{}", Uuid::new_v4().simple());
         let now = Utc::now().to_rfc3339();
-        let conn = self.connect()?;
-        conn.execute(
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        transaction.execute(
             "INSERT INTO manual_daily_entries (id, workspace_id, local_date, text, references_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
             params![
                 id,
@@ -494,6 +495,11 @@ impl Store {
                 now
             ],
         )?;
+        transaction.execute(
+            "UPDATE daily_days SET freshness = 'update_available', updated_at = ?1 WHERE workspace_id = ?2 AND local_date = ?3 AND current_revision_id IS NOT NULL",
+            params![now, workspace_id, local_date.to_string()],
+        )?;
+        transaction.commit()?;
         self.manual_daily_entry(&id)?
             .context("manual entry missing after creation")
     }
@@ -703,7 +709,7 @@ impl Store {
             params![id, workspace_id, local_date.to_string(), snapshot_id, revision_number, origin, content_json, content_hash, now],
         )?;
         transaction.execute(
-            "UPDATE daily_days SET current_revision_id = ?1, generation_status = 'ready', review_status = 'in_review', updated_at = ?2 WHERE workspace_id = ?3 AND local_date = ?4",
+            "UPDATE daily_days SET current_revision_id = ?1, generation_status = 'ready', review_status = 'in_review', freshness = 'current', updated_at = ?2 WHERE workspace_id = ?3 AND local_date = ?4",
             params![id, now, workspace_id, local_date.to_string()],
         )?;
         transaction.commit()?;
@@ -1108,7 +1114,7 @@ impl Store {
     pub fn snapshot_evidence(&self, snapshot_id: &str) -> Result<Vec<SnapshotEvidence>> {
         let conn = self.connect()?;
         let mut statement = conn.prepare(
-            "SELECT event_id, position, event_digest, disposition, related_event_id, decision_actor, decision_reason, decided_at FROM evidence_snapshot_events WHERE snapshot_id = ?1 ORDER BY position",
+            "SELECT event_id, live_event_id IS NOT NULL, position, event_digest, disposition, related_event_id, decision_actor, decision_reason, decided_at FROM evidence_snapshot_events WHERE snapshot_id = ?1 ORDER BY position",
         )?;
         statement
             .query_map(params![snapshot_id], snapshot_evidence_from_row)?
@@ -1556,20 +1562,21 @@ fn manual_entry_from_row(row: &Row<'_>) -> rusqlite::Result<ManualDailyEntry> {
 }
 
 fn snapshot_evidence_from_row(row: &Row<'_>) -> rusqlite::Result<SnapshotEvidence> {
-    let decided_at: Option<String> = row.get(7)?;
+    let decided_at: Option<String> = row.get(8)?;
     Ok(SnapshotEvidence {
         event_id: row.get(0)?,
-        position: row.get(1)?,
-        event_digest: row.get(2)?,
-        disposition: row.get(3)?,
-        related_event_id: row.get(4)?,
-        decision_actor: row.get(5)?,
-        decision_reason: row.get(6)?,
+        available: row.get(1)?,
+        position: row.get(2)?,
+        event_digest: row.get(3)?,
+        disposition: row.get(4)?,
+        related_event_id: row.get(5)?,
+        decision_actor: row.get(6)?,
+        decision_reason: row.get(7)?,
         decided_at: decided_at
             .map(|value| {
                 parse_time(&value).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        7,
+                        8,
                         rusqlite::types::Type::Text,
                         error.into(),
                     )
@@ -2153,6 +2160,7 @@ mod tests {
             .expect("snapshot evidence remains");
         assert_eq!(evidence.len(), 1);
         assert_eq!(evidence[0].event_id, event.id);
+        assert!(!evidence[0].available);
         let live_event_id: Option<String> = store
             .connect()
             .unwrap()
@@ -2163,6 +2171,79 @@ mod tests {
             )
             .expect("live reference reads");
         assert_eq!(live_event_id, None);
+    }
+
+    #[test]
+    fn late_evidence_marks_a_reviewed_day_stale_and_a_new_revision_resets_it() {
+        let store = Store::open(std::env::temp_dir().join(format!(
+            "log-inbox-daily-freshness-{}.sqlite3",
+            Uuid::new_v4()
+        )))
+        .expect("store opens");
+        let profile = store
+            .create_pending_workspace_profile(
+                "freshness-binding",
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+            )
+            .and_then(|profile| store.activate_workspace_profile(&profile.id))
+            .expect("profile activates");
+        let date = NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+        store
+            .ensure_daily_day(date, "Work Log/2026-09-09.md", None)
+            .expect("day freezes");
+        store
+            .create_proposal_revision(
+                &profile.id,
+                date,
+                None,
+                "advanced_markdown",
+                &serde_json::json!("Reviewed Daily"),
+            )
+            .expect("revision stores");
+
+        store
+            .insert_event(LogEventInput {
+                source: "codex/test".to_owned(),
+                level: Some("info".to_owned()),
+                timestamp: Some("2026-09-09T12:00:00Z".parse().unwrap()),
+                message: "late automated evidence".to_owned(),
+                metadata: None,
+                fingerprint: None,
+            })
+            .expect("late evidence stores");
+        assert_eq!(
+            store
+                .daily_day(&profile.id, date)
+                .unwrap()
+                .unwrap()
+                .freshness,
+            "update_available"
+        );
+
+        store
+            .create_manual_daily_entry(&profile.id, date, "Late manual note", &[])
+            .expect("manual evidence stores");
+        store
+            .create_proposal_revision(
+                &profile.id,
+                date,
+                None,
+                "advanced_markdown",
+                &serde_json::json!("Updated Daily"),
+            )
+            .expect("replacement revision stores");
+        assert_eq!(
+            store
+                .daily_day(&profile.id, date)
+                .unwrap()
+                .unwrap()
+                .freshness,
+            "current"
+        );
     }
 
     fn apply_operation_fixture() -> (Store, PrepareApplyOperation) {

@@ -733,15 +733,9 @@ async fn refocus_daily_day(
             .unwrap_or_default();
         let stored_event_ids = current_snapshot
             .as_ref()
-            .map(|snapshot| {
-                snapshot
-                    .event_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-            })
+            .map(|snapshot| snapshot.event_ids.as_slice())
             .unwrap_or_default();
-        if stored_event_ids == live_event_ids
+        if !has_new_automated_evidence(&live_event_ids, stored_event_ids)
             && stored_manual_ids
                 .iter()
                 .map(String::as_str)
@@ -755,6 +749,25 @@ async fn refocus_daily_day(
     let preview_markdown = current_content.as_ref().map(|content| {
         llm::render_daily_revision_preview(content, &manual_entries, &current_snapshot_evidence)
     });
+    let expired_evidence_count = current_snapshot_evidence
+        .iter()
+        .filter(|item| !item.available)
+        .count();
+    let new_evidence_count = if current_revision.is_some() {
+        current_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                live_event_ids
+                    .iter()
+                    .filter(|event_id| {
+                        !snapshot.event_ids.iter().any(|stored| stored == **event_id)
+                    })
+                    .count()
+            })
+            .unwrap_or(live_event_ids.len())
+    } else {
+        0
+    };
     let apply_status = state
         .store
         .latest_apply_operation(&profile.id, local_date)
@@ -780,6 +793,9 @@ async fn refocus_daily_day(
         "current_snapshot": current_snapshot,
         "current_snapshot_evidence": current_snapshot_evidence,
         "candidate_freshness": candidate_freshness,
+        "new_evidence_count": new_evidence_count,
+        "expired_evidence_count": expired_evidence_count,
+        "evidence_complete": expired_evidence_count == 0,
         "preview_markdown": preview_markdown,
         "apply_status": apply_status
     })))
@@ -1476,19 +1492,13 @@ fn daily_apply_material(
         .collect::<Vec<_>>();
     let snapshot_event_ids = snapshot
         .as_ref()
-        .map(|snapshot| {
-            snapshot
-                .event_ids
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-        })
+        .map(|snapshot| snapshot.event_ids.as_slice())
         .unwrap_or_default();
     let live_manual_ids = manual_entries
         .iter()
         .map(|entry| entry.id.as_str())
         .collect::<Vec<_>>();
-    if live_event_ids != snapshot_event_ids
+    if has_new_automated_evidence(&live_event_ids, snapshot_event_ids)
         || !content
             .manual_entry_ids
             .iter()
@@ -1568,6 +1578,12 @@ fn daily_apply_material(
         original_content,
         plan,
     })
+}
+
+fn has_new_automated_evidence(live_event_ids: &[&str], snapshot_event_ids: &[String]) -> bool {
+    live_event_ids
+        .iter()
+        .any(|event_id| !snapshot_event_ids.iter().any(|stored| stored == event_id))
 }
 
 fn ensure_refocus_daily_day(
@@ -2292,6 +2308,16 @@ impl IntoResponse for ApiError {
 mod knowledge_destination_tests {
     use super::*;
     use tower::ServiceExt;
+
+    #[test]
+    fn only_live_ids_absent_from_the_snapshot_are_new_evidence() {
+        let snapshot = vec!["expired".to_owned(), "still-live".to_owned()];
+        assert!(!has_new_automated_evidence(&["still-live"], &snapshot));
+        assert!(has_new_automated_evidence(
+            &["still-live", "arrived-late"],
+            &snapshot
+        ));
+    }
 
     fn test_state() -> AppState {
         let store = Store::open(

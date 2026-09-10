@@ -1166,8 +1166,9 @@ impl Store {
         let metadata = redact_metadata(input.metadata.unwrap_or_default());
         let metadata_json = serde_json::to_string(&metadata)?;
 
-        let conn = self.connect()?;
-        conn.execute(
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        transaction.execute(
             r#"
             INSERT INTO log_events
                 (id, received_at, timestamp, source, level, message, metadata_json, fingerprint, truncated)
@@ -1186,6 +1187,23 @@ impl Store {
                 0,
             ],
         )?;
+
+        transaction.execute(
+            r#"UPDATE daily_days
+               SET freshness = 'update_available', updated_at = ?1
+               WHERE current_revision_id IS NOT NULL
+                 AND start_utc <= ?2 AND end_utc > ?2
+                 AND NOT EXISTS (
+                     SELECT 1
+                     FROM proposal_revisions AS revision
+                     JOIN evidence_snapshot_events AS evidence
+                       ON evidence.snapshot_id = revision.snapshot_id
+                     WHERE revision.id = daily_days.current_revision_id
+                       AND evidence.event_id = ?3
+                 )"#,
+            params![now.to_rfc3339(), timestamp.to_rfc3339(), id],
+        )?;
+        transaction.commit()?;
 
         self.get_event(&id)?.context("inserted event missing")
     }
