@@ -1235,7 +1235,11 @@ impl Store {
     }
 
     pub fn prune_old_events(&self, retention_days: u64) -> Result<usize> {
-        let cutoff = Utc::now() - Duration::days(retention_days as i64);
+        self.prune_old_events_at(retention_days, Utc::now())
+    }
+
+    pub fn prune_old_events_at(&self, retention_days: u64, now: DateTime<Utc>) -> Result<usize> {
+        let cutoff = now - Duration::days(retention_days as i64);
         let conn = self.connect()?;
         let changed = conn.execute(
             "DELETE FROM log_events WHERE received_at < ?1",

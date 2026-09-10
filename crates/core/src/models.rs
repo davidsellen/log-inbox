@@ -295,6 +295,14 @@ pub struct DailyDismissal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetentionReport {
+    pub raw_events_deleted: u64,
+    pub sessions_deleted: u64,
+    pub schedule_runs_deleted: u64,
+    pub reopened_dismissals_deleted: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DailyTemplateSnapshot {
     pub workspace_id: String,
     pub local_date: NaiveDate,

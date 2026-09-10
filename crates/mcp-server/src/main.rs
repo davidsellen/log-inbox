@@ -2210,12 +2210,55 @@ fn effective_daily_window(
 }
 
 async fn run_daily_scheduler(state: AppState) {
+    let mut last_retention_run = None;
     loop {
-        if let Err(error) = reconcile_daily_schedule(&state, Utc::now()).await {
+        let now = Utc::now();
+        if last_retention_run.is_none_or(|last| now - last >= Duration::hours(1)) {
+            if let Err(error) = reconcile_retention(&state, now) {
+                tracing::warn!(error = %error.message, "Daily retention maintenance failed");
+            }
+            last_retention_run = Some(now);
+        }
+        if let Err(error) = reconcile_daily_schedule(&state, now).await {
             tracing::warn!(error = %error.message, "Daily schedule reconciliation failed");
         }
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     }
+}
+
+fn reconcile_retention(state: &AppState, now: DateTime<Utc>) -> Result<(), ApiError> {
+    let Some(profile) = state
+        .store
+        .active_workspace_profile()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    else {
+        return Ok(());
+    };
+    let settings = state
+        .store
+        .daily_automation_settings(&profile.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if settings.updated_at == DateTime::<Utc>::UNIX_EPOCH {
+        return Ok(());
+    }
+    let report = state
+        .store
+        .run_retention_maintenance(&settings, now)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let changed = report.raw_events_deleted
+        + report.sessions_deleted
+        + report.schedule_runs_deleted
+        + report.reopened_dismissals_deleted;
+    if changed > 0 {
+        tracing::info!(
+            raw_events = report.raw_events_deleted,
+            sessions = report.sessions_deleted,
+            schedule_runs = report.schedule_runs_deleted,
+            reopened_dismissals = report.reopened_dismissals_deleted,
+            "Daily retention maintenance completed"
+        );
+    }
+    Ok(())
 }
 
 async fn reconcile_daily_schedule(state: &AppState, now: DateTime<Utc>) -> Result<(), ApiError> {

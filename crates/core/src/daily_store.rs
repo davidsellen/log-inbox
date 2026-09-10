@@ -4,7 +4,7 @@ use crate::{
         ApplyOperation, DailyAutomationSettings, DailyDay, DailyDismissal, DailyOverviewFacts,
         DailyRevisionContent, DailyScheduleRun, DailyTemplateSnapshot, DailyWorkstream,
         EvidenceSnapshot, ManualDailyEntry, PrepareApplyOperation, ProposalRevision,
-        SnapshotEvidence,
+        RetentionReport, SnapshotEvidence,
     },
     store::Store,
 };
@@ -252,6 +252,48 @@ impl Store {
             ],
         )?;
         self.daily_automation_settings(workspace_id)
+    }
+
+    pub fn run_retention_maintenance(
+        &self,
+        settings: &DailyAutomationSettings,
+        now: DateTime<Utc>,
+    ) -> Result<RetentionReport> {
+        anyhow::ensure!(
+            settings.updated_at != DateTime::<Utc>::UNIX_EPOCH,
+            "retention policy must be explicitly saved before cleanup"
+        );
+        let raw_cutoff = now - Duration::days(i64::from(settings.raw_retention_days));
+        let audit_cutoff = now - Duration::days(i64::from(settings.audit_retention_days));
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        let raw_events_deleted = transaction.execute(
+            "DELETE FROM log_events WHERE received_at < ?1",
+            params![raw_cutoff.to_rfc3339()],
+        )? as u64;
+        let sessions_deleted = transaction.execute(
+            r#"DELETE FROM dashboard_sessions
+               WHERE absolute_expires_at < ?1
+                  OR (revoked_at IS NOT NULL AND revoked_at < ?1)"#,
+            params![audit_cutoff.to_rfc3339()],
+        )? as u64;
+        let schedule_runs_deleted = transaction.execute(
+            r#"DELETE FROM daily_schedule_runs
+               WHERE updated_at < ?1
+                 AND state IN ('completed', 'dismissed', 'failed')"#,
+            params![audit_cutoff.to_rfc3339()],
+        )? as u64;
+        let reopened_dismissals_deleted = transaction.execute(
+            "DELETE FROM daily_dismissals WHERE reopened_at IS NOT NULL AND reopened_at < ?1",
+            params![audit_cutoff.to_rfc3339()],
+        )? as u64;
+        transaction.commit()?;
+        Ok(RetentionReport {
+            raw_events_deleted,
+            sessions_deleted,
+            schedule_runs_deleted,
+            reopened_dismissals_deleted,
+        })
     }
 
     pub fn enqueue_daily_schedule_run(
@@ -2618,6 +2660,89 @@ mod tests {
                 .unwrap()
                 .review_status,
             "in_review"
+        );
+    }
+
+    #[test]
+    fn retention_maintenance_preserves_manual_content_and_active_resolutions() {
+        let store = Store::open(std::env::temp_dir().join(format!(
+            "log-inbox-daily-retention-maintenance-{}.sqlite3",
+            Uuid::new_v4()
+        )))
+        .expect("store opens");
+        let profile = store
+            .create_pending_workspace_profile(
+                "maintenance-binding",
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+            )
+            .and_then(|profile| store.activate_workspace_profile(&profile.id))
+            .expect("profile activates");
+        let settings = store
+            .save_daily_automation_settings(&profile.id, false, "00:15", 7, 30, 30, 30, None)
+            .expect("retention policy saves");
+        let date = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        store
+            .ensure_daily_day(date, "Work Log/2026-07-01.md", None)
+            .expect("day freezes");
+        let manual = store
+            .create_manual_daily_entry(&profile.id, date, "Keep this manual note", &[])
+            .expect("manual note stores");
+        let revision = store
+            .create_proposal_revision(
+                &profile.id,
+                date,
+                None,
+                "manual",
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "manual_entry_ids": [manual.id],
+                    "workstreams": []
+                }),
+            )
+            .expect("manual revision stores");
+        store
+            .dismiss_daily_revision(&profile.id, date, &revision.id)
+            .expect("active dismissal stores");
+        let raw = store
+            .insert_event(LogEventInput {
+                source: "codex/test".to_owned(),
+                level: None,
+                timestamp: Some("2026-07-01T12:00:00Z".parse().unwrap()),
+                message: "expiring raw evidence".to_owned(),
+                metadata: None,
+                fingerprint: None,
+            })
+            .expect("raw event stores");
+        let now: DateTime<Utc> = "2026-09-10T12:00:00Z".parse().unwrap();
+        store
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE log_events SET received_at = ?1 WHERE id = ?2",
+                params![(now - Duration::days(31)).to_rfc3339(), raw.id],
+            )
+            .expect("raw event ages");
+
+        let report = store
+            .run_retention_maintenance(&settings, now)
+            .expect("maintenance runs");
+        assert_eq!(report.raw_events_deleted, 1);
+        assert_eq!(
+            store.manual_daily_entries(&profile.id, date).unwrap(),
+            vec![manual]
+        );
+        assert!(store.proposal_revision(&revision.id).unwrap().is_some());
+        assert!(
+            store
+                .daily_dismissal(&revision.id)
+                .unwrap()
+                .unwrap()
+                .reopened_at
+                .is_none()
         );
     }
 

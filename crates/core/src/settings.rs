@@ -4,7 +4,6 @@ use std::{collections::HashSet, env, path::PathBuf};
 pub struct Settings {
     pub data_dir: PathBuf,
     pub api_keys: HashSet<String>,
-    pub retention_days: u64,
 }
 
 impl Settings {
@@ -21,16 +20,7 @@ impl Settings {
             .map(ToOwned::to_owned)
             .collect();
 
-        let retention_days = env::var("LOG_INBOX_RETENTION_DAYS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(14);
-
-        Self {
-            data_dir,
-            api_keys,
-            retention_days,
-        }
+        Self { data_dir, api_keys }
     }
 
     pub fn database_path(&self) -> PathBuf {

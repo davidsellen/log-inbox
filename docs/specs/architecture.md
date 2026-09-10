@@ -26,6 +26,7 @@ trusted producers --HTTP ingest--> collector --SQLite--> Daily service/dashboard
 - Generate and validate structured candidates through one configured model connection.
 - Render exact previews and perform journaled managed-block writes through the inspected workspace capability.
 - Recover interrupted Apply operations without duplicating content.
+- Prepare due candidates without auto-Apply and own periodic cleanup under the explicitly saved retention policy.
 
 ### Browser dashboard
 
@@ -34,4 +35,4 @@ trusted producers --HTTP ingest--> collector --SQLite--> Daily service/dashboard
 
 ## Deployment boundary
 
-The ordinary dashboard container receives only the shared app-data volume and one read/write Markdown workspace mount. Legacy proposal/context mounts are available solely through the reviewed migration override. The current release has no MCP route, scheduler, or general knowledge browser; those capabilities follow separate roadmap gates.
+The ordinary dashboard container receives only the shared app-data volume and one read/write Markdown workspace mount. Legacy proposal/context mounts are available solely through the reviewed migration override. The current release has no MCP route or general knowledge browser.

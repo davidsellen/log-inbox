@@ -16,7 +16,6 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 struct AppState {
     store: Store,
     api_keys: Arc<HashSet<String>>,
-    retention_days: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,12 +58,10 @@ async fn main() -> anyhow::Result<()> {
 
     let settings = Settings::from_env();
     let store = Store::open(settings.database_path())?;
-    store.prune_old_events(settings.retention_days)?;
 
     let state = AppState {
         store,
         api_keys: Arc::new(settings.api_keys),
-        retention_days: settings.retention_days,
     };
 
     let app = Router::new()
@@ -98,10 +95,9 @@ async fn log_request_response(request: Request<Body>, next: Next) -> Response {
     response
 }
 
-async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "status": "ok",
-        "retention_days": state.retention_days
+        "status": "ok"
     }))
 }
 

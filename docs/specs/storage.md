@@ -37,7 +37,9 @@ Before a cutover, the service creates a new destination with SQLite's online bac
 
 ## Retention
 
-The first version should keep logs for `LOG_INBOX_RETENTION_DAYS`, defaulting to 14 days. Reviewed state may be kept longer if it only stores IDs and note references.
+Retention is a workspace policy stored with Daily automation settings. Defaults are displayed but cleanup does not begin until the owner explicitly saves the policy. The Daily service runs bounded maintenance at startup and at most hourly; the collector only ingests and never deletes on startup.
+
+Raw events expire from `received_at`, while immutable snapshot IDs, digests, ordering, and review decisions survive with their live reference cleared. Expired sessions, terminal schedule runs, and reopened dismissal records use the separately configured audit window. Active dismissals, manual entries, user-edited candidates, migration artifacts, and unhandled content are not removed by this maintenance pass.
 
 ## Proposal State
 
