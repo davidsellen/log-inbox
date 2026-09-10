@@ -96,6 +96,14 @@ Requires `review:write` and CSRF. Body names the exact `expected_revision_id`, a
 
 Requires `review:write` and CSRF. Body contains the exact `expected_revision_id`. It reopens the evidence by clearing its disposition and related decision fields. Both review routes return the complete ordered snapshot decision list. They do not rewrite the immutable candidate revision or Markdown.
 
+### `POST /api/v2/daily/{YYYY-MM-DD}/dismiss`
+
+Requires `review:write` and CSRF. Body contains the exact `expected_revision_id`. It records a dismissal bound to that immutable revision and content hash, removes the day from review reminders, and writes or deletes no Markdown or evidence. Applied revisions cannot be dismissed. New evidence remains independently visible as Update available.
+
+### `DELETE /api/v2/daily/{YYYY-MM-DD}/dismiss`
+
+Requires `review:write` and CSRF. Body contains the exact current dismissed revision ID. It reopens only that dismissal and reports whether any snapshot evidence has expired. Reopening does not reconstruct expired raw evidence.
+
 ## Edit the structured candidate
 
 ### `PUT /api/v2/daily/{YYYY-MM-DD}/candidate`

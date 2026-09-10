@@ -297,6 +297,10 @@ fn build_router(state: AppState) -> Router {
             post(refocus_create_manual_entry),
         )
         .route(
+            "/api/v2/daily/{date}/dismiss",
+            post(refocus_dismiss_daily).delete(refocus_reopen_daily),
+        )
+        .route(
             "/api/v2/daily/{date}/evidence/{event_id}",
             put(refocus_decide_daily_evidence).delete(refocus_reopen_daily_evidence),
         )
@@ -1836,6 +1840,14 @@ async fn generate_daily_candidate(
         .store
         .daily_day(&profile.id, local_date)
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    if frozen_day
+        .as_ref()
+        .is_some_and(|day| day.review_status == "dismissed")
+    {
+        return Err(ApiError::conflict(
+            "Reopen this dismissed day before generating another candidate.",
+        ));
+    }
     let window = effective_daily_window(local_date, &profile, frozen_day.as_ref())
         .map_err(ApiError::bad_request)?;
     ensure_refocus_daily_day(
@@ -2041,6 +2053,61 @@ async fn refocus_reopen_daily_evidence(
         .snapshot_evidence(&snapshot.id)
         .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(evidence))
+}
+
+async fn refocus_dismiss_daily(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(date): AxumPath<String>,
+    Json(input): Json<ExpectedRevisionRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "review:write", true)?;
+    require_cutover_for_daily_mutation(&state)?;
+    let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let profile = active_refocus_workspace(&state)?;
+    let dismissal = state
+        .store
+        .dismiss_daily_revision(&profile.id, local_date, &input.expected_revision_id)
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    Ok(Json(json!({ "dismissal": dismissal })))
+}
+
+async fn refocus_reopen_daily(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(date): AxumPath<String>,
+    Json(input): Json<ExpectedRevisionRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "review:write", true)?;
+    require_cutover_for_daily_mutation(&state)?;
+    let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let profile = active_refocus_workspace(&state)?;
+    let dismissal = state
+        .store
+        .reopen_daily_revision(&profile.id, local_date, &input.expected_revision_id)
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    let revision = state
+        .store
+        .current_proposal_revision(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::internal("the reopened Daily revision is missing"))?;
+    let expired_evidence_count = match revision.snapshot_id.as_deref() {
+        Some(snapshot_id) => state
+            .store
+            .snapshot_evidence(snapshot_id)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .iter()
+            .filter(|evidence| !evidence.available)
+            .count(),
+        None => 0,
+    };
+    Ok(Json(json!({
+        "dismissal": dismissal,
+        "expired_evidence_count": expired_evidence_count,
+        "evidence_complete": expired_evidence_count == 0,
+    })))
 }
 
 fn current_snapshot_for_review(

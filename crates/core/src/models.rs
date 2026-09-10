@@ -285,6 +285,16 @@ pub struct DailyOverviewFacts {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DailyDismissal {
+    pub workspace_id: String,
+    pub local_date: NaiveDate,
+    pub revision_id: String,
+    pub revision_content_hash: String,
+    pub dismissed_at: DateTime<Utc>,
+    pub reopened_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DailyTemplateSnapshot {
     pub workspace_id: String,
     pub local_date: NaiveDate,

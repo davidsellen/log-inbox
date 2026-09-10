@@ -19,6 +19,8 @@ First run requires a reviewed workspace profile: timezone, relative Daily root, 
 
 After setup, a compact recent-days rail keeps the Daily habit visible without becoming a calendar or vault browser. It always includes profile-local Today and adds only meaningful past dates, with one primary state such as Needs review, Update available, Review, or Applied. Evidence expiry is a secondary warning. Selecting a day opens the same single-day review surface.
 
+Dismiss removes the exact visible candidate from reminders without writing or deleting anything. Reopen restores that same revision and warns when raw source evidence has expired. A dismissed day must be reopened before regeneration.
+
 Settings also exposes a reviewed, idempotent migration when legacy database or proposal-file state is detected. Migration mounts exist only in the Compose override and are never part of the ordinary runtime.
 
 ## Boundaries

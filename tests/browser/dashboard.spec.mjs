@@ -6,7 +6,7 @@ const dailyHtml = await readFile(
   "utf8"
 );
 
-function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = "current", applyStatus = null } = {}) {
+function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = "current", applyStatus = null, dismissed = false } = {}) {
   return {
     workspace_id: "workspace_fixture",
     local_date: date,
@@ -14,7 +14,7 @@ function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = 
     start_utc: `${date}T00:00:00Z`,
     end_utc: `${date}T23:59:59Z`,
     destination_path: `Work Log/2026/Sep/Daily log ${date}.md`,
-    day: { generation_status: "ready", review_status: "in_review" },
+    day: { generation_status: "ready", review_status: dismissed ? "dismissed" : "in_review" },
     automated_evidence: {
       events: [{ id: "evt_1", source: "codex/fedora", timestamp: `${date}T09:00:00Z`, message: "Validated the Daily workflow." }],
       returned_count: 1,
@@ -57,6 +57,7 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
   let loggedIn = false;
   let currentApplyStatus = applyStatus;
   let migrationCompleted = false;
+  let dismissed = false;
   let activeProfile = workspaceProfile === undefined ? { id: "workspace_fixture", status: "active", root_binding: "binding_fixture", timezone: "Europe/Stockholm", daily_root: "Work Log", daily_pattern: "{year}/{month_name}/Daily log {month_name} {day}.md", template_path: null, link_style: "markdown", created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z" } : workspaceProfile;
   await page.route("http://daily.log-inbox.test/**", async route => {
     const request = route.request();
@@ -90,7 +91,11 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
     const match = url.pathname.match(/^\/api\/v2\/daily\/(\d{4}-\d{2}-\d{2})$/);
     if (match && request.method() === "GET") {
       if (dailyStatus !== 200) return route.fulfill({ status: dailyStatus, contentType: "application/json", body: JSON.stringify({ error: "Daily fixture unavailable" }) });
-      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dailyResponse(match[1], { origin, freshness, applyStatus: currentApplyStatus })) });
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dailyResponse(match[1], { origin, freshness, applyStatus: currentApplyStatus, dismissed })) });
+    }
+    if (url.pathname.endsWith("/dismiss") && ["POST", "DELETE"].includes(request.method())) {
+      dismissed = request.method() === "POST";
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ dismissal: { revision_id: "revision_1" }, expired_evidence_count: 0, evidence_complete: true }) });
     }
     if (url.pathname.endsWith("/candidate") && request.method() === "PUT") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ id: "revision_2" }) });
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({}) });
@@ -239,4 +244,20 @@ test("refocused Daily confirms before replacing edits with new evidence", async 
   await expect.poll(() => requests.find(request => request.path.endsWith("/generate"))?.body).toEqual({
     replace_edited: true
   });
+});
+
+test("refocused Daily dismisses and reopens the exact visible candidate", async ({ page }) => {
+  const requests = await mockDaily(page);
+  await openDaily(page);
+
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Dismiss", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Reopen", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Regenerate" })).toBeDisabled();
+  await page.getByRole("button", { name: "Reopen", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Dismiss", exact: true })).toBeVisible();
+
+  const dismissRequests = requests.filter(request => request.path.endsWith("/dismiss"));
+  expect(dismissRequests.map(request => request.method)).toEqual(["POST", "DELETE"]);
+  expect(dismissRequests[0].body).toEqual({ expected_revision_id: "revision_1" });
 });

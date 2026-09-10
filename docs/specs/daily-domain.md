@@ -63,6 +63,8 @@ A review decision addresses one evidence digest in one snapshot. Its disposition
 
 Editing rendered Markdown does not create review decisions. Applying is allowed only when every snapshot item has a disposition and every factual evidence reference validates against that snapshot.
 
+A dismissal is an explicit reversible resolution of one exact proposal revision and content hash. It suppresses reminders without changing the revision, evidence, or Markdown. A later event makes the day Update available instead of inheriting the dismissal. Reopening restores review of the same revision and discloses any expired source evidence.
+
 ### Apply operation
 
 An Apply operation records the exact approved proposal revision and hash, destination, expected managed-block revision, intended new block hash, and recovery material before touching Markdown.

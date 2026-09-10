@@ -1,7 +1,7 @@
 use crate::{
     daily::resolve_day,
     models::{
-        ApplyOperation, DailyAutomationSettings, DailyDay, DailyOverviewFacts,
+        ApplyOperation, DailyAutomationSettings, DailyDay, DailyDismissal, DailyOverviewFacts,
         DailyRevisionContent, DailyScheduleRun, DailyTemplateSnapshot, DailyWorkstream,
         EvidenceSnapshot, ManualDailyEntry, PrepareApplyOperation, ProposalRevision,
         SnapshotEvidence,
@@ -587,6 +587,106 @@ impl Store {
         )?;
         anyhow::ensure!(changed == 1, "daily day was not found");
         Ok(())
+    }
+
+    pub fn dismiss_daily_revision(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        expected_revision_id: &str,
+    ) -> Result<DailyDismissal> {
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        let (current_revision_id, review_status): (Option<String>, String) = transaction
+            .query_row(
+                "SELECT current_revision_id, review_status FROM daily_days WHERE workspace_id = ?1 AND local_date = ?2",
+                params![workspace_id, local_date.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .context("daily day was not found")?;
+        anyhow::ensure!(
+            current_revision_id.as_deref() == Some(expected_revision_id),
+            "current proposal revision changed"
+        );
+        anyhow::ensure!(
+            review_status != "applied",
+            "an applied Daily revision cannot be dismissed"
+        );
+        let content_hash: String = transaction.query_row(
+            "SELECT content_hash FROM proposal_revisions WHERE id = ?1 AND workspace_id = ?2 AND local_date = ?3",
+            params![expected_revision_id, workspace_id, local_date.to_string()],
+            |row| row.get(0),
+        )?;
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            r#"INSERT INTO daily_dismissals
+               (workspace_id, local_date, revision_id, revision_content_hash, dismissed_at, reopened_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, NULL)
+               ON CONFLICT(revision_id) DO UPDATE SET
+                 dismissed_at = excluded.dismissed_at, reopened_at = NULL"#,
+            params![
+                workspace_id,
+                local_date.to_string(),
+                expected_revision_id,
+                content_hash,
+                now
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE daily_days SET review_status = 'dismissed', updated_at = ?1 WHERE workspace_id = ?2 AND local_date = ?3 AND current_revision_id = ?4",
+            params![now, workspace_id, local_date.to_string(), expected_revision_id],
+        )?;
+        transaction.commit()?;
+        self.daily_dismissal(expected_revision_id)?
+            .context("Daily dismissal missing after save")
+    }
+
+    pub fn reopen_daily_revision(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        expected_revision_id: &str,
+    ) -> Result<DailyDismissal> {
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        let current: (Option<String>, String) = transaction
+            .query_row(
+                "SELECT current_revision_id, review_status FROM daily_days WHERE workspace_id = ?1 AND local_date = ?2",
+                params![workspace_id, local_date.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .context("daily day was not found")?;
+        anyhow::ensure!(
+            current.0.as_deref() == Some(expected_revision_id),
+            "current proposal revision changed"
+        );
+        anyhow::ensure!(current.1 == "dismissed", "Daily revision is not dismissed");
+        let now = Utc::now().to_rfc3339();
+        let changed = transaction.execute(
+            "UPDATE daily_dismissals SET reopened_at = ?1 WHERE revision_id = ?2 AND reopened_at IS NULL",
+            params![now, expected_revision_id],
+        )?;
+        anyhow::ensure!(changed == 1, "active Daily dismissal was not found");
+        transaction.execute(
+            "UPDATE daily_days SET review_status = 'in_review', updated_at = ?1 WHERE workspace_id = ?2 AND local_date = ?3 AND current_revision_id = ?4",
+            params![now, workspace_id, local_date.to_string(), expected_revision_id],
+        )?;
+        transaction.commit()?;
+        self.daily_dismissal(expected_revision_id)?
+            .context("Daily dismissal missing after reopen")
+    }
+
+    pub fn daily_dismissal(&self, revision_id: &str) -> Result<Option<DailyDismissal>> {
+        self.connect()?
+            .query_row(
+                "SELECT workspace_id, local_date, revision_id, revision_content_hash, dismissed_at, reopened_at FROM daily_dismissals WHERE revision_id = ?1",
+                params![revision_id],
+                daily_dismissal_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn create_manual_daily_entry(
@@ -1697,6 +1797,34 @@ fn manual_entry_from_row(row: &Row<'_>) -> rusqlite::Result<ManualDailyEntry> {
     })
 }
 
+fn daily_dismissal_from_row(row: &Row<'_>) -> rusqlite::Result<DailyDismissal> {
+    let local_date: String = row.get(1)?;
+    let dismissed_at: String = row.get(4)?;
+    let reopened_at: Option<String> = row.get(5)?;
+    Ok(DailyDismissal {
+        workspace_id: row.get(0)?,
+        local_date: NaiveDate::parse_from_str(&local_date, "%Y-%m-%d").map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, error.into())
+        })?,
+        revision_id: row.get(2)?,
+        revision_content_hash: row.get(3)?,
+        dismissed_at: parse_time(&dismissed_at).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, error.into())
+        })?,
+        reopened_at: reopened_at
+            .map(|value| {
+                parse_time(&value).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })
+            })
+            .transpose()?,
+    })
+}
+
 fn snapshot_evidence_from_row(row: &Row<'_>) -> rusqlite::Result<SnapshotEvidence> {
     let decided_at: Option<String> = row.get(8)?;
     Ok(SnapshotEvidence {
@@ -2420,6 +2548,77 @@ mod tests {
         assert_eq!(overview.len(), 1);
         assert_eq!(overview[0].event_count, 501);
         assert_eq!(overview[0].new_evidence_count, 0);
+    }
+
+    #[test]
+    fn dismissal_and_reopen_are_bound_to_the_exact_current_revision() {
+        let store = Store::open(std::env::temp_dir().join(format!(
+            "log-inbox-daily-dismissal-{}.sqlite3",
+            Uuid::new_v4()
+        )))
+        .expect("store opens");
+        let profile = store
+            .create_pending_workspace_profile(
+                "dismissal-binding",
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+            )
+            .and_then(|profile| store.activate_workspace_profile(&profile.id))
+            .expect("profile activates");
+        let date = NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+        store
+            .ensure_daily_day(date, "Work Log/2026-09-09.md", None)
+            .expect("day freezes");
+        let manual = store
+            .create_manual_daily_entry(&profile.id, date, "Dismissible note", &[])
+            .expect("manual note stores");
+        let revision = store
+            .create_proposal_revision(
+                &profile.id,
+                date,
+                None,
+                "manual",
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "manual_entry_ids": [manual.id],
+                    "workstreams": []
+                }),
+            )
+            .expect("revision stores");
+        let dismissal = store
+            .dismiss_daily_revision(&profile.id, date, &revision.id)
+            .expect("revision dismisses");
+        assert_eq!(dismissal.revision_content_hash, revision.content_hash);
+        assert_eq!(
+            store
+                .daily_day(&profile.id, date)
+                .unwrap()
+                .unwrap()
+                .review_status,
+            "dismissed"
+        );
+        assert!(
+            store
+                .reopen_daily_revision(&profile.id, date, "revision_stale")
+                .unwrap_err()
+                .to_string()
+                .contains("revision changed")
+        );
+        let reopened = store
+            .reopen_daily_revision(&profile.id, date, &revision.id)
+            .expect("revision reopens");
+        assert!(reopened.reopened_at.is_some());
+        assert_eq!(
+            store
+                .daily_day(&profile.id, date)
+                .unwrap()
+                .unwrap()
+                .review_status,
+            "in_review"
+        );
     }
 
     fn apply_operation_fixture() -> (Store, PrepareApplyOperation) {
