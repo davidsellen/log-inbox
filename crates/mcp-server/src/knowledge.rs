@@ -43,6 +43,63 @@ pub fn context_snapshot_digest(payload: &JsonValue) -> Result<String, String> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+pub fn vault_context_from_snapshot(payload: &JsonValue) -> Result<JsonValue, String> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| "Knowledge context snapshot is not an object".to_owned())?;
+    let workstream_links = object
+        .get("workstream_links")
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or_else(|| "Knowledge context snapshot has no workstream links".to_owned())?;
+    let group_aliases = object
+        .get("group_aliases")
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let excerpts = object
+        .get("excerpts")
+        .filter(|value| value.is_array())
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let workstream_excerpts = object
+        .get("workstream_excerpts")
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let resolver_version = object
+        .get("resolver_version")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| "Knowledge context snapshot has no resolver version".to_owned())?;
+    let candidate_notes = workstream_links
+        .as_object()
+        .into_iter()
+        .flat_map(|links| links.values())
+        .filter_map(JsonValue::as_array)
+        .flatten()
+        .filter_map(JsonValue::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let context = json!({
+        "candidate_notes": candidate_notes,
+        "workstream_links": workstream_links,
+        "group_aliases": group_aliases,
+        "knowledge": {
+            "resolver_version": resolver_version,
+            "context_is_background_only": true,
+            "excerpts": excerpts,
+            "workstream_excerpts": workstream_excerpts,
+        }
+    });
+    let serialized = serde_json::to_vec(&context).map_err(|error| error.to_string())?;
+    if serialized.len() > MAX_CONTEXT_SNAPSHOT_BYTES {
+        return Err("Knowledge prompt context exceeds its size limit".to_owned());
+    }
+    Ok(context)
+}
+
 pub fn configuration_digest(
     workspace: &InspectedWorkspace,
     collections: &[KnowledgeCollection],
@@ -1790,5 +1847,44 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(resolution.vault_context["candidate_notes"], json!([]));
+    }
+
+    #[test]
+    fn frozen_snapshot_reconstructs_only_the_model_context_projection() {
+        let payload = json!({
+            "schema_version": 2,
+            "resolver_version": "exact-v2",
+            "root_binding": "private-binding",
+            "collections": [{"id": "private-collection"}],
+            "mappings": [{"id": "private-mapping"}],
+            "used_notes": [{"path": "Products/Alpha.md"}],
+            "workstream_links": {"group-1": ["[[Alpha]]"]},
+            "group_aliases": {"source-group": "group-1"},
+            "excerpts": [{
+                "id": "excerpt-1",
+                "note_path": "Products/Alpha.md",
+                "title": "Alpha",
+                "text": "Frozen product fact.",
+                "text_digest": "digest",
+                "reason": "canonical_note_opening"
+            }],
+            "workstream_excerpts": {"group-1": ["excerpt-1"]},
+            "diagnostics": {"missing_roots": ["Private/Missing"]}
+        });
+        let context = vault_context_from_snapshot(&payload).expect("snapshot reconstructs");
+        assert_eq!(context["candidate_notes"], json!(["[[Alpha]]"]));
+        assert_eq!(
+            context["knowledge"]["excerpts"][0]["text"],
+            "Frozen product fact."
+        );
+        let serialized = context.to_string();
+        for excluded in [
+            "private-binding",
+            "private-collection",
+            "private-mapping",
+            "Private/Missing",
+        ] {
+            assert!(!serialized.contains(excluded));
+        }
     }
 }

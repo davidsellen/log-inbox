@@ -1,16 +1,17 @@
 use crate::{
     daily::resolve_day,
     models::{
-        ApplyOperation, DailyAutomationSettings, DailyDay, DailyDismissal, DailyEvidenceDeferral,
-        DailyOverviewFacts, DailyRevisionContent, DailyScheduleRun, DailyTemplateSnapshot,
-        DailyWorkstream, EvidenceSnapshot, ManualDailyEntry, PrepareApplyOperation,
-        ProposalRevision, RetentionReport, SnapshotEvidence,
+        ApplyOperation, ContextComparison, ContextComparisonDecision, DailyAutomationSettings,
+        DailyDay, DailyDismissal, DailyEvidenceDeferral, DailyOverviewFacts, DailyRevisionContent,
+        DailyScheduleRun, DailyTemplateSnapshot, DailyWorkstream, EvidenceSnapshot,
+        ManualDailyEntry, PrepareApplyOperation, ProposalRevision, RetentionReport,
+        SnapshotEvidence,
     },
     store::Store,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -327,6 +328,11 @@ impl Store {
                  AND NOT EXISTS (
                      SELECT 1 FROM daily_dismissals
                      WHERE daily_dismissals.revision_id = proposal_revisions.id
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM context_comparisons
+                     WHERE context_comparisons.source_revision_id = proposal_revisions.id
+                        OR context_comparisons.promoted_revision_id = proposal_revisions.id
                  )"#,
             params![audit_cutoff.to_rfc3339()],
         )? as u64;
@@ -1305,6 +1311,413 @@ impl Store {
             .context("proposal revision missing after creation")
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_context_comparison(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        source_revision_id: &str,
+        context_content: &DailyRevisionContent,
+        without_context_content: &DailyRevisionContent,
+        model_fingerprint: &str,
+        contract_fingerprint: &str,
+    ) -> Result<ContextComparison> {
+        validate_comparison_fingerprint(model_fingerprint, "model")?;
+        validate_comparison_fingerprint(contract_fingerprint, "contract")?;
+        let context_json = serde_json::to_string(context_content)?;
+        let without_context_json = serde_json::to_string(without_context_content)?;
+        let context_hash = digest(context_json.as_bytes());
+        let without_context_hash = digest(without_context_json.as_bytes());
+
+        if let Some(existing) = self.context_comparison_for_revision(source_revision_id)? {
+            let conn = self.connect()?;
+            ensure_context_comparison_inputs_match(
+                &conn,
+                &existing,
+                &context_hash,
+                &without_context_hash,
+                model_fingerprint,
+                contract_fingerprint,
+            )?;
+            return Ok(existing);
+        }
+
+        let source = self
+            .proposal_revision(source_revision_id)?
+            .context("context comparison source revision does not exist")?;
+        anyhow::ensure!(
+            source.workspace_id == workspace_id && source.local_date == local_date,
+            "context comparison source revision belongs to a different day"
+        );
+        anyhow::ensure!(
+            matches!(source.origin.as_str(), "generated" | "regenerated"),
+            "context comparison requires an unedited generated source revision"
+        );
+        let snapshot_id = source
+            .snapshot_id
+            .as_deref()
+            .context("context comparison source requires automated evidence")?;
+        let snapshot = self
+            .evidence_snapshot(snapshot_id)?
+            .context("context comparison evidence snapshot does not exist")?;
+        anyhow::ensure!(
+            snapshot.workspace_id == workspace_id && snapshot.local_date == local_date,
+            "context comparison evidence snapshot belongs to a different day"
+        );
+        let context_snapshot = self
+            .proposal_context_snapshot(source_revision_id)?
+            .context("context comparison source requires frozen Knowledge context")?;
+        anyhow::ensure!(
+            context_snapshot.workspace_id == workspace_id
+                && context_snapshot.local_date == local_date,
+            "context comparison Knowledge snapshot belongs to a different day"
+        );
+        self.validate_daily_revision_content(
+            workspace_id,
+            local_date,
+            "regenerated",
+            context_content,
+            Some(&snapshot),
+            Some(&context_snapshot),
+        )?;
+        self.validate_daily_revision_content(
+            workspace_id,
+            local_date,
+            "regenerated",
+            without_context_content,
+            Some(&snapshot),
+            None,
+        )?;
+
+        let comparison_id = format!("context_comparison_{}", Uuid::new_v4().simple());
+        let assignment = Uuid::new_v4().as_bytes()[0] & 1;
+        let (arm_a_json, arm_a_hash, arm_b_json, arm_b_hash, arm_a_kind) = if assignment == 0 {
+            (
+                context_json,
+                context_hash,
+                without_context_json,
+                without_context_hash,
+                "context",
+            )
+        } else {
+            (
+                without_context_json,
+                without_context_hash,
+                context_json,
+                context_hash,
+                "without_context",
+            )
+        };
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        let (current_revision_id, review_status, freshness): (Option<String>, String, String) = transaction
+            .query_row(
+                "SELECT current_revision_id, review_status, freshness FROM daily_days WHERE workspace_id = ?1 AND local_date = ?2",
+                params![workspace_id, local_date.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        anyhow::ensure!(
+            current_revision_id.as_deref() == Some(source_revision_id),
+            "context comparison source revision is not current"
+        );
+        anyhow::ensure!(
+            review_status == "in_review" && freshness == "current",
+            "context comparison source revision is not eligible for comparison"
+        );
+        transaction.execute(
+            r#"INSERT OR IGNORE INTO context_comparisons
+               (id, schema_version, workspace_id, local_date, source_revision_id,
+                snapshot_id, context_snapshot_id, arm_a_content_json, arm_a_content_hash,
+                arm_b_content_json, arm_b_content_hash, arm_a_kind, model_fingerprint,
+                contract_fingerprint, state, created_at)
+               VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'open', ?14)"#,
+            params![
+                comparison_id,
+                workspace_id,
+                local_date.to_string(),
+                source_revision_id,
+                snapshot.id,
+                context_snapshot.id,
+                arm_a_json,
+                arm_a_hash,
+                arm_b_json,
+                arm_b_hash,
+                arm_a_kind,
+                model_fingerprint,
+                contract_fingerprint,
+                now,
+            ],
+        )?;
+        transaction.commit()?;
+        let comparison = self
+            .context_comparison_for_revision(source_revision_id)?
+            .context("context comparison missing after creation")?;
+        let conn = self.connect()?;
+        ensure_context_comparison_inputs_match(
+            &conn,
+            &comparison,
+            &digest(serde_json::to_string(context_content)?.as_bytes()),
+            &digest(serde_json::to_string(without_context_content)?.as_bytes()),
+            model_fingerprint,
+            contract_fingerprint,
+        )?;
+        Ok(comparison)
+    }
+
+    pub fn context_comparison_for_revision(
+        &self,
+        source_revision_id: &str,
+    ) -> Result<Option<ContextComparison>> {
+        self.connect()?
+            .query_row(
+                r#"SELECT id, schema_version, workspace_id, local_date, source_revision_id,
+                          snapshot_id, context_snapshot_id, arm_a_content_json,
+                          arm_b_content_json, arm_a_kind, model_fingerprint,
+                          contract_fingerprint, state, selected_arm, usefulness,
+                          less_editing, decision_note, promoted_revision_id, created_at, decided_at
+                   FROM context_comparisons WHERE source_revision_id = ?1"#,
+                params![source_revision_id],
+                context_comparison_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn decide_context_comparison(
+        &self,
+        comparison_id: &str,
+        expected_source_revision_id: &str,
+        selected_arm: &str,
+        usefulness: &str,
+        less_editing: &str,
+        note: Option<&str>,
+    ) -> Result<ContextComparison> {
+        anyhow::ensure!(
+            matches!(selected_arm, "a" | "b"),
+            "invalid selected comparison arm"
+        );
+        anyhow::ensure!(
+            matches!(usefulness, "a" | "b" | "same" | "neither"),
+            "invalid comparison usefulness preference"
+        );
+        anyhow::ensure!(
+            matches!(less_editing, "a" | "b" | "same" | "neither"),
+            "invalid comparison editing preference"
+        );
+        let note = note.map(str::trim).filter(|value| !value.is_empty());
+        anyhow::ensure!(
+            note.is_none_or(|value| value.len() <= 300),
+            "context comparison note exceeds 300 bytes"
+        );
+
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        let stored = transaction
+            .query_row(
+                r#"SELECT workspace_id, local_date, source_revision_id, snapshot_id,
+                          context_snapshot_id, arm_a_content_json, arm_a_content_hash,
+                          arm_b_content_json, arm_b_content_hash, arm_a_kind, state
+                   FROM context_comparisons WHERE id = ?1"#,
+                params![comparison_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
+                    ))
+                },
+            )
+            .optional()?
+            .context("context comparison does not exist")?;
+        let (
+            workspace_id,
+            local_date_text,
+            source_revision_id,
+            snapshot_id,
+            context_snapshot_id,
+            arm_a_json,
+            arm_a_hash,
+            arm_b_json,
+            arm_b_hash,
+            arm_a_kind,
+            state,
+        ) = stored;
+        anyhow::ensure!(
+            source_revision_id == expected_source_revision_id,
+            "context comparison source revision changed"
+        );
+        anyhow::ensure!(state == "open", "context comparison is already decided");
+        anyhow::ensure!(
+            digest(arm_a_json.as_bytes()) == arm_a_hash
+                && digest(arm_b_json.as_bytes()) == arm_b_hash,
+            "context comparison arm integrity check failed"
+        );
+        let local_date = parse_date(&local_date_text)?;
+        let source_binding: (String, String, String, Option<String>, Option<String>) = transaction
+            .query_row(
+                r#"SELECT proposal_revisions.origin, proposal_revisions.workspace_id,
+                          proposal_revisions.local_date, proposal_revisions.snapshot_id,
+                          proposal_context_snapshots.context_snapshot_id
+                   FROM proposal_revisions
+                   LEFT JOIN proposal_context_snapshots
+                     ON proposal_context_snapshots.revision_id = proposal_revisions.id
+                   WHERE proposal_revisions.id = ?1"#,
+                params![expected_source_revision_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )?;
+        anyhow::ensure!(
+            matches!(source_binding.0.as_str(), "generated" | "regenerated")
+                && source_binding.1 == workspace_id
+                && source_binding.2 == local_date_text
+                && source_binding.3.as_deref() == Some(snapshot_id.as_str())
+                && source_binding.4.as_deref() == Some(context_snapshot_id.as_str()),
+            "context comparison source binding is invalid"
+        );
+        let (selected_json, selected_hash, selected_kind) = if selected_arm == "a" {
+            (&arm_a_json, &arm_a_hash, arm_a_kind.as_str())
+        } else {
+            (
+                &arm_b_json,
+                &arm_b_hash,
+                if arm_a_kind == "context" {
+                    "without_context"
+                } else {
+                    "context"
+                },
+            )
+        };
+        let selected_content: DailyRevisionContent = serde_json::from_str(selected_json)
+            .context("stored context comparison arm is invalid")?;
+        let snapshot = self
+            .evidence_snapshot(&snapshot_id)?
+            .context("context comparison evidence snapshot is missing")?;
+        anyhow::ensure!(
+            snapshot.workspace_id == workspace_id && snapshot.local_date == local_date,
+            "context comparison evidence snapshot belongs to a different day"
+        );
+        let frozen_context = self
+            .context_snapshot(&context_snapshot_id)?
+            .context("context comparison Knowledge snapshot is missing")?;
+        anyhow::ensure!(
+            frozen_context.workspace_id == workspace_id && frozen_context.local_date == local_date,
+            "context comparison Knowledge snapshot belongs to a different day"
+        );
+        let context_snapshot = if selected_kind == "context" {
+            Some(&frozen_context)
+        } else {
+            None
+        };
+        self.validate_daily_revision_content(
+            &workspace_id,
+            local_date,
+            "regenerated",
+            &selected_content,
+            Some(&snapshot),
+            context_snapshot,
+        )?;
+
+        let (current_revision_id, review_status, freshness): (Option<String>, String, String) = transaction
+            .query_row(
+                "SELECT current_revision_id, review_status, freshness FROM daily_days WHERE workspace_id = ?1 AND local_date = ?2",
+                params![workspace_id, local_date_text],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        anyhow::ensure!(
+            current_revision_id.as_deref() == Some(expected_source_revision_id),
+            "current proposal revision changed"
+        );
+        anyhow::ensure!(
+            review_status == "in_review" && freshness == "current",
+            "context comparison source revision is no longer eligible"
+        );
+        let revision_number: u64 = transaction.query_row(
+            "SELECT COALESCE(MAX(revision_number), 0) + 1 FROM proposal_revisions WHERE workspace_id = ?1 AND local_date = ?2",
+            params![workspace_id, local_date_text],
+            |row| row.get(0),
+        )?;
+        let promoted_revision_id = format!("revision_{}", Uuid::new_v4().simple());
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "INSERT INTO proposal_revisions (id, workspace_id, local_date, snapshot_id, revision_number, origin, content_json, content_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 'regenerated', ?6, ?7, ?8)",
+            params![
+                promoted_revision_id,
+                workspace_id,
+                local_date_text,
+                snapshot_id,
+                revision_number,
+                selected_json,
+                selected_hash,
+                now,
+            ],
+        )?;
+        if selected_kind == "context" {
+            transaction.execute(
+                "INSERT INTO proposal_context_snapshots (revision_id, context_snapshot_id) VALUES (?1, ?2)",
+                params![promoted_revision_id, context_snapshot_id],
+            )?;
+        }
+        let changed = transaction.execute(
+            r#"UPDATE daily_days
+               SET current_revision_id = ?1, generation_status = 'ready',
+                   review_status = 'in_review', freshness = 'current', updated_at = ?2
+               WHERE workspace_id = ?3 AND local_date = ?4
+                 AND current_revision_id = ?5 AND review_status = 'in_review'
+                 AND freshness = 'current'"#,
+            params![
+                promoted_revision_id,
+                now,
+                workspace_id,
+                local_date_text,
+                expected_source_revision_id,
+            ],
+        )?;
+        anyhow::ensure!(changed == 1, "current proposal revision changed");
+        transaction.execute(
+            r#"UPDATE daily_evidence_deferrals SET reopened_at = ?1
+               WHERE workspace_id = ?2 AND local_date = ?3
+                 AND revision_id != ?4 AND reopened_at IS NULL"#,
+            params![now, workspace_id, local_date_text, promoted_revision_id],
+        )?;
+        let decided = transaction.execute(
+            r#"UPDATE context_comparisons
+               SET state = 'decided', selected_arm = ?1, usefulness = ?2,
+                   less_editing = ?3, decision_note = ?4,
+                   promoted_revision_id = ?5, decided_at = ?6
+               WHERE id = ?7 AND state = 'open' AND source_revision_id = ?8"#,
+            params![
+                selected_arm,
+                usefulness,
+                less_editing,
+                note,
+                promoted_revision_id,
+                now,
+                comparison_id,
+                expected_source_revision_id,
+            ],
+        )?;
+        anyhow::ensure!(decided == 1, "context comparison is already decided");
+        transaction.commit()?;
+        self.context_comparison_for_revision(expected_source_revision_id)?
+            .context("decided context comparison is missing")
+    }
+
     pub fn prepare_apply_operation(&self, input: &PrepareApplyOperation) -> Result<ApplyOperation> {
         validate_apply_operation_input(input)?;
         let day = self
@@ -1796,6 +2209,106 @@ impl Store {
             proposal_revision_from_row,
         ).optional().map_err(Into::into)
     }
+}
+
+fn validate_comparison_fingerprint(value: &str, kind: &str) -> Result<()> {
+    anyhow::ensure!(
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "context comparison {kind} fingerprint must be lowercase SHA-256"
+    );
+    Ok(())
+}
+
+fn ensure_context_comparison_inputs_match(
+    conn: &Connection,
+    comparison: &ContextComparison,
+    context_hash: &str,
+    without_context_hash: &str,
+    model_fingerprint: &str,
+    contract_fingerprint: &str,
+) -> Result<()> {
+    let (arm_a_hash, arm_b_hash, arm_a_kind): (String, String, String) = conn.query_row(
+        "SELECT arm_a_content_hash, arm_b_content_hash, arm_a_kind FROM context_comparisons WHERE id = ?1",
+        params![comparison.id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let inputs_match = if arm_a_kind == "context" {
+        arm_a_hash == context_hash && arm_b_hash == without_context_hash
+    } else {
+        arm_a_kind == "without_context"
+            && arm_a_hash == without_context_hash
+            && arm_b_hash == context_hash
+    };
+    anyhow::ensure!(
+        inputs_match
+            && comparison.model_fingerprint == model_fingerprint
+            && comparison.contract_fingerprint == contract_fingerprint,
+        "context comparison already exists with different immutable inputs"
+    );
+    Ok(())
+}
+
+fn context_comparison_from_row(row: &Row<'_>) -> rusqlite::Result<ContextComparison> {
+    let local_date: String = row.get(3)?;
+    let arm_a_json: String = row.get(7)?;
+    let arm_b_json: String = row.get(8)?;
+    let stored_arm_a_kind: String = row.get(9)?;
+    let state: String = row.get(12)?;
+    let created_at: String = row.get(18)?;
+    let decided_at: Option<String> = row.get(19)?;
+    let decision = if state == "decided" {
+        let decided_at = decided_at.ok_or_else(|| {
+            rusqlite::Error::InvalidColumnType(
+                19,
+                "decided_at".to_owned(),
+                rusqlite::types::Type::Null,
+            )
+        })?;
+        Some(ContextComparisonDecision {
+            selected_arm: row.get(13)?,
+            usefulness: row.get(14)?,
+            less_editing: row.get(15)?,
+            note: row.get(16)?,
+            promoted_revision_id: row.get(17)?,
+            decided_at: parse_time(&decided_at).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    19,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            })?,
+        })
+    } else {
+        None
+    };
+    Ok(ContextComparison {
+        id: row.get(0)?,
+        schema_version: row.get(1)?,
+        workspace_id: row.get(2)?,
+        local_date: parse_date(&local_date).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, error.into())
+        })?,
+        source_revision_id: row.get(4)?,
+        snapshot_id: row.get(5)?,
+        context_snapshot_id: row.get(6)?,
+        arm_a_content: serde_json::from_str(&arm_a_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, error.into())
+        })?,
+        arm_b_content: serde_json::from_str(&arm_b_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, error.into())
+        })?,
+        arm_a_kind: (state == "decided").then_some(stored_arm_a_kind),
+        model_fingerprint: row.get(10)?,
+        contract_fingerprint: row.get(11)?,
+        state,
+        decision,
+        created_at: parse_time(&created_at).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(18, rusqlite::types::Type::Text, error.into())
+        })?,
+    })
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -2372,7 +2885,463 @@ fn validate_context_links(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::LogEventInput;
+    use crate::models::{DailyFact, LogEventInput, WorkspaceProfile};
+
+    struct ContextComparisonFixture {
+        store: Store,
+        profile: WorkspaceProfile,
+        date: NaiveDate,
+        snapshot: EvidenceSnapshot,
+        context_snapshot: crate::models::ContextSnapshot,
+        source: ProposalRevision,
+        context_content: DailyRevisionContent,
+        without_context_content: DailyRevisionContent,
+    }
+
+    fn comparison_content(
+        event_id: &str,
+        title: &str,
+        canonical_links: Vec<String>,
+    ) -> DailyRevisionContent {
+        DailyRevisionContent {
+            schema_version: 1,
+            workstreams: vec![DailyWorkstream {
+                id: "workstream:test".to_owned(),
+                title: title.to_owned(),
+                evidence_event_ids: vec![event_id.to_owned()],
+                canonical_links,
+                outcome: vec![DailyFact {
+                    text: format!("{title} outcome"),
+                    evidence_event_ids: vec![event_id.to_owned()],
+                }],
+                decision: Vec::new(),
+                trade_off: Vec::new(),
+                validation: Vec::new(),
+                blocker: Vec::new(),
+                follow_up: Vec::new(),
+            }],
+            manual_entry_ids: Vec::new(),
+            open_questions: Vec::new(),
+        }
+    }
+
+    fn context_comparison_fixture() -> ContextComparisonFixture {
+        let store = Store::open(std::env::temp_dir().join(format!(
+            "log-inbox-context-comparison-{}.sqlite3",
+            Uuid::new_v4()
+        )))
+        .expect("store opens");
+        let profile = store
+            .create_pending_workspace_profile(
+                "comparison-binding",
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+            )
+            .and_then(|profile| store.activate_workspace_profile(&profile.id))
+            .expect("profile activates");
+        let date = NaiveDate::from_ymd_opt(2026, 9, 10).unwrap();
+        store
+            .ensure_daily_day(date, "Work Log/2026-09-10.md", None)
+            .expect("day freezes");
+        let event = store
+            .insert_event(LogEventInput {
+                source: "codex/comparison".to_owned(),
+                level: None,
+                timestamp: Some("2026-09-10T12:00:00Z".parse().unwrap()),
+                message: "Implemented paired context comparison".to_owned(),
+                metadata: None,
+                fingerprint: None,
+            })
+            .expect("event stores");
+        let snapshot = store
+            .create_evidence_snapshot(&profile.id, date, std::slice::from_ref(&event.id))
+            .expect("evidence freezes");
+        let canonical_link = "[[Projects/Knowledge]]";
+        let context_snapshot = store
+            .create_context_snapshot(
+                &profile.id,
+                date,
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "workstream_links": {"workstream:test": [canonical_link]},
+                    "workstream_evidence": {"workstream:test": [event.id]},
+                }),
+            )
+            .expect("context freezes");
+        let context_content = comparison_content(
+            snapshot.event_ids.first().unwrap(),
+            "Knowledge-linked",
+            vec![canonical_link.to_owned()],
+        );
+        let without_context_content = comparison_content(
+            snapshot.event_ids.first().unwrap(),
+            "Evidence-only",
+            Vec::new(),
+        );
+        let source = store
+            .create_proposal_revision_with_context(
+                &profile.id,
+                date,
+                Some(&snapshot.id),
+                &context_snapshot.id,
+                "generated",
+                &serde_json::to_value(&context_content).unwrap(),
+            )
+            .expect("source revision stores");
+        ContextComparisonFixture {
+            store,
+            profile,
+            date,
+            snapshot,
+            context_snapshot,
+            source,
+            context_content,
+            without_context_content,
+        }
+    }
+
+    fn create_fixture_comparison(fixture: &ContextComparisonFixture) -> ContextComparison {
+        fixture
+            .store
+            .create_context_comparison(
+                &fixture.profile.id,
+                fixture.date,
+                &fixture.source.id,
+                &fixture.context_content,
+                &fixture.without_context_content,
+                &"a".repeat(64),
+                &"b".repeat(64),
+            )
+            .expect("comparison creates")
+    }
+
+    #[test]
+    fn context_comparison_creation_is_blind_immutable_and_idempotent() {
+        let fixture = context_comparison_fixture();
+        let comparison = create_fixture_comparison(&fixture);
+        assert_eq!(comparison.state, "open");
+        assert_eq!(comparison.arm_a_kind, None);
+        assert_eq!(comparison.decision, None);
+        assert_eq!(comparison.snapshot_id, fixture.snapshot.id);
+        assert_eq!(comparison.context_snapshot_id, fixture.context_snapshot.id);
+        assert!(
+            (comparison.arm_a_content == fixture.context_content
+                && comparison.arm_b_content == fixture.without_context_content)
+                || (comparison.arm_a_content == fixture.without_context_content
+                    && comparison.arm_b_content == fixture.context_content)
+        );
+        assert_eq!(
+            fixture
+                .store
+                .context_comparison_for_revision(&fixture.source.id)
+                .unwrap(),
+            Some(comparison.clone())
+        );
+        assert_eq!(create_fixture_comparison(&fixture), comparison);
+        assert!(
+            fixture
+                .store
+                .create_context_comparison(
+                    &fixture.profile.id,
+                    fixture.date,
+                    &fixture.source.id,
+                    &fixture.context_content,
+                    &fixture.without_context_content,
+                    &"c".repeat(64),
+                    &"b".repeat(64),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("different immutable inputs")
+        );
+        assert!(
+            fixture
+                .store
+                .connect()
+                .unwrap()
+                .execute(
+                    "UPDATE context_comparisons SET arm_a_content_json = '{}' WHERE id = ?1",
+                    params![comparison.id],
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn deciding_context_comparison_promotes_exact_selected_arm_once() {
+        for select_context in [true, false] {
+            let fixture = context_comparison_fixture();
+            let comparison = create_fixture_comparison(&fixture);
+            let selected_arm =
+                if (comparison.arm_a_content == fixture.context_content) == select_context {
+                    "a"
+                } else {
+                    "b"
+                };
+            let selected_content = if select_context {
+                &fixture.context_content
+            } else {
+                &fixture.without_context_content
+            };
+            let decided = fixture
+                .store
+                .decide_context_comparison(
+                    &comparison.id,
+                    &fixture.source.id,
+                    selected_arm,
+                    "a",
+                    "same",
+                    Some("  blind preference  "),
+                )
+                .expect("decision promotes selected arm");
+            assert_eq!(decided.state, "decided");
+            assert!(decided.arm_a_kind.is_some());
+            let decision = decided.decision.expect("decision is exposed");
+            assert_eq!(decision.selected_arm, selected_arm);
+            assert_eq!(decision.usefulness, "a");
+            assert_eq!(decision.less_editing, "same");
+            assert_eq!(decision.note.as_deref(), Some("blind preference"));
+            let promoted = fixture
+                .store
+                .proposal_revision(&decision.promoted_revision_id)
+                .unwrap()
+                .expect("promoted revision remains");
+            assert_eq!(promoted.origin, "regenerated");
+            assert_eq!(promoted.snapshot_id, Some(fixture.snapshot.id.clone()));
+            assert_eq!(
+                promoted.content,
+                serde_json::to_value(selected_content).unwrap()
+            );
+            assert_eq!(
+                fixture
+                    .store
+                    .proposal_context_snapshot(&promoted.id)
+                    .unwrap()
+                    .is_some(),
+                select_context
+            );
+            assert_eq!(
+                fixture
+                    .store
+                    .daily_day(&fixture.profile.id, fixture.date)
+                    .unwrap()
+                    .unwrap()
+                    .current_revision_id
+                    .as_deref(),
+                Some(promoted.id.as_str())
+            );
+            assert!(
+                fixture
+                    .store
+                    .proposal_revision(&fixture.source.id)
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                fixture
+                    .store
+                    .decide_context_comparison(
+                        &comparison.id,
+                        &fixture.source.id,
+                        selected_arm,
+                        "b",
+                        "neither",
+                        None,
+                    )
+                    .unwrap_err()
+                    .to_string()
+                    .contains("already decided")
+            );
+        }
+    }
+
+    #[test]
+    fn context_comparison_rejects_stale_sources_and_invalid_decisions() {
+        let fixture = context_comparison_fixture();
+        let mut unauthorized_context = fixture.context_content.clone();
+        unauthorized_context.workstreams[0].canonical_links = vec!["[[Projects/Other]]".to_owned()];
+        assert!(
+            fixture
+                .store
+                .create_context_comparison(
+                    &fixture.profile.id,
+                    fixture.date,
+                    &fixture.source.id,
+                    &unauthorized_context,
+                    &fixture.without_context_content,
+                    &"a".repeat(64),
+                    &"b".repeat(64),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("not authorized")
+        );
+        let mut linked_without_context = fixture.without_context_content.clone();
+        linked_without_context.workstreams[0].canonical_links =
+            vec!["[[Projects/Knowledge]]".to_owned()];
+        assert!(
+            fixture
+                .store
+                .create_context_comparison(
+                    &fixture.profile.id,
+                    fixture.date,
+                    &fixture.source.id,
+                    &fixture.context_content,
+                    &linked_without_context,
+                    &"a".repeat(64),
+                    &"b".repeat(64),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("not authorized")
+        );
+        let comparison = create_fixture_comparison(&fixture);
+        assert!(
+            fixture
+                .store
+                .decide_context_comparison(
+                    &comparison.id,
+                    &fixture.source.id,
+                    "a",
+                    "winner",
+                    "same",
+                    None,
+                )
+                .is_err()
+        );
+        assert!(
+            fixture
+                .store
+                .decide_context_comparison(
+                    &comparison.id,
+                    &fixture.source.id,
+                    "a",
+                    "same",
+                    "neither",
+                    Some(&"x".repeat(301)),
+                )
+                .is_err()
+        );
+        fixture
+            .store
+            .create_proposal_revision_with_context(
+                &fixture.profile.id,
+                fixture.date,
+                Some(&fixture.snapshot.id),
+                &fixture.context_snapshot.id,
+                "regenerated",
+                &serde_json::to_value(&fixture.context_content).unwrap(),
+            )
+            .expect("newer current revision stores");
+        assert!(
+            fixture
+                .store
+                .decide_context_comparison(
+                    &comparison.id,
+                    &fixture.source.id,
+                    "a",
+                    "same",
+                    "neither",
+                    None,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("current proposal revision changed")
+        );
+        assert_eq!(
+            fixture
+                .store
+                .connect()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM proposal_revisions WHERE workspace_id = ?1 AND local_date = ?2",
+                    params![fixture.profile.id, fixture.date.to_string()],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn context_comparison_requires_current_freshness_for_create_and_decide() {
+        let fixture = context_comparison_fixture();
+        fixture
+            .store
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE daily_days SET freshness = 'update_available' WHERE workspace_id = ?1 AND local_date = ?2",
+                params![fixture.profile.id, fixture.date.to_string()],
+            )
+            .unwrap();
+        assert!(
+            fixture
+                .store
+                .create_context_comparison(
+                    &fixture.profile.id,
+                    fixture.date,
+                    &fixture.source.id,
+                    &fixture.context_content,
+                    &fixture.without_context_content,
+                    &"a".repeat(64),
+                    &"b".repeat(64),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("not eligible")
+        );
+        fixture
+            .store
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE daily_days SET freshness = 'current' WHERE workspace_id = ?1 AND local_date = ?2",
+                params![fixture.profile.id, fixture.date.to_string()],
+            )
+            .unwrap();
+        let comparison = create_fixture_comparison(&fixture);
+        fixture
+            .store
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE daily_days SET freshness = 'update_available' WHERE workspace_id = ?1 AND local_date = ?2",
+                params![fixture.profile.id, fixture.date.to_string()],
+            )
+            .unwrap();
+        assert!(
+            fixture
+                .store
+                .decide_context_comparison(
+                    &comparison.id,
+                    &fixture.source.id,
+                    "a",
+                    "same",
+                    "same",
+                    None,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("no longer eligible")
+        );
+        assert_eq!(
+            fixture
+                .store
+                .connect()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM proposal_revisions WHERE workspace_id = ?1 AND local_date = ?2",
+                    params![fixture.profile.id, fixture.date.to_string()],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
 
     #[test]
     fn saves_automation_settings_optimistically_and_claims_schedule_runs_once() {

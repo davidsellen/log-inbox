@@ -37,6 +37,8 @@ The Daily sidebar shows **Context used** for every candidate. Used notes are gro
 
 A small status distinguishes immutable frozen context from the current Knowledge setup. Ordinary setup or content changes are advisory; a removed or excluded source used by the revision is marked unavailable and blocks Apply until regeneration. Resolver, excerpt count, and snapshot ID stay under Technical details. Adjustment requests are bound to the exact visible revision so another session cannot silently apply stale choices.
 
+For an eligible unedited candidate, **Compare without Knowledge** creates two private shadow drafts from the same frozen evidence, manual-note IDs, active model, and generation contract. Draft A/B identity stays hidden until the owner records which is more useful, which would take less editing, and which to continue with. Starting or closing the comparison changes no candidate or Markdown. Saving one decision reveals the assignment and atomically promotes only the selected validated arm as a new immutable revision.
+
 ## Source collections
 
 Source collections are secondary setup under Knowledge. They define small, named sets of folders used to constrain canonical-note resolution, bounded local-model excerpts, and note search. Daily remains useful with no collections, but names cannot be manually linked until at least one collection provides safe note choices. Each collection shows only its name, purpose, included roots, exclusions, and active state; it does not expose a file tree or note browser.

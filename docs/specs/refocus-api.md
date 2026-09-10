@@ -86,6 +86,14 @@ Requires both `logs:read` and `knowledge:read`. It returns the immutable Knowled
 
 `changed` is advisory: the reviewed candidate retains its frozen context until regeneration. It includes changes to an excerpt source's usable-content digest. `invalid` means a note used by the revision was removed from the enabled bounded catalog, so Apply preview and a new Apply are rejected until regeneration. Current fingerprints use collection/mapping revisions, catalog identity metadata, and used-note content digests—not retained event bodies—so normal raw-evidence expiry does not make context freshness unknowable.
 
+### `POST /api/v2/daily/{YYYY-MM-DD}/context-comparisons`
+
+Requires `draft:generate` and CSRF. Body contains the exact current `expected_revision_id`. The candidate must be current, unedited, unapplied, backed by live automated evidence, and have frozen Knowledge matches. The server serializes generation and creates two private validated arms from the same immutable evidence/manual IDs, active model fingerprint, and generation contract: one with the frozen Knowledge context and one without Knowledge. It persists a randomized A/B assignment and returns both rendered previews without revealing the assignment. Retrying the exact source revision returns the same comparison and makes no additional model call.
+
+### `POST /api/v2/daily/{YYYY-MM-DD}/context-comparisons/{id}/decision`
+
+Requires `review:write` and CSRF. Body contains the exact source `expected_revision_id`, categorical `usefulness` and `less_editing` values (`a`, `b`, `same`, or `neither`), `continue_with` (`a` or `b`), and an optional 300-byte note. A compare-and-swap rejects stale candidates or repeated decisions. One transaction records the decision, reveals which arm used Knowledge, and promotes the selected arm as a new immutable current revision with the correct context binding. It does not write Markdown.
+
 ## Daily read model
 
 ### `GET /api/v2/daily/{YYYY-MM-DD}`

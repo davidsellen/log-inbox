@@ -4,6 +4,7 @@ use log_inbox_core::models::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -17,6 +18,7 @@ const MAX_PROMPT_METADATA_BYTES: usize = 8 * 1024;
 const MAX_PROMPT_BYTES: usize = 512 * 1024;
 const MAX_LLM_RESPONSE_BYTES: usize = 256 * 1024;
 const DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS: u64 = 300;
+pub const DAILY_GENERATION_CONTRACT: &str = "daily-structured-v1";
 const CONTEXT_METADATA_KEYS: &[&str] = &[
     "task_id",
     "session_id",
@@ -113,6 +115,23 @@ pub fn knowledge_text_stays_local(config: &LlmConfig) -> bool {
             .trim_matches(['[', ']'])
             .parse::<std::net::IpAddr>()
             .is_ok_and(|address| address.is_loopback())
+}
+
+pub fn generation_configuration_digest(config: &LlmConfig) -> String {
+    let value = json!({
+        "base_url": config.base_url,
+        "model": config.model,
+        "credential_present": config.api_key.is_some(),
+        "contract": DAILY_GENERATION_CONTRACT,
+    });
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&value).expect("LLM configuration serializes"))
+    )
+}
+
+pub fn daily_generation_contract_digest() -> String {
+    format!("{:x}", Sha256::digest(DAILY_GENERATION_CONTRACT.as_bytes()))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1766,6 +1785,15 @@ mod tests {
             .unwrap_err();
 
         assert!(error.contains("requires a configured LLM"));
+    }
+
+    #[test]
+    fn generation_fingerprint_never_contains_credentials() {
+        let mut config = LlmConfig::for_test("http://127.0.0.1:11434/v1");
+        config.api_key = Some("credential-that-must-not-escape".to_owned());
+        let fingerprint = generation_configuration_digest(&config);
+        assert_eq!(fingerprint.len(), 64);
+        assert!(!fingerprint.contains("credential-that-must-not-escape"));
     }
 
     #[test]

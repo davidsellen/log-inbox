@@ -14,8 +14,9 @@ use log_inbox_core::{
     },
     daily::{render_daily_path, resolve_day, resolve_local_time},
     models::{
-        ApplyOperation, ContextMapping, DailyDay, DailyRevisionContent, IgnoredContextIdentity,
-        LinkSelector, LogQuery, PrepareApplyOperation, ProposalRevision, WorkspaceProfile,
+        ApplyOperation, ContextComparison, ContextMapping, DailyDay, DailyRevisionContent,
+        IgnoredContextIdentity, LinkSelector, LogQuery, PrepareApplyOperation, ProposalRevision,
+        WorkspaceProfile,
     },
     settings::Settings,
     store::Store,
@@ -146,6 +147,22 @@ struct GenerateDailyRequest {
     replace_edited: bool,
     expected_revision_id: Option<String>,
     context_exclusions: Option<Vec<KnowledgeExcerptExclusionRequest>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartContextComparisonRequest {
+    expected_revision_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecideContextComparisonRequest {
+    expected_revision_id: String,
+    usefulness: String,
+    less_editing: String,
+    continue_with: String,
+    note: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -412,6 +429,14 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/v2/daily/{date}/generate",
             post(refocus_generate_daily),
+        )
+        .route(
+            "/api/v2/daily/{date}/context-comparisons",
+            post(refocus_start_context_comparison),
+        )
+        .route(
+            "/api/v2/daily/{date}/context-comparisons/{comparison_id}/decision",
+            post(refocus_decide_context_comparison),
         )
         .route(
             "/api/v2/daily/{date}/manual",
@@ -3008,6 +3033,276 @@ async fn refocus_generate_daily(
     .map(Json)
 }
 
+async fn generate_context_comparison_arms(
+    config: Option<&llm::LlmConfig>,
+    context_snapshot: &log_inbox_core::models::ContextSnapshot,
+    destination_path: &str,
+    events: Vec<log_inbox_core::models::StoredLogEvent>,
+    manual_entry_ids: Vec<String>,
+) -> Result<(DailyRevisionContent, DailyRevisionContent), ApiError> {
+    let mut with_context = knowledge::vault_context_from_snapshot(&context_snapshot.payload)
+        .map_err(ApiError::conflict)?;
+    if context_snapshot
+        .payload
+        .get("excerpts")
+        .and_then(Value::as_array)
+        .is_some_and(|excerpts| !excerpts.is_empty())
+        && !config.is_some_and(llm::knowledge_text_stays_local)
+    {
+        return Err(ApiError::conflict(
+            "this comparison contains frozen note excerpts and requires a local model",
+        ));
+    }
+    if let Some(context) = with_context.as_object_mut() {
+        context.insert(
+            "daily_note".to_owned(),
+            Value::String(destination_path.to_owned()),
+        );
+        context.insert(
+            "link_context_revision".to_owned(),
+            Value::String(context_snapshot.snapshot_digest.clone()),
+        );
+    }
+    let without_context = json!({
+        "candidate_notes": [],
+        "workstream_links": {},
+        "group_aliases": {},
+        "daily_note": destination_path,
+        "knowledge": {
+            "resolver_version": "none",
+            "context_is_background_only": true,
+            "excerpts": [],
+            "workstream_excerpts": {}
+        }
+    });
+    let task = Some(
+        "Create a concise, evidence-backed daily engineering record. Preserve distinct outcomes, decisions, trade-offs, validation, blockers, and follow-up."
+            .to_owned(),
+    );
+    let with_args = llm::SuggestMarkdownSummaryArgs {
+        vault_context: with_context,
+        mode: "daily-consolidation".to_owned(),
+        task: task.clone(),
+    };
+    let without_args = llm::SuggestMarkdownSummaryArgs {
+        vault_context: without_context,
+        mode: "daily-consolidation".to_owned(),
+        task,
+    };
+    let with_proposal =
+        llm::generate_automated_daily_summary(config, with_args.clone(), events.clone())
+            .await
+            .map_err(ApiError::unprocessable)?;
+    let without_proposal =
+        llm::generate_automated_daily_summary(config, without_args.clone(), events)
+            .await
+            .map_err(ApiError::unprocessable)?;
+    let with_draft = with_proposal
+        .structured_draft
+        .ok_or_else(|| ApiError::internal("comparison generator omitted structured content"))?;
+    let without_draft = without_proposal
+        .structured_draft
+        .ok_or_else(|| ApiError::internal("comparison generator omitted structured content"))?;
+    Ok((
+        llm::daily_revision_content(with_draft, manual_entry_ids.clone(), &with_args),
+        llm::daily_revision_content(without_draft, manual_entry_ids, &without_args),
+    ))
+}
+
+fn public_context_comparison(
+    state: &AppState,
+    comparison: &ContextComparison,
+) -> Result<Value, ApiError> {
+    let manual_entries = state
+        .store
+        .manual_daily_entries(&comparison.workspace_id, comparison.local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let evidence = state
+        .store
+        .snapshot_evidence(&comparison.snapshot_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut output = json!({
+        "id": comparison.id,
+        "source_revision_id": comparison.source_revision_id,
+        "state": comparison.state,
+        "created_at": comparison.created_at,
+        "arms": [
+            {
+                "id": "a",
+                "preview_markdown": llm::render_daily_revision_preview(
+                    &comparison.arm_a_content,
+                    &manual_entries,
+                    &evidence,
+                )
+            },
+            {
+                "id": "b",
+                "preview_markdown": llm::render_daily_revision_preview(
+                    &comparison.arm_b_content,
+                    &manual_entries,
+                    &evidence,
+                )
+            }
+        ]
+    });
+    if let Some(kind) = comparison.arm_a_kind.as_deref() {
+        let (a, b) = if kind == "context" {
+            ("with_context", "without_context")
+        } else {
+            ("without_context", "with_context")
+        };
+        output["assignment"] = json!({"a": a, "b": b});
+    }
+    if let Some(decision) = comparison.decision.as_ref() {
+        output["decision"] = serde_json::to_value(decision)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+    }
+    Ok(output)
+}
+
+async fn refocus_start_context_comparison(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(date): AxumPath<String>,
+    Json(input): Json<StartContextComparisonRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "draft:generate", true)?;
+    require_cutover_for_daily_mutation(&state)?;
+    let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let _generation_guard = state.daily_generation_lock.lock().await;
+    let profile = active_refocus_workspace(&state)?;
+    let day = state
+        .store
+        .daily_day(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::conflict("generate a Daily candidate before comparing it"))?;
+    let revision = state
+        .store
+        .current_proposal_revision(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::conflict("generate a Daily candidate before comparing it"))?;
+    if revision.id != input.expected_revision_id {
+        return Err(ApiError::conflict(
+            "the Daily candidate changed; start the comparison again",
+        ));
+    }
+    if day.review_status != "in_review"
+        || day.freshness != "current"
+        || !matches!(revision.origin.as_str(), "generated" | "regenerated")
+    {
+        return Err(ApiError::conflict(
+            "only a current, unedited Daily candidate can be compared",
+        ));
+    }
+    let context_snapshot = state
+        .store
+        .proposal_context_snapshot(&revision.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::conflict("this candidate did not use Knowledge context"))?;
+    if context_snapshot
+        .payload
+        .get("used_notes")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return Err(ApiError::conflict(
+            "this candidate has no matched Knowledge notes to compare",
+        ));
+    }
+    if let Some(existing) = state
+        .store
+        .context_comparison_for_revision(&revision.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    {
+        return public_context_comparison(&state, &existing).map(Json);
+    }
+    let snapshot_id = revision
+        .snapshot_id
+        .as_deref()
+        .ok_or_else(|| ApiError::conflict("this candidate has no automated evidence"))?;
+    let snapshot = state
+        .store
+        .evidence_snapshot(snapshot_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::internal("the candidate evidence snapshot is missing"))?;
+    let snapshot_evidence = state
+        .store
+        .snapshot_evidence(snapshot_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if snapshot_evidence.iter().any(|item| !item.available) {
+        return Err(ApiError::conflict(
+            "source evidence expired, so a fair comparison can no longer be generated",
+        ));
+    }
+    let source_content = serde_json::from_value::<DailyRevisionContent>(revision.content.clone())
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let events = state
+        .store
+        .get_events_by_ids(&snapshot.event_ids)
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    let config = state
+        .llm_config
+        .as_ref()
+        .ok_or_else(|| ApiError::unprocessable("Daily comparison requires a configured LLM"))?;
+    let (context_content, without_context_content) = generate_context_comparison_arms(
+        Some(config),
+        &context_snapshot,
+        &day.destination_path,
+        events,
+        source_content.manual_entry_ids,
+    )
+    .await?;
+    let comparison = state
+        .store
+        .create_context_comparison(
+            &profile.id,
+            local_date,
+            &revision.id,
+            &context_content,
+            &without_context_content,
+            &llm::generation_configuration_digest(config),
+            &llm::daily_generation_contract_digest(),
+        )
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    public_context_comparison(&state, &comparison).map(Json)
+}
+
+async fn refocus_decide_context_comparison(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((date, comparison_id)): AxumPath<(String, String)>,
+    Json(input): Json<DecideContextComparisonRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "review:write", true)?;
+    require_cutover_for_daily_mutation(&state)?;
+    let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let profile = active_refocus_workspace(&state)?;
+    let comparison = state
+        .store
+        .context_comparison_for_revision(&input.expected_revision_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .filter(|comparison| {
+            comparison.id == comparison_id
+                && comparison.workspace_id == profile.id
+                && comparison.local_date == local_date
+        })
+        .ok_or_else(|| ApiError::not_found("Daily context comparison was not found"))?;
+    let decided = state
+        .store
+        .decide_context_comparison(
+            &comparison.id,
+            &input.expected_revision_id,
+            &input.continue_with,
+            &input.usefulness,
+            &input.less_editing,
+            input.note.as_deref(),
+        )
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    public_context_comparison(&state, &decided).map(Json)
+}
+
 fn validate_requested_context_exclusions(
     exclusions: Vec<KnowledgeExcerptExclusionRequest>,
 ) -> Result<BTreeSet<(String, String)>, ApiError> {
@@ -4138,6 +4433,38 @@ mod knowledge_destination_tests {
         ] {
             assert!(!text.contains(private));
         }
+    }
+
+    #[test]
+    fn open_context_comparison_projection_keeps_randomized_assignment_blind() {
+        let state = test_state();
+        let content = DailyRevisionContent {
+            schema_version: 1,
+            workstreams: Vec::new(),
+            manual_entry_ids: Vec::new(),
+            open_questions: Vec::new(),
+        };
+        let comparison = ContextComparison {
+            id: "comparison_1".to_owned(),
+            schema_version: 1,
+            workspace_id: "workspace_1".to_owned(),
+            local_date: NaiveDate::from_ymd_opt(2026, 9, 9).unwrap(),
+            source_revision_id: "revision_1".to_owned(),
+            snapshot_id: "snapshot_1".to_owned(),
+            context_snapshot_id: "context_1".to_owned(),
+            arm_a_content: content.clone(),
+            arm_b_content: content,
+            arm_a_kind: None,
+            model_fingerprint: "a".repeat(64),
+            contract_fingerprint: "b".repeat(64),
+            state: "open".to_owned(),
+            decision: None,
+            created_at: Utc::now(),
+        };
+        let projection = public_context_comparison(&state, &comparison).expect("projection builds");
+        assert!(projection.get("assignment").is_none());
+        assert!(!projection.to_string().contains("with_context"));
+        assert!(!projection.to_string().contains("without_context"));
     }
 
     fn test_state() -> AppState {

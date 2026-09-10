@@ -180,6 +180,8 @@ Exit gate: the pilot needs no database repair or manual proposal-folder cleanup,
   - [x] Freeze and disclose exact bounded excerpts for local models; keep nonlocal models link-only, invalidate removed/excluded sources, and exclude generated blocks from self-reinforcing evidence.
   - [x] Let the owner exclude an excerpt per workstream and regenerate into a new immutable revision without changing its canonical link.
 - [ ] Evaluate drafts with versus without context. Keep Knowledge optional.
+  - [x] Add an opt-in blind paired-comparison workflow with identical frozen inputs, immutable shadow drafts, categorical owner feedback, and atomic selected-arm promotion.
+  - [ ] Run representative real-model comparisons and review usefulness, editing burden, latency, and configuration effort before accepting the result.
 
 Exit gate: representative cases show improved factual usefulness or reduced editing with manageable configuration effort.
 

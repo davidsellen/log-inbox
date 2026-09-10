@@ -59,6 +59,8 @@ Supported factual fields are Outcome, Decision, Trade-off, Validation, Blocker, 
 
 Revision origin is `generated`, `structured_edit`, `manual`, `regenerated`, or `advanced_markdown`. Advanced Markdown is a detached override: returning to structured generation or discarding it requires confirmation, and evidence decisions remain explicit records.
 
+A Knowledge context comparison is a separate immutable experiment bound to one unedited source revision, its complete evidence snapshot, frozen Knowledge snapshot, and non-secret model/contract fingerprints. It stores two validated shadow contents in randomized order and reveals their identity only after a single owner decision. Choosing an arm atomically creates a normal `regenerated` proposal revision; the source and unchosen arm remain recoverable audit evidence. An open comparison never changes the day or Markdown.
+
 ### Review decision
 
 A review decision addresses one evidence digest in one snapshot. Its disposition is `include`, `omit`, `duplicate_of`, or `superseded_by`, with actor, time, and optional reason. Omission is reversible while the evidence exists. A later event version is unresolved even when an earlier version was omitted.

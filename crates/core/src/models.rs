@@ -155,6 +155,36 @@ pub struct ContextSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextComparisonDecision {
+    pub selected_arm: String,
+    pub usefulness: String,
+    pub less_editing: String,
+    pub note: Option<String>,
+    pub promoted_revision_id: String,
+    pub decided_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextComparison {
+    pub id: String,
+    pub schema_version: u64,
+    pub workspace_id: String,
+    pub local_date: NaiveDate,
+    pub source_revision_id: String,
+    pub snapshot_id: String,
+    pub context_snapshot_id: String,
+    pub arm_a_content: DailyRevisionContent,
+    pub arm_b_content: DailyRevisionContent,
+    /// Hidden while the comparison is open so callers can present randomized arms blindly.
+    pub arm_a_kind: Option<String>,
+    pub model_fingerprint: String,
+    pub contract_fingerprint: String,
+    pub state: String,
+    pub decision: Option<ContextComparisonDecision>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackupVerification {
     pub path: PathBuf,
     pub schema_version: i64,

@@ -902,6 +902,90 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 21 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE context_comparisons (
+                    id TEXT PRIMARY KEY,
+                    schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+                    workspace_id TEXT NOT NULL,
+                    local_date TEXT NOT NULL,
+                    source_revision_id TEXT NOT NULL UNIQUE,
+                    snapshot_id TEXT NOT NULL,
+                    context_snapshot_id TEXT NOT NULL,
+                    arm_a_content_json TEXT NOT NULL,
+                    arm_a_content_hash TEXT NOT NULL,
+                    arm_b_content_json TEXT NOT NULL,
+                    arm_b_content_hash TEXT NOT NULL,
+                    arm_a_kind TEXT NOT NULL CHECK(arm_a_kind IN ('context', 'without_context')),
+                    model_fingerprint TEXT NOT NULL,
+                    contract_fingerprint TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('open', 'decided')),
+                    selected_arm TEXT CHECK(selected_arm IN ('a', 'b')),
+                    usefulness TEXT CHECK(usefulness IN ('a', 'b', 'same', 'neither')),
+                    less_editing TEXT CHECK(less_editing IN ('a', 'b', 'same', 'neither')),
+                    decision_note TEXT CHECK(length(COALESCE(decision_note, '')) <= 300),
+                    promoted_revision_id TEXT,
+                    created_at TEXT NOT NULL,
+                    decided_at TEXT,
+                    CHECK(
+                        (state = 'open'
+                         AND selected_arm IS NULL
+                         AND usefulness IS NULL
+                         AND less_editing IS NULL
+                         AND decision_note IS NULL
+                         AND promoted_revision_id IS NULL
+                         AND decided_at IS NULL)
+                        OR
+                        (state = 'decided'
+                         AND selected_arm IS NOT NULL
+                         AND usefulness IS NOT NULL
+                         AND less_editing IS NOT NULL
+                         AND promoted_revision_id IS NOT NULL
+                         AND decided_at IS NOT NULL)
+                    ),
+                    FOREIGN KEY(workspace_id, local_date)
+                        REFERENCES daily_days(workspace_id, local_date),
+                    FOREIGN KEY(source_revision_id) REFERENCES proposal_revisions(id) ON DELETE RESTRICT,
+                    FOREIGN KEY(snapshot_id) REFERENCES evidence_snapshots(id) ON DELETE RESTRICT,
+                    FOREIGN KEY(context_snapshot_id) REFERENCES context_snapshots(id) ON DELETE RESTRICT,
+                    FOREIGN KEY(promoted_revision_id) REFERENCES proposal_revisions(id) ON DELETE RESTRICT
+                );
+
+                CREATE INDEX idx_context_comparisons_day
+                    ON context_comparisons(workspace_id, local_date, created_at DESC);
+
+                CREATE TRIGGER context_comparisons_one_decision
+                BEFORE UPDATE ON context_comparisons
+                WHEN OLD.state != 'open'
+                     OR NEW.state != 'decided'
+                     OR NEW.id != OLD.id
+                     OR NEW.schema_version != OLD.schema_version
+                     OR NEW.workspace_id != OLD.workspace_id
+                     OR NEW.local_date != OLD.local_date
+                     OR NEW.source_revision_id != OLD.source_revision_id
+                     OR NEW.snapshot_id != OLD.snapshot_id
+                     OR NEW.context_snapshot_id != OLD.context_snapshot_id
+                     OR NEW.arm_a_content_json != OLD.arm_a_content_json
+                     OR NEW.arm_a_content_hash != OLD.arm_a_content_hash
+                     OR NEW.arm_b_content_json != OLD.arm_b_content_json
+                     OR NEW.arm_b_content_hash != OLD.arm_b_content_hash
+                     OR NEW.arm_a_kind != OLD.arm_a_kind
+                     OR NEW.model_fingerprint != OLD.model_fingerprint
+                     OR NEW.contract_fingerprint != OLD.contract_fingerprint
+                     OR NEW.created_at != OLD.created_at
+                BEGIN
+                    SELECT RAISE(ABORT, 'context comparison is immutable or already decided');
+                END;
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (21, 'paired Knowledge context comparisons', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -2353,10 +2437,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 20);
+        assert_eq!(store.schema_version().expect("version reads"), 21);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 20);
+        assert_eq!(store.schema_version().expect("version remains"), 21);
     }
 
     #[test]
@@ -2424,7 +2508,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 20);
+        assert_eq!(verification.schema_version, 21);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());

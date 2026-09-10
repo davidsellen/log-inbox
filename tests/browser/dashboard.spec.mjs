@@ -6,7 +6,7 @@ const dailyHtml = await readFile(
   "utf8"
 );
 
-function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = "current", applyStatus = null, dismissed = false, lateEvidence = false, lateDeferred = false, contextSnapshot = null } = {}) {
+function dailyResponse(date = "2026-09-08", { revisionId = "revision_1", origin = "generated", freshness = "current", applyStatus = null, dismissed = false, lateEvidence = false, lateDeferred = false, contextSnapshot = null } = {}) {
   const events = [{ id: "evt_1", source: "codex/fedora", timestamp: `${date}T09:00:00Z`, message: "Validated the Daily workflow." }];
   if (lateEvidence) events.push({ id: "evt_late", source: "codex/fedora", timestamp: `${date}T10:00:00Z`, message: "Late deployment evidence." });
   return {
@@ -25,7 +25,7 @@ function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = 
     },
     manual_entries: [{ id: "manual_1", text: "Discussed the trade-off with the team.", references: [], created_at: `${date}T08:00:00Z`, updated_at: `${date}T08:00:00Z` }],
     current_revision: {
-      id: "revision_1",
+      id: revisionId,
       revision_number: 1,
       snapshot_id: "snapshot_1",
       origin,
@@ -56,6 +56,17 @@ function dailyResponse(date = "2026-09-08", { origin = "generated", freshness = 
   };
 }
 
+function contextComparison(overrides = {}) {
+  return {
+    id: "comparison_1",
+    arms: [
+      { id: "a", preview_markdown: "### Automated activity\n\n#### Daily workflow\n\n- Captured the review gate and product decision." },
+      { id: "b", preview_markdown: "### Automated activity\n\n#### Daily workflow\n\n- Updated the Daily workflow." }
+    ],
+    ...overrides
+  };
+}
+
 function knowledgeCollection(overrides = {}) {
   return { id: "knowledge_fixture", workspace_id: "workspace_fixture", label: "Product context", purpose: "Product behavior and decisions", roots: ["Products/Alpha"], exclusions: ["Products/Alpha/Archive"], enabled: true, revision_digest: "a".repeat(64), created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-09T12:00:00Z", ...overrides };
 }
@@ -77,7 +88,7 @@ function knowledgeReview(overrides = {}) {
   };
 }
 
-async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshness = "current", workspaceProfile = undefined, applyStatus = null, migrationItems = [], lateEvidence = false, knowledgeCollections = [], knowledgeStatus = 200, review = knowledgeReview(), noteOptions = [{ path: "Products/Alpha.md", title: "Alpha", collection_ids: ["knowledge_fixture"] }], contextDetails = { status: "none", workstreams: [] } } = {}) {
+async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshness = "current", workspaceProfile = undefined, applyStatus = null, migrationItems = [], lateEvidence = false, knowledgeCollections = [], knowledgeStatus = 200, review = knowledgeReview(), noteOptions = [{ path: "Products/Alpha.md", title: "Alpha", collection_ids: ["knowledge_fixture"] }], contextDetails = { status: "none", workstreams: [] }, comparison = contextComparison(), comparisonFailures = 0 } = {}) {
   const requests = [];
   let loggedIn = false;
   let currentApplyStatus = applyStatus;
@@ -86,6 +97,10 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
   let automationSaved = false;
   let automationSettings = { workspace_id: "workspace_fixture", enabled: false, generation_time: "00:15", catch_up_days: 7, raw_retention_days: 30, audit_retention_days: 365, recovery_retention_days: 30, updated_at: "1970-01-01T00:00:00Z" };
   let lateDeferred = false;
+  let currentOrigin = origin;
+  let currentRevisionId = "revision_1";
+  let currentContextDetails = structuredClone(contextDetails);
+  let comparisonAttempts = 0;
   let collections = structuredClone(knowledgeCollections);
   let knowledgeState = structuredClone(review);
   let activeProfile = workspaceProfile === undefined ? { id: "workspace_fixture", status: "active", root_binding: "binding_fixture", timezone: "Europe/Stockholm", daily_root: "Work Log", daily_pattern: "{year}/{month_name}/Daily log {month_name} {day}.md", template_path: null, link_style: "markdown", created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z" } : workspaceProfile;
@@ -187,11 +202,24 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ operation: currentApplyStatus }) });
     }
     if (url.pathname.endsWith("/apply") && request.method() === "POST") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ operation: { state: "finalized" }, destination_path: request.postDataJSON().destination_path, idempotent: false }) });
-    if (url.pathname.endsWith("/context") && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(contextDetails) });
+    if (/^\/api\/v2\/daily\/\d{4}-\d{2}-\d{2}\/context-comparisons$/.test(url.pathname) && request.method() === "POST") {
+      comparisonAttempts += 1;
+      if (comparisonAttempts <= comparisonFailures) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "Comparison model unavailable" }) });
+      return route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify(comparison) });
+    }
+    const comparisonDecision = url.pathname.match(/^\/api\/v2\/daily\/\d{4}-\d{2}-\d{2}\/context-comparisons\/([^/]+)\/decision$/);
+    if (comparisonDecision && request.method() === "POST") {
+      const input = request.postDataJSON();
+      currentOrigin = "regenerated";
+      currentRevisionId = "revision_2";
+      if (input.continue_with === "b") currentContextDetails = { status: "none", workstreams: [] };
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ assignment: { a: "with_context", b: "without_context" }, current_revision_id: currentRevisionId }) });
+    }
+    if (url.pathname.endsWith("/context") && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(currentContextDetails) });
     const match = url.pathname.match(/^\/api\/v2\/daily\/(\d{4}-\d{2}-\d{2})$/);
     if (match && request.method() === "GET") {
       if (dailyStatus !== 200) return route.fulfill({ status: dailyStatus, contentType: "application/json", body: JSON.stringify({ error: "Daily fixture unavailable" }) });
-      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dailyResponse(match[1], { origin, freshness, applyStatus: currentApplyStatus, dismissed, lateEvidence, lateDeferred, contextSnapshot: contextDetails.snapshot || null })) });
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dailyResponse(match[1], { revisionId: currentRevisionId, origin: currentOrigin, freshness, applyStatus: currentApplyStatus, dismissed, lateEvidence, lateDeferred, contextSnapshot: currentContextDetails.snapshot || null })) });
     }
     if (url.pathname.endsWith("/late-evidence/evt_late") && ["POST", "DELETE"].includes(request.method())) {
       lateDeferred = request.method() === "POST";
@@ -225,6 +253,7 @@ test("refocused Daily shows one date, destination, notes, and exact preview", as
   await expect(page.locator("#preview")).toContainText("Built a predictable Daily review.");
   await expect(page.locator("#context-status")).toHaveText("No Knowledge");
   await expect(page.locator("#context-card")).toContainText("Daily evidence and your notes only");
+  await expect(page.getByRole("button", { name: "Compare without Knowledge" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Mon, Sep 7 Needs review/i })).toBeVisible();
   await expect(page.locator("#missed-summary")).toHaveText("1 missed");
 
@@ -460,6 +489,80 @@ test("Daily discloses the exact bounded Knowledge excerpt sent to a local model"
     expected_revision_id: "revision_1",
     context_exclusions: [{ workstream_id: "source:codex%2Ffedora|task:test", note_path: "Products/Alpha.md" }]
   });
+});
+
+test("Daily compares two private drafts and promotes only the owner's choice", async ({ page }) => {
+  const requests = await mockDaily(page, { contextDetails: {
+    status: "current",
+    mode: "bounded_knowledge",
+    message: "Knowledge links and excerpts match the frozen candidate.",
+    snapshot: { id: "context_compare", snapshot_digest: "9".repeat(64), created_at: "2026-09-08T10:00:00Z", resolver_version: "exact-v2", used_note_count: 1, resolved_group_count: 1, excerpt_count: 1, diagnostics: {} },
+    workstreams: [{ id: "source:codex%2Ffedora|task:test", notes: [{ path: "Products/Alpha.md", title: "Alpha", reason: "saved_mapping", matched_fields: ["product"], excerpt: { id: "excerpt_alpha", text: "Alpha uses an explicit review gate." } }] }]
+  } });
+  await openDaily(page);
+
+  await page.getByRole("button", { name: "Compare without Knowledge" }).click();
+  const dialog = page.getByRole("dialog", { name: "Compare Daily drafts" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("two private comparison drafts from the same frozen Daily evidence");
+  await expect(dialog.getByRole("heading", { name: "Draft A" })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Draft B" })).toBeVisible();
+  await expect(dialog.locator("#draft-a-preview")).toContainText("review gate and product decision");
+  await expect(dialog.locator("#draft-b-preview")).toContainText("Updated the Daily workflow");
+  await expect(dialog).not.toContainText("Draft A used Knowledge");
+
+  await dialog.getByRole("group", { name: "Which draft is more useful?" }).getByLabel("Draft A").check();
+  await dialog.getByRole("group", { name: "Which would take less editing?" }).getByLabel("Draft B").check();
+  await dialog.getByRole("group", { name: "Continue with" }).getByLabel("Draft B").check();
+  await dialog.getByLabel("Optional note").fill("B is shorter and needs less cleanup.");
+  await dialog.getByRole("button", { name: "Save choice" }).click();
+
+  await expect(dialog.getByRole("status")).toContainText("Draft A used Knowledge; Draft B did not");
+  await expect(dialog.getByRole("status")).toContainText("Draft B is now your current candidate");
+  const create = requests.find(request => request.path.endsWith("/context-comparisons") && request.method === "POST");
+  expect(create.body).toEqual({ expected_revision_id: "revision_1" });
+  const decision = requests.find(request => request.path.endsWith("/context-comparisons/comparison_1/decision") && request.method === "POST");
+  expect(decision.body).toEqual({
+    expected_revision_id: "revision_1",
+    usefulness: "a",
+    less_editing: "b",
+    continue_with: "b",
+    note: "B is shorter and needs less cleanup."
+  });
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(page.getByRole("status")).toContainText("Comparison saved");
+});
+
+test("Daily retries comparison creation without exposing a partial pair", async ({ page }) => {
+  await mockDaily(page, { comparisonFailures: 1, contextDetails: {
+    status: "current",
+    mode: "exact_links_only",
+    message: "Knowledge links match the frozen candidate.",
+    snapshot: { id: "context_retry", snapshot_digest: "8".repeat(64), created_at: "2026-09-08T10:00:00Z", resolver_version: "exact-v1", used_note_count: 1, resolved_group_count: 1, excerpt_count: 0, diagnostics: {} },
+    workstreams: [{ id: "source:codex%2Ffedora|task:test", notes: [{ path: "Products/Alpha.md", title: "Alpha", reason: "saved_mapping", matched_fields: ["product"] }] }]
+  } });
+  await openDaily(page);
+
+  await page.getByRole("button", { name: "Compare without Knowledge" }).click();
+  const dialog = page.getByRole("dialog", { name: "Compare Daily drafts" });
+  await expect(dialog.getByRole("status")).toContainText("Comparison could not be created: Comparison model unavailable");
+  await expect(dialog.locator("#comparison-arms")).toBeHidden();
+  await dialog.getByRole("button", { name: "Try again" }).click();
+  await expect(dialog.getByRole("heading", { name: "Draft A" })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Draft B" })).toBeVisible();
+});
+
+test("Daily hides comparison after the candidate has been edited", async ({ page }) => {
+  await mockDaily(page, { origin: "structured_edit", contextDetails: {
+    status: "current",
+    mode: "bounded_knowledge",
+    message: "Knowledge links and excerpts match the frozen candidate.",
+    snapshot: { id: "context_edited", snapshot_digest: "7".repeat(64), created_at: "2026-09-08T10:00:00Z", resolver_version: "exact-v2", used_note_count: 1, resolved_group_count: 1, excerpt_count: 1, diagnostics: {} },
+    workstreams: [{ id: "source:codex%2Ffedora|task:test", notes: [{ path: "Products/Alpha.md", title: "Alpha", reason: "saved_mapping", matched_fields: ["product"], excerpt: { id: "excerpt_alpha", text: "Alpha uses an explicit review gate." } }] }]
+  } });
+  await openDaily(page);
+
+  await expect(page.getByRole("button", { name: "Compare without Knowledge" })).toHaveCount(0);
 });
 
 test("Daily can restore a previously excluded excerpt without changing its link", async ({ page }) => {
