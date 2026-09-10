@@ -132,10 +132,20 @@ struct EditDailyCandidateRequest {
     content: DailyRevisionContent,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KnowledgeExcerptExclusionRequest {
+    workstream_id: String,
+    note_path: String,
+}
+
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GenerateDailyRequest {
     #[serde(default)]
     replace_edited: bool,
+    expected_revision_id: Option<String>,
+    context_exclusions: Option<Vec<KnowledgeExcerptExclusionRequest>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1641,6 +1651,7 @@ async fn refocus_daily_context(
         .payload
         .get("workstream_excerpts")
         .and_then(Value::as_object);
+    let applied_exclusions = frozen_context_exclusions(Some(&context_snapshot));
     let attached_links = serde_json::from_value::<DailyRevisionContent>(revision.content.clone())
         .map(|content| {
             content
@@ -1701,6 +1712,7 @@ async fn refocus_daily_context(
                     "attached": attached,
                     "reason": resolved.get("reason").and_then(Value::as_str),
                     "matched_fields": resolved.get("matched_fields").and_then(Value::as_array).cloned().unwrap_or_default(),
+                    "excluded": applied_exclusions.contains(&(workstream_id.to_owned(), path.to_owned())),
                     "excerpt": excerpt.map(|excerpt| json!({
                         "id": excerpt.get("id").and_then(Value::as_str),
                         "text": excerpt.get("text").and_then(Value::as_str),
@@ -1719,7 +1731,7 @@ async fn refocus_daily_context(
         "local_date": local_date,
         "revision_id": revision.id,
         "status": status,
-        "mode": if excerpts.is_empty() { "exact_links_only" } else { "bounded_knowledge" },
+        "mode": if context_snapshot.payload.get("schema_version").and_then(Value::as_u64) == Some(2) { "bounded_knowledge" } else { "exact_links_only" },
         "message": message,
         "snapshot": public_context_snapshot(&context_snapshot),
         "workstreams": workstreams,
@@ -2973,18 +2985,79 @@ async fn refocus_generate_daily(
     authorize_refocus(&state, &headers, "draft:generate", true)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
-    let replace_edited = input
-        .map(|Json(input)| input.replace_edited)
-        .unwrap_or(false);
-    generate_daily_candidate(&state, local_date, replace_edited)
-        .await
-        .map(Json)
+    let input = input.map(|Json(input)| input).unwrap_or_default();
+    let context_adjustments = match (input.expected_revision_id, input.context_exclusions) {
+        (Some(expected_revision_id), Some(exclusions)) => Some((
+            expected_revision_id,
+            validate_requested_context_exclusions(exclusions)?,
+        )),
+        (None, None) => None,
+        _ => {
+            return Err(ApiError::bad_request(
+                "expected_revision_id and context_exclusions must be provided together",
+            ));
+        }
+    };
+    generate_daily_candidate(
+        &state,
+        local_date,
+        input.replace_edited,
+        context_adjustments,
+    )
+    .await
+    .map(Json)
+}
+
+fn validate_requested_context_exclusions(
+    exclusions: Vec<KnowledgeExcerptExclusionRequest>,
+) -> Result<BTreeSet<(String, String)>, ApiError> {
+    if exclusions.len() > 64 {
+        return Err(ApiError::bad_request(
+            "context_exclusions cannot contain more than 64 entries",
+        ));
+    }
+    let mut validated = BTreeSet::new();
+    for exclusion in exclusions {
+        if exclusion.workstream_id.trim() != exclusion.workstream_id
+            || exclusion.workstream_id.is_empty()
+            || exclusion.workstream_id.len() > 512
+            || exclusion.note_path.trim() != exclusion.note_path
+            || exclusion.note_path.is_empty()
+            || exclusion.note_path.len() > 511
+        {
+            return Err(ApiError::bad_request("invalid Knowledge excerpt exclusion"));
+        }
+        if !validated.insert((exclusion.workstream_id, exclusion.note_path)) {
+            return Err(ApiError::bad_request(
+                "duplicate Knowledge excerpt exclusion",
+            ));
+        }
+    }
+    Ok(validated)
+}
+
+fn frozen_context_exclusions(
+    snapshot: Option<&log_inbox_core::models::ContextSnapshot>,
+) -> BTreeSet<(String, String)> {
+    snapshot
+        .and_then(|snapshot| snapshot.payload.get("applied_exclusions"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|exclusion| {
+            Some((
+                exclusion.get("workstream_id")?.as_str()?.to_owned(),
+                exclusion.get("note_path")?.as_str()?.to_owned(),
+            ))
+        })
+        .collect()
 }
 
 async fn generate_daily_candidate(
     state: &AppState,
     local_date: NaiveDate,
     replace_edited: bool,
+    requested_context_adjustments: Option<(String, BTreeSet<(String, String)>)>,
 ) -> Result<ProposalRevision, ApiError> {
     require_cutover_for_daily_mutation(state)?;
     let _generation_guard = state.daily_generation_lock.lock().await;
@@ -3030,6 +3103,14 @@ async fn generate_daily_candidate(
         .store
         .current_proposal_revision(&profile.id, local_date)
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    if let Some((expected_revision_id, _)) = requested_context_adjustments.as_ref()
+        && current.as_ref().map(|revision| revision.id.as_str())
+            != Some(expected_revision_id.as_str())
+    {
+        return Err(ApiError::conflict(
+            "the Daily candidate changed; review its frozen Knowledge context again",
+        ));
+    }
     if let Some(current) = current.as_ref() {
         let deferred_event_ids = state
             .store
@@ -3056,6 +3137,11 @@ async fn generate_daily_candidate(
             .snapshot_evidence(snapshot_id)
             .map_err(|error| ApiError::internal(error.to_string()))?;
         if snapshot_evidence.iter().any(|item| !item.available) {
+            if requested_context_adjustments.is_some() {
+                return Err(ApiError::conflict(
+                    "Source evidence for this candidate has expired, so its Knowledge context cannot be regenerated safely. The current revision is preserved.",
+                ));
+            }
             let mut content =
                 serde_json::from_value::<DailyRevisionContent>(current.content.clone())
                     .map_err(|error| ApiError::internal(error.to_string()))?;
@@ -3107,6 +3193,11 @@ async fn generate_daily_candidate(
     }
 
     if evidence.events.is_empty() {
+        if requested_context_adjustments.is_some() {
+            return Err(ApiError::bad_request(
+                "Knowledge excerpt adjustments require automated evidence",
+            ));
+        }
         if manual_entry_ids.is_empty() {
             return Err(ApiError::conflict(
                 "This day has no evidence or manual notes.",
@@ -3149,11 +3240,22 @@ async fn generate_daily_candidate(
         .store
         .list_context_mappings(&profile.id)
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    let current_context_snapshot = match current.as_ref() {
+        Some(revision) => state
+            .store
+            .proposal_context_snapshot(&revision.id)
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+        None => None,
+    };
+    let context_adjustment_requested = requested_context_adjustments.is_some();
+    let context_exclusions = requested_context_adjustments
+        .map(|(_, exclusions)| exclusions)
+        .unwrap_or_else(|| frozen_context_exclusions(current_context_snapshot.as_ref()));
     let knowledge_configuration_digest =
         knowledge::configuration_digest(&workspace, &collections, &mappings)
             .map_err(ApiError::internal)?;
     let (desired_context_payload, mut vault_context) =
-        match knowledge::resolve_knowledge_with_excerpts(
+        match knowledge::resolve_knowledge_with_adjustments(
             &workspace,
             &collections,
             &mappings,
@@ -3162,8 +3264,14 @@ async fn generate_daily_candidate(
                 .llm_config
                 .as_ref()
                 .is_some_and(llm::knowledge_text_stays_local),
+            &context_exclusions,
         ) {
             Ok(Some(resolution)) => (Some(resolution.snapshot_payload), resolution.vault_context),
+            Ok(None) if context_adjustment_requested => {
+                return Err(ApiError::conflict(
+                    "Knowledge is no longer available for this candidate; review its context again",
+                ));
+            }
             Ok(None) => (
                 None,
                 json!({
@@ -3171,6 +3279,9 @@ async fn generate_daily_candidate(
                     "workstream_links": {}
                 }),
             ),
+            Err(error) if context_adjustment_requested => {
+                return Err(ApiError::conflict(error));
+            }
             Err(_) => (
                 Some(json!({
                     "schema_version": 1,
@@ -3197,13 +3308,6 @@ async fn generate_daily_candidate(
         .map(knowledge::context_snapshot_digest)
         .transpose()
         .map_err(ApiError::unprocessable)?;
-    let current_context_snapshot = match current.as_ref() {
-        Some(revision) => state
-            .store
-            .proposal_context_snapshot(&revision.id)
-            .map_err(|error| ApiError::internal(error.to_string()))?,
-        None => None,
-    };
     let context_is_current = current_context_snapshot
         .as_ref()
         .map(|snapshot| snapshot.snapshot_digest.as_str())
@@ -3761,7 +3865,7 @@ async fn reconcile_daily_schedule(state: &AppState, now: DateTime<Utc>) -> Resul
             .store
             .set_daily_generation_status(&profile.id, local_date, "queued")
             .map_err(|error| ApiError::internal(error.to_string()))?;
-        match generate_daily_candidate(state, local_date, false).await {
+        match generate_daily_candidate(state, local_date, false, None).await {
             Ok(_) => {
                 state
                     .store
@@ -5165,7 +5269,7 @@ mod knowledge_destination_tests {
                 .iter()
                 .all(|item| !item.available)
         );
-        let unchanged = generate_daily_candidate(&state, date, false)
+        let unchanged = generate_daily_candidate(&state, date, false, None)
             .await
             .expect("an unchanged expired candidate remains usable");
         assert_eq!(unchanged.id, original_revision.id);
@@ -5178,7 +5282,7 @@ mod knowledge_destination_tests {
                 &[],
             )
             .unwrap();
-        let manual_revision = generate_daily_candidate(&state, date, false)
+        let manual_revision = generate_daily_candidate(&state, date, false, None)
             .await
             .expect("manual notes can be attached without partial regeneration");
         assert_eq!(manual_revision.snapshot_id, Some(snapshot.id.clone()));
@@ -5201,7 +5305,7 @@ mod knowledge_destination_tests {
             })
             .unwrap();
 
-        let error = generate_daily_candidate(&state, date, true)
+        let error = generate_daily_candidate(&state, date, true, None)
             .await
             .expect_err("partial regeneration must be refused");
         assert_eq!(error.status, StatusCode::CONFLICT);
@@ -5219,7 +5323,7 @@ mod knowledge_destination_tests {
             .store
             .defer_daily_evidence(&profile.id, date, &manual_revision.id, &late.id)
             .expect("owner can leave the exact late event for later");
-        let preserved = generate_daily_candidate(&state, date, false)
+        let preserved = generate_daily_candidate(&state, date, false, None)
             .await
             .expect("deferred late evidence no longer blocks the preserved revision");
         assert_eq!(preserved.id, manual_revision.id);

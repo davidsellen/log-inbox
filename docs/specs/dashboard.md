@@ -33,7 +33,9 @@ The Knowledge tab is a small review queue for durable names found in recent reta
 
 Changes to links and ignored names are saved immediately in SQLite after the explicit action. They affect only new or regenerated Daily candidates; they never rewrite the current candidate or Markdown. Existing reviewed candidates therefore stay predictable.
 
-The Daily sidebar shows **Context used** for every candidate. Used notes are grouped under the candidate workstream; when a local model received bounded source text, the exact frozen excerpt is available under **Excerpt sent to the model**. Link-only revisions say explicitly that no note text was used. A small status distinguishes immutable frozen context from the current Knowledge setup. Ordinary setup or content changes are advisory; a removed or excluded source used by the revision is marked unavailable and blocks Apply until regeneration. Resolver, excerpt count, and snapshot ID stay under Technical details.
+The Daily sidebar shows **Context used** for every candidate. Used notes are grouped under the candidate workstream; when a local model received bounded source text, the exact frozen excerpt is available under **Excerpt sent to the model**. Link-only revisions say explicitly that no note text was used. For bounded-context revisions, the owner can include or exclude each note for the next generation. These choices remain an unsaved draft until **Regenerate with adjustments** creates a new immutable candidate and context snapshot; they never change the visible revision, source note, grouping, or canonical link in place. Normal regeneration preserves the current frozen exclusions.
+
+A small status distinguishes immutable frozen context from the current Knowledge setup. Ordinary setup or content changes are advisory; a removed or excluded source used by the revision is marked unavailable and blocks Apply until regeneration. Resolver, excerpt count, and snapshot ID stay under Technical details. Adjustment requests are bound to the exact visible revision so another session cannot silently apply stale choices.
 
 ## Source collections
 

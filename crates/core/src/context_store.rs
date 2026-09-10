@@ -1203,6 +1203,7 @@ fn validate_context_snapshot_payload(payload: &serde_json::Value) -> Result<()> 
             .and_then(serde_json::Value::as_array)
             .context("Knowledge context snapshot v2 requires used_notes")?;
         let mut used_paths = std::collections::BTreeSet::new();
+        let mut digest_paths = std::collections::BTreeSet::new();
         for note in used_notes {
             let path = note
                 .get("path")
@@ -1210,20 +1211,57 @@ fn validate_context_snapshot_payload(payload: &serde_json::Value) -> Result<()> 
                 .context("Knowledge used note requires a path")?;
             validate_markdown_path(path)?;
             anyhow::ensure!(used_paths.insert(path), "duplicate Knowledge used note");
-            let digest = note
+            if let Some(digest) = note
                 .get("usable_digest")
                 .and_then(serde_json::Value::as_str)
-                .context("Knowledge used note requires a usable digest")?;
-            anyhow::ensure!(
-                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
-                "invalid Knowledge used-note digest"
-            );
+            {
+                anyhow::ensure!(
+                    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                    "invalid Knowledge used-note digest"
+                );
+                digest_paths.insert(path);
+            }
         }
         let excerpts = payload
             .get("excerpts")
             .and_then(serde_json::Value::as_array)
             .context("Knowledge context snapshot v2 requires excerpts")?;
         anyhow::ensure!(excerpts.len() <= 32, "too many Knowledge excerpts");
+        let resolved_groups = payload
+            .get("resolved_groups")
+            .and_then(serde_json::Value::as_array)
+            .context("Knowledge context snapshot v2 requires resolved_groups")?;
+        anyhow::ensure!(
+            resolved_groups.len() <= 500,
+            "too many resolved Knowledge groups"
+        );
+        let mut resolved_pairs = std::collections::BTreeSet::new();
+        for group in resolved_groups {
+            let workstream_id = group
+                .get("canonical_group_id")
+                .and_then(serde_json::Value::as_str)
+                .context("resolved Knowledge group requires a workstream ID")?;
+            let note_path = group
+                .get("canonical_note_path")
+                .and_then(serde_json::Value::as_str)
+                .context("resolved Knowledge group requires a note path")?;
+            let canonical_link = group
+                .get("canonical_link")
+                .and_then(serde_json::Value::as_str)
+                .context("resolved Knowledge group requires a canonical link")?;
+            anyhow::ensure!(
+                links
+                    .get(workstream_id)
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|values| values.iter().any(|value| value == canonical_link)),
+                "resolved Knowledge group has no authorized canonical link"
+            );
+            anyhow::ensure!(
+                used_paths.contains(note_path),
+                "resolved Knowledge group source is not a used note"
+            );
+            resolved_pairs.insert((workstream_id, note_path));
+        }
         let mut excerpt_paths = std::collections::BTreeMap::new();
         let mut total_text_bytes = 0_usize;
         for excerpt in excerpts {
@@ -1246,6 +1284,10 @@ fn validate_context_snapshot_payload(payload: &serde_json::Value) -> Result<()> 
             anyhow::ensure!(
                 used_paths.contains(note_path),
                 "Knowledge excerpt source is not a used note"
+            );
+            anyhow::ensure!(
+                digest_paths.contains(note_path),
+                "Knowledge excerpt source has no usable digest"
             );
             anyhow::ensure!(
                 excerpt_paths.insert(id, note_path).is_none(),
@@ -1321,6 +1363,15 @@ fn validate_context_snapshot_payload(payload: &serde_json::Value) -> Result<()> 
                     "Knowledge workstream references an unknown excerpt"
                 );
                 anyhow::ensure!(
+                    resolved_pairs.contains(&(
+                        workstream_id.as_str(),
+                        *excerpt_paths
+                            .get(id)
+                            .expect("excerpt existence was checked"),
+                    )),
+                    "Knowledge excerpt is associated with an unrelated workstream"
+                );
+                anyhow::ensure!(
                     workstream_ids.insert(id),
                     "duplicate Knowledge excerpt in one workstream"
                 );
@@ -1331,6 +1382,53 @@ fn validate_context_snapshot_payload(payload: &serde_json::Value) -> Result<()> 
             referenced_excerpt_ids.len() == excerpt_paths.len(),
             "Knowledge snapshot contains an unassociated excerpt"
         );
+        let exclusions = payload
+            .get("applied_exclusions")
+            .and_then(serde_json::Value::as_array)
+            .context("Knowledge context snapshot v2 requires applied_exclusions")?;
+        anyhow::ensure!(
+            exclusions.len() <= 64,
+            "too many Knowledge excerpt exclusions"
+        );
+        let mut excluded_pairs = std::collections::BTreeSet::new();
+        for exclusion in exclusions {
+            let workstream_id = exclusion
+                .get("workstream_id")
+                .and_then(serde_json::Value::as_str)
+                .context("Knowledge excerpt exclusion requires a workstream ID")?;
+            anyhow::ensure!(
+                links.contains_key(workstream_id),
+                "Knowledge excerpt exclusion has no authorized workstream"
+            );
+            let note_path = exclusion
+                .get("note_path")
+                .and_then(serde_json::Value::as_str)
+                .context("Knowledge excerpt exclusion requires a note path")?;
+            anyhow::ensure!(
+                used_paths.contains(note_path),
+                "Knowledge excerpt exclusion source is not a used note"
+            );
+            anyhow::ensure!(
+                resolved_pairs.contains(&(workstream_id, note_path)),
+                "Knowledge excerpt exclusion does not match a resolved group"
+            );
+            anyhow::ensure!(
+                excluded_pairs.insert((workstream_id, note_path)),
+                "duplicate Knowledge excerpt exclusion"
+            );
+            let still_included = associations
+                .get(workstream_id)
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .filter_map(|id| excerpt_paths.get(id))
+                .any(|path| *path == note_path);
+            anyhow::ensure!(
+                !still_included,
+                "excluded Knowledge excerpt remains associated with its workstream"
+            );
+        }
     }
     Ok(())
 }
@@ -1559,6 +1657,11 @@ mod tests {
             "resolver_version": "exact-v2",
             "workstream_links": {"repo:alpha": ["[[Products/Alpha]]"]},
             "used_notes": [{"path": "Products/Alpha.md", "usable_digest": "a".repeat(64)}],
+            "resolved_groups": [{
+                "canonical_group_id": "repo:alpha",
+                "canonical_note_path": "Products/Alpha.md",
+                "canonical_link": "[[Products/Alpha]]"
+            }],
             "excerpts": [{
                 "id": "excerpt_alpha",
                 "note_path": "Products/Alpha.md",
@@ -1567,11 +1670,26 @@ mod tests {
                 "text_digest": digest,
                 "reason": "canonical_note_opening"
             }],
-            "workstream_excerpts": {"repo:alpha": ["excerpt_alpha"]}
+            "workstream_excerpts": {"repo:alpha": ["excerpt_alpha"]},
+            "applied_exclusions": []
         });
         validate_context_snapshot_payload(&payload).expect("bounded v2 snapshot is valid");
 
         payload["excerpts"][0]["text"] = serde_json::json!("tampered");
+        assert!(validate_context_snapshot_payload(&payload).is_err());
+
+        payload["excerpts"][0]["text"] = serde_json::json!(text);
+        let excerpt = payload["excerpts"][0].clone();
+        payload["excerpts"] = serde_json::json!([]);
+        payload["workstream_excerpts"] = serde_json::json!({});
+        payload["applied_exclusions"] = serde_json::json!([{
+            "workstream_id": "repo:alpha",
+            "note_path": "Products/Alpha.md"
+        }]);
+        validate_context_snapshot_payload(&payload)
+            .expect("a valid exclusion removes only the workstream association");
+        payload["excerpts"] = serde_json::json!([excerpt]);
+        payload["workstream_excerpts"] = serde_json::json!({"repo:alpha": ["excerpt_alpha"]});
         assert!(validate_context_snapshot_payload(&payload).is_err());
 
         let v1 = serde_json::json!({

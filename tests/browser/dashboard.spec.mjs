@@ -432,7 +432,7 @@ test("Daily shows frozen Knowledge links and discloses when setup changed", asyn
 });
 
 test("Daily discloses the exact bounded Knowledge excerpt sent to a local model", async ({ page }) => {
-  await mockDaily(page, { contextDetails: {
+  const requests = await mockDaily(page, { contextDetails: {
     status: "current",
     mode: "bounded_knowledge",
     message: "Knowledge links and excerpts match the frozen candidate.",
@@ -447,6 +447,39 @@ test("Daily discloses the exact bounded Knowledge excerpt sent to a local model"
   await excerpt.click();
   await expect(page.locator("#context-card")).toContainText("Alpha uses an explicit review gate.");
   await expect(page.locator("#context-technical-text")).toContainText("1 excerpt");
+
+  const choice = page.getByLabel("Use this note in the next generation");
+  await expect(choice).toBeChecked();
+  await choice.uncheck();
+  await expect(page.getByText("Pending choices are not saved yet.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Regenerate", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Regenerate with adjustments" }).click();
+  const generation = requests.find(request => request.path.endsWith("/generate") && request.method === "POST");
+  expect(generation.body).toEqual({
+    replace_edited: false,
+    expected_revision_id: "revision_1",
+    context_exclusions: [{ workstream_id: "source:codex%2Ffedora|task:test", note_path: "Products/Alpha.md" }]
+  });
+});
+
+test("Daily can restore a previously excluded excerpt without changing its link", async ({ page }) => {
+  const requests = await mockDaily(page, { contextDetails: {
+    status: "current",
+    mode: "bounded_knowledge",
+    message: "Knowledge links and excerpts match the frozen candidate.",
+    snapshot: { id: "context_3", snapshot_digest: "f".repeat(64), created_at: "2026-09-08T10:00:00Z", resolver_version: "exact-v2", used_note_count: 1, resolved_group_count: 1, excerpt_count: 0, diagnostics: {} },
+    workstreams: [{ id: "source:codex%2Ffedora|task:test", notes: [{ path: "Products/Alpha.md", title: "Alpha", canonical_link: "[[Products/Alpha]]", attached: true, reason: "saved_mapping", matched_fields: ["product"], excluded: true, excerpt: null }] }]
+  } });
+  await openDaily(page);
+
+  await expect(page.locator("#context-card")).toContainText("Not sent for this revision.");
+  const choice = page.getByLabel("Use this note in the next generation");
+  await expect(choice).not.toBeChecked();
+  await choice.check();
+  await page.getByRole("button", { name: "Regenerate with adjustments" }).click();
+  const generation = requests.find(request => request.path.endsWith("/generate") && request.method === "POST");
+  expect(generation.body.context_exclusions).toEqual([]);
+  expect(generation.body.expected_revision_id).toBe("revision_1");
 });
 
 test("Daily blocks Apply when a frozen Knowledge target disappeared", async ({ page }) => {

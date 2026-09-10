@@ -512,6 +512,30 @@ pub fn resolve_knowledge_with_excerpts(
     events: &[StoredLogEvent],
     include_excerpts: bool,
 ) -> Result<Option<KnowledgeResolution>, String> {
+    resolve_knowledge_with_adjustments(
+        workspace,
+        collections,
+        mappings,
+        events,
+        include_excerpts,
+        &BTreeSet::new(),
+    )
+}
+
+pub fn resolve_knowledge_with_adjustments(
+    workspace: &InspectedWorkspace,
+    collections: &[KnowledgeCollection],
+    mappings: &[ContextMapping],
+    events: &[StoredLogEvent],
+    include_excerpts: bool,
+    excluded_excerpts: &BTreeSet<(String, String)>,
+) -> Result<Option<KnowledgeResolution>, String> {
+    if excluded_excerpts.len() > 64 {
+        return Err("Knowledge excerpt adjustments exceed 64 entries".to_owned());
+    }
+    if !include_excerpts && !excluded_excerpts.is_empty() {
+        return Err("Knowledge excerpt adjustments require a local model endpoint".to_owned());
+    }
     let mut enabled_collections = collections
         .iter()
         .filter(|collection| collection.enabled)
@@ -610,6 +634,16 @@ pub fn resolve_knowledge_with_excerpts(
             .and_then(JsonValue::as_str)
             .cmp(&right.get("source_group_id").and_then(JsonValue::as_str))
     });
+    for (workstream_id, note_path) in excluded_excerpts {
+        if !workstream_note_paths
+            .get(workstream_id)
+            .is_some_and(|paths| paths.contains(note_path))
+        {
+            return Err(format!(
+                "Knowledge excerpt adjustment no longer matches workstream {workstream_id} and note {note_path}"
+            ));
+        }
+    }
     let candidate_notes = workstream_links
         .values()
         .flatten()
@@ -630,7 +664,7 @@ pub fn resolve_knowledge_with_excerpts(
         })
         .collect::<Vec<_>>();
     let catalog_digest = json_digest(&JsonValue::Array(catalog_revision))?;
-    let used_note_manifest = used_note_paths
+    let mut used_note_manifest = used_note_paths
         .iter()
         .filter_map(|path| catalog.get(path))
         .map(|entry| {
@@ -682,7 +716,16 @@ pub fn resolve_knowledge_with_excerpts(
     let mut excerpt_total_bytes = 0_usize;
     let mut excerpt_ids_by_path = BTreeMap::new();
     let mut excerpts = Vec::new();
-    for path in used_note_paths.iter().filter(|_| include_excerpts) {
+    let excerpt_source_paths = workstream_note_paths
+        .iter()
+        .flat_map(|(workstream_id, paths)| {
+            paths.iter().filter_map(move |path| {
+                (!excluded_excerpts.contains(&(workstream_id.clone(), path.clone())))
+                    .then_some(path.clone())
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    for path in excerpt_source_paths.iter().filter(|_| include_excerpts) {
         if excerpts.len() >= MAX_EXCERPTS {
             break;
         }
@@ -716,11 +759,28 @@ pub fn resolve_knowledge_with_excerpts(
         .filter_map(|(workstream_id, paths)| {
             let ids = paths
                 .iter()
+                .filter(|path| {
+                    !excluded_excerpts.contains(&(workstream_id.clone(), (*path).clone()))
+                })
                 .filter_map(|path| excerpt_ids_by_path.get(path).cloned())
                 .collect::<Vec<_>>();
             (!ids.is_empty()).then_some((workstream_id.clone(), ids))
         })
         .collect::<BTreeMap<_, _>>();
+    for note in &mut used_note_manifest {
+        let path = note.get("path").and_then(JsonValue::as_str);
+        if path.is_some_and(|path| !excerpt_ids_by_path.contains_key(path)) {
+            note.as_object_mut()
+                .expect("used Knowledge note is an object")
+                .remove("usable_digest");
+        }
+    }
+    let applied_exclusions = excluded_excerpts
+        .iter()
+        .map(|(workstream_id, note_path)| {
+            json!({"workstream_id": workstream_id, "note_path": note_path})
+        })
+        .collect::<Vec<_>>();
     let schema_version = if include_excerpts { 2 } else { 1 };
     let resolver_version = if include_excerpts {
         KNOWLEDGE_RESOLVER_VERSION
@@ -743,6 +803,7 @@ pub fn resolve_knowledge_with_excerpts(
         "workstream_evidence": workstream_evidence,
         "excerpts": excerpts,
         "workstream_excerpts": workstream_excerpts,
+        "applied_exclusions": applied_exclusions,
         "diagnostics": {
             "missing_roots": missing_roots,
             "oversized_note_count": oversized_note_count,
@@ -1547,6 +1608,63 @@ mod tests {
             .filter_map(|excerpt| excerpt["id"].as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn per_workstream_exclusion_removes_text_but_preserves_canonical_link() {
+        let (_root, workspace) =
+            workspace(&[("Products/Alpha.md", "# Alpha\nStable product background.")]);
+        let events = [event("evt_1", "Alpha", "10")];
+        let baseline = resolve_knowledge(&workspace, &[collection("workspace")], &[], &events)
+            .unwrap()
+            .unwrap();
+        let workstream_id = baseline.snapshot_payload["resolved_groups"][0]["canonical_group_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let excluded = BTreeSet::from([(workstream_id.clone(), "Products/Alpha.md".to_owned())]);
+        let adjusted = resolve_knowledge_with_adjustments(
+            &workspace,
+            &[collection("workspace")],
+            &[],
+            &events,
+            true,
+            &excluded,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            adjusted.vault_context["workstream_links"],
+            baseline.vault_context["workstream_links"]
+        );
+        assert_eq!(adjusted.vault_context["knowledge"]["excerpts"], json!([]));
+        assert_eq!(
+            adjusted.snapshot_payload["applied_exclusions"][0],
+            json!({"workstream_id": workstream_id, "note_path": "Products/Alpha.md"})
+        );
+        assert!(
+            adjusted.snapshot_payload["used_notes"][0]
+                .get("usable_digest")
+                .is_none()
+        );
+
+        let stale = BTreeSet::from([(
+            "missing-workstream".to_owned(),
+            "Products/Alpha.md".to_owned(),
+        )]);
+        assert!(
+            resolve_knowledge_with_adjustments(
+                &workspace,
+                &[collection("workspace")],
+                &[],
+                &events,
+                true,
+                &stale,
+            )
+            .unwrap_err()
+            .contains("no longer matches")
+        );
     }
 
     #[test]
