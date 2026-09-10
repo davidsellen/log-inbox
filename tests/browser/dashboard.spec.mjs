@@ -431,6 +431,24 @@ test("Daily shows frozen Knowledge links and discloses when setup changed", asyn
   await expect(page.getByRole("button", { name: "Review Apply" })).toBeEnabled();
 });
 
+test("Daily discloses the exact bounded Knowledge excerpt sent to a local model", async ({ page }) => {
+  await mockDaily(page, { contextDetails: {
+    status: "current",
+    mode: "bounded_knowledge",
+    message: "Knowledge links and excerpts match the frozen candidate.",
+    snapshot: { id: "context_2", snapshot_digest: "d".repeat(64), created_at: "2026-09-08T10:00:00Z", resolver_version: "exact-v2", used_note_count: 1, resolved_group_count: 1, excerpt_count: 1, diagnostics: {} },
+    workstreams: [{ id: "source:codex%2Ffedora|task:test", notes: [{ path: "Products/Alpha.md", title: "Alpha", reason: "saved_mapping", matched_fields: ["product"], excerpt: { id: "excerpt_alpha", text: "Alpha uses an explicit review gate.", text_digest: "e".repeat(64), reason: "canonical_note_opening" } }] }]
+  } });
+  await openDaily(page);
+
+  await expect(page.locator("#context-card")).toContainText("Canonical links and bounded note excerpts informed this revision.");
+  const excerpt = page.getByText("Excerpt sent to the model");
+  await expect(excerpt).toBeVisible();
+  await excerpt.click();
+  await expect(page.locator("#context-card")).toContainText("Alpha uses an explicit review gate.");
+  await expect(page.locator("#context-technical-text")).toContainText("1 excerpt");
+});
+
 test("Daily blocks Apply when a frozen Knowledge target disappeared", async ({ page }) => {
   await mockDaily(page, { contextDetails: {
     status: "invalid",

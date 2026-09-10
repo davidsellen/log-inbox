@@ -1629,6 +1629,18 @@ async fn refocus_daily_context(
             ))
         })
         .collect::<HashMap<_, _>>();
+    let excerpts = context_snapshot
+        .payload
+        .get("excerpts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|excerpt| Some((excerpt.get("id")?.as_str()?.to_owned(), excerpt.clone())))
+        .collect::<HashMap<_, _>>();
+    let workstream_excerpts = context_snapshot
+        .payload
+        .get("workstream_excerpts")
+        .and_then(Value::as_object);
     let attached_links = serde_json::from_value::<DailyRevisionContent>(revision.content.clone())
         .map(|content| {
             content
@@ -1672,6 +1684,16 @@ async fn refocus_daily_context(
             .or_default()
             .entry(path.to_owned())
             .or_insert_with(|| {
+                let excerpt = workstream_excerpts
+                    .and_then(|workstreams| workstreams.get(workstream_id))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .filter_map(|id| excerpts.get(id))
+                    .find(|excerpt| {
+                        excerpt.get("note_path").and_then(Value::as_str) == Some(path)
+                    });
                 json!({
                     "path": path,
                     "title": note_titles.get(path).cloned().unwrap_or_else(|| path.to_owned()),
@@ -1679,6 +1701,12 @@ async fn refocus_daily_context(
                     "attached": attached,
                     "reason": resolved.get("reason").and_then(Value::as_str),
                     "matched_fields": resolved.get("matched_fields").and_then(Value::as_array).cloned().unwrap_or_default(),
+                    "excerpt": excerpt.map(|excerpt| json!({
+                        "id": excerpt.get("id").and_then(Value::as_str),
+                        "text": excerpt.get("text").and_then(Value::as_str),
+                        "text_digest": excerpt.get("text_digest").and_then(Value::as_str),
+                        "reason": excerpt.get("reason").and_then(Value::as_str),
+                    })),
                 })
             });
     }
@@ -1691,7 +1719,7 @@ async fn refocus_daily_context(
         "local_date": local_date,
         "revision_id": revision.id,
         "status": status,
-        "mode": "exact_links_only",
+        "mode": if excerpts.is_empty() { "exact_links_only" } else { "bounded_knowledge" },
         "message": message,
         "snapshot": public_context_snapshot(&context_snapshot),
         "workstreams": workstreams,
@@ -1706,7 +1734,7 @@ fn current_context_freshness(
     revision: &ProposalRevision,
     context_snapshot: &log_inbox_core::models::ContextSnapshot,
 ) -> Result<(&'static str, &'static str), ApiError> {
-    let used_note_paths = attached_context_note_paths(revision, &context_snapshot.payload);
+    let used_note_paths = context_relevant_note_paths(revision, &context_snapshot.payload);
     let collections = state
         .store
         .list_knowledge_collections(&profile.id)
@@ -1733,11 +1761,38 @@ fn current_context_freshness(
             "A canonical note used by this revision was removed or excluded. Regenerate before Apply.",
         ));
     }
+    let digest_matches = context_snapshot
+        .payload
+        .get("used_notes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|note| {
+            Some((
+                note.get("path")?.as_str()?,
+                note.get("usable_digest")?.as_str()?,
+            ))
+        })
+        .all(|(path, digest)| {
+            fingerprints
+                .usable_digests
+                .get(path)
+                .is_some_and(|current| current == digest)
+        });
+    let expected_resolver = if state
+        .llm_config
+        .as_ref()
+        .is_some_and(llm::knowledge_text_stays_local)
+    {
+        knowledge::KNOWLEDGE_RESOLVER_VERSION
+    } else {
+        "exact-v1"
+    };
     let resolver_matches = context_snapshot
         .payload
         .get("resolver_version")
         .and_then(Value::as_str)
-        == Some("exact-v1");
+        == Some(expected_resolver);
     let root_matches = context_snapshot
         .payload
         .get("root_binding")
@@ -1753,13 +1808,46 @@ fn current_context_freshness(
         .get("catalog_digest")
         .and_then(Value::as_str)
         == Some(fingerprints.catalog_digest.as_str());
-    if resolver_matches && root_matches && configuration_matches && catalog_matches {
-        Ok(("current", "Knowledge links match the frozen candidate."))
+    let uses_excerpts = context_snapshot
+        .payload
+        .get("excerpts")
+        .and_then(Value::as_array)
+        .is_some_and(|excerpts| !excerpts.is_empty());
+    if resolver_matches
+        && root_matches
+        && configuration_matches
+        && catalog_matches
+        && digest_matches
+    {
+        Ok(if uses_excerpts {
+            (
+                "current",
+                "Knowledge links and excerpts match the frozen candidate.",
+            )
+        } else {
+            ("current", "Knowledge links match the frozen candidate.")
+        })
     } else {
         Ok((
             "changed",
-            "Knowledge links or source metadata changed. Regenerate to use the latest setup.",
+            "Knowledge links, excerpts, or source metadata changed. Regenerate to use the latest setup.",
         ))
+    }
+}
+
+fn context_relevant_note_paths(revision: &ProposalRevision, payload: &Value) -> Vec<String> {
+    let excerpt_paths = payload
+        .get("excerpts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|excerpt| excerpt.get("note_path").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if excerpt_paths.is_empty() {
+        attached_context_note_paths(revision, payload)
+    } else {
+        excerpt_paths.into_iter().collect()
     }
 }
 
@@ -2126,6 +2214,7 @@ fn public_context_snapshot(snapshot: &log_inbox_core::models::ContextSnapshot) -
         "resolver_version": snapshot.payload.get("resolver_version").and_then(Value::as_str),
         "used_note_count": snapshot.payload.get("used_notes").and_then(Value::as_array).map(Vec::len).unwrap_or_default(),
         "resolved_group_count": snapshot.payload.get("resolved_groups").and_then(Value::as_array).map(Vec::len).unwrap_or_default(),
+        "excerpt_count": snapshot.payload.get("excerpts").and_then(Value::as_array).map(Vec::len).unwrap_or_default(),
         "diagnostics": {
             "missing_root_count": diagnostics.and_then(|value| value.get("missing_roots")).and_then(Value::as_array).map(Vec::len).unwrap_or_default(),
             "oversized_note_count": count("oversized_note_count"),
@@ -3064,7 +3153,16 @@ async fn generate_daily_candidate(
         knowledge::configuration_digest(&workspace, &collections, &mappings)
             .map_err(ApiError::internal)?;
     let (desired_context_payload, mut vault_context) =
-        match knowledge::resolve_knowledge(&workspace, &collections, &mappings, &evidence.events) {
+        match knowledge::resolve_knowledge_with_excerpts(
+            &workspace,
+            &collections,
+            &mappings,
+            &evidence.events,
+            state
+                .llm_config
+                .as_ref()
+                .is_some_and(llm::knowledge_text_stays_local),
+        ) {
             Ok(Some(resolution)) => (Some(resolution.snapshot_payload), resolution.vault_context),
             Ok(None) => (
                 None,
@@ -4436,7 +4534,8 @@ mod knowledge_destination_tests {
 
     #[tokio::test]
     async fn knowledge_review_links_and_ignores_curated_names_without_browsing_files() {
-        let state = test_state();
+        let mut state = test_state();
+        state.llm_config = Some(llm::LlmConfig::for_test("http://127.0.0.1:11434/v1"));
         std::fs::create_dir_all(state.workspace.canonical_root().join("Products")).unwrap();
         std::fs::write(
             state.workspace.canonical_root().join("Products/Alpha.md"),
@@ -4646,11 +4745,12 @@ mod knowledge_destination_tests {
             .unwrap();
         let collections = state.store.list_knowledge_collections(&profile.id).unwrap();
         let mappings = state.store.list_context_mappings(&profile.id).unwrap();
-        let resolution = knowledge::resolve_knowledge(
+        let resolution = knowledge::resolve_knowledge_with_excerpts(
             &state.workspace,
             &collections,
             &mappings,
             std::slice::from_ref(&event),
+            true,
         )
         .unwrap()
         .unwrap();
@@ -4713,7 +4813,7 @@ mod knowledge_destination_tests {
         );
         assert_eq!(context["workstreams"][0]["notes"][0]["attached"], true);
         let context_text = context.to_string();
-        assert!(!context_text.contains("private product details"));
+        assert!(context_text.contains("private product details"));
         assert!(!context_text.contains("private event body"));
 
         std::fs::write(

@@ -82,9 +82,9 @@ Requires `settings:write` and CSRF. POST hides one reviewed durable field/value 
 
 ### `GET /api/v2/daily/{YYYY-MM-DD}/context`
 
-Requires both `logs:read` and `knowledge:read`. It returns the immutable exact-link provenance for the current Daily revision, grouped by its workstream IDs, plus a live status: `current`, `changed`, `invalid`, `unavailable`, or `none`. Each note states whether its frozen link is still attached to the current structured revision. The detail contains safe note titles/paths, resolution reasons, and the sanitized snapshot projection; it never returns aliases, frontmatter, selectors, collection roots, note bodies, or event messages.
+Requires both `logs:read` and `knowledge:read`. It returns the immutable Knowledge provenance for the current Daily revision, grouped by its workstream IDs, plus a live status: `current`, `changed`, `invalid`, `unavailable`, or `none`. Each note states whether its frozen link is still attached to the current structured revision. For a locally generated bounded-context revision, it also returns only the exact excerpt frozen and sent for that note; link-only revisions expose no note text. The detail never returns other note content, aliases, frontmatter, selectors, collection roots, or event messages.
 
-`changed` is advisory: the reviewed candidate retains its frozen links until regeneration. `invalid` means a note actually used by the revision was removed from the enabled bounded catalog, so Apply preview and a new Apply are rejected until regeneration. Current fingerprints use collection/mapping revisions and catalog identity metadata, not retained event bodies, so normal raw-evidence expiry does not make link freshness unknowable.
+`changed` is advisory: the reviewed candidate retains its frozen context until regeneration. It includes changes to an excerpt source's usable-content digest. `invalid` means a note used by the revision was removed from the enabled bounded catalog, so Apply preview and a new Apply are rejected until regeneration. Current fingerprints use collection/mapping revisions, catalog identity metadata, and used-note content digests—not retained event bodies—so normal raw-evidence expiry does not make context freshness unknowable.
 
 ## Daily read model
 

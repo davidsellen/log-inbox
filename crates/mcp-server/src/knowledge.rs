@@ -21,6 +21,11 @@ const MAX_CATALOG_NOTES: usize = 2_000;
 const MAX_NOTE_BYTES: u64 = 1024 * 1024;
 const MAX_CATALOG_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_CONTEXT_SNAPSHOT_BYTES: usize = 1024 * 1024;
+const MAX_EXCERPT_BYTES: usize = 4 * 1024;
+const MAX_EXCERPTS: usize = 32;
+const MAX_EXCERPT_TOTAL_BYTES: usize = 64 * 1024;
+
+pub const KNOWLEDGE_RESOLVER_VERSION: &str = "exact-v2";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct KnowledgeResolution {
@@ -218,6 +223,7 @@ pub fn parse_knowledge_note(
 fn build_catalog(
     workspace: &InspectedWorkspace,
     enabled_collections: &[&KnowledgeCollection],
+    retain_usable_content: bool,
 ) -> Result<CatalogBuild, String> {
     let mut notes = BTreeMap::<String, CatalogNote>::new();
     let mut seen_paths = BTreeSet::new();
@@ -271,7 +277,9 @@ fn build_catalog(
                     continue;
                 }
             };
-            note.usable_content.clear();
+            if !retain_usable_content {
+                note.usable_content.clear();
+            }
             notes.insert(
                 source.path,
                 CatalogNote {
@@ -301,7 +309,7 @@ pub fn search_note_options(
         .filter(|collection| collection.enabled)
         .collect::<Vec<_>>();
     enabled.sort_by(|left, right| left.id.cmp(&right.id));
-    let catalog = build_catalog(workspace, &enabled)?.notes;
+    let catalog = build_catalog(workspace, &enabled, false)?.notes;
     let query = normalize_identity(query);
     let mut matches = catalog
         .values()
@@ -339,7 +347,7 @@ pub fn find_note_option(
         .filter(|collection| collection.enabled)
         .collect::<Vec<_>>();
     enabled.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(build_catalog(workspace, &enabled)?
+    Ok(build_catalog(workspace, &enabled, false)?
         .notes
         .get(path)
         .map(|entry| KnowledgeNoteOption {
@@ -353,6 +361,7 @@ pub struct KnowledgeFingerprints {
     pub configuration_digest: String,
     pub catalog_digest: String,
     pub note_paths: BTreeSet<String>,
+    pub usable_digests: BTreeMap<String, String>,
 }
 
 pub fn current_fingerprints(
@@ -364,7 +373,7 @@ pub fn current_fingerprints(
         .iter()
         .filter(|collection| collection.enabled)
         .collect::<Vec<_>>();
-    let catalog = build_catalog(workspace, &enabled)?.notes;
+    let catalog = build_catalog(workspace, &enabled, false)?.notes;
     let catalog_revision = catalog
         .values()
         .map(|entry| {
@@ -381,6 +390,10 @@ pub fn current_fingerprints(
         configuration_digest: configuration_digest(workspace, collections, mappings)?,
         catalog_digest: json_digest(&JsonValue::Array(catalog_revision))?,
         note_paths: catalog.keys().cloned().collect(),
+        usable_digests: catalog
+            .iter()
+            .map(|(path, entry)| (path.clone(), entry.note.usable_digest.clone()))
+            .collect(),
     })
 }
 
@@ -489,6 +502,16 @@ pub fn resolve_knowledge(
     mappings: &[ContextMapping],
     events: &[StoredLogEvent],
 ) -> Result<Option<KnowledgeResolution>, String> {
+    resolve_knowledge_with_excerpts(workspace, collections, mappings, events, true)
+}
+
+pub fn resolve_knowledge_with_excerpts(
+    workspace: &InspectedWorkspace,
+    collections: &[KnowledgeCollection],
+    mappings: &[ContextMapping],
+    events: &[StoredLogEvent],
+    include_excerpts: bool,
+) -> Result<Option<KnowledgeResolution>, String> {
     let mut enabled_collections = collections
         .iter()
         .filter(|collection| collection.enabled)
@@ -509,12 +532,13 @@ pub fn resolve_knowledge(
         oversized_note_count,
         unreadable_note_count,
         invalid_note_count,
-    } = build_catalog(workspace, &enabled_collections)?;
+    } = build_catalog(workspace, &enabled_collections, include_excerpts)?;
 
     let raw_groups = group_events(events);
     let mut group_aliases = BTreeMap::new();
     let mut workstream_links = BTreeMap::<String, Vec<String>>::new();
     let mut workstream_evidence = BTreeMap::<String, Vec<String>>::new();
+    let mut workstream_note_paths = BTreeMap::<String, BTreeSet<String>>::new();
     let mut used_note_paths = BTreeSet::new();
     let mut resolved = Vec::new();
     let mut ambiguous_group_count = 0_usize;
@@ -555,6 +579,10 @@ pub fn resolve_knowledge(
                     .entry(canonical_group_id.clone())
                     .or_default()
                     .extend(group_events.iter().map(|event| event.id.clone()));
+                workstream_note_paths
+                    .entry(canonical_group_id.clone())
+                    .or_default()
+                    .insert(path.clone());
                 used_note_paths.insert(path.clone());
                 resolved.push(json!({
                     "source_group_id": raw_group_id,
@@ -613,12 +641,16 @@ pub fn resolve_knowledge(
                 "references": entry.note.references,
             }))
             .expect("parsed Knowledge metadata serializes");
-            json!({
+            let mut note = json!({
                 "path": entry.note.path,
                 "title": entry.note.title,
                 "resolution_digest": resolution_digest,
                 "collection_ids": entry.collection_ids,
-            })
+            });
+            if include_excerpts {
+                note["usable_digest"] = JsonValue::String(entry.note.usable_digest.clone());
+            }
+            note
         })
         .collect::<Vec<_>>();
     let collection_manifest = enabled_collections
@@ -647,9 +679,57 @@ pub fn resolve_knowledge(
         })
         .collect::<Vec<_>>();
     let configuration_digest = configuration_digest(workspace, collections, mappings)?;
+    let mut excerpt_total_bytes = 0_usize;
+    let mut excerpt_ids_by_path = BTreeMap::new();
+    let mut excerpts = Vec::new();
+    for path in used_note_paths.iter().filter(|_| include_excerpts) {
+        if excerpts.len() >= MAX_EXCERPTS {
+            break;
+        }
+        let Some(entry) = catalog.get(path) else {
+            continue;
+        };
+        let remaining = MAX_EXCERPT_TOTAL_BYTES.saturating_sub(excerpt_total_bytes);
+        let text = bounded_excerpt(&entry.note.usable_content, MAX_EXCERPT_BYTES.min(remaining));
+        if text.is_empty() {
+            continue;
+        }
+        excerpt_total_bytes += text.len();
+        let text_digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+        let excerpt_identity_digest = json_digest(&json!({
+            "note_path": path,
+            "text_digest": text_digest,
+        }))?;
+        let excerpt_id = format!("excerpt_{}", &excerpt_identity_digest[..24]);
+        excerpt_ids_by_path.insert(path.clone(), excerpt_id.clone());
+        excerpts.push(json!({
+            "id": excerpt_id,
+            "note_path": path,
+            "title": entry.note.title,
+            "text": text,
+            "text_digest": text_digest,
+            "reason": "canonical_note_opening",
+        }));
+    }
+    let workstream_excerpts = workstream_note_paths
+        .iter()
+        .filter_map(|(workstream_id, paths)| {
+            let ids = paths
+                .iter()
+                .filter_map(|path| excerpt_ids_by_path.get(path).cloned())
+                .collect::<Vec<_>>();
+            (!ids.is_empty()).then_some((workstream_id.clone(), ids))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let schema_version = if include_excerpts { 2 } else { 1 };
+    let resolver_version = if include_excerpts {
+        KNOWLEDGE_RESOLVER_VERSION
+    } else {
+        "exact-v1"
+    };
     let snapshot_payload = json!({
-        "schema_version": 1,
-        "resolver_version": "exact-v1",
+        "schema_version": schema_version,
+        "resolver_version": resolver_version,
         "root_binding": workspace.root_binding(),
         "configuration_digest": configuration_digest,
         "collections": collection_manifest,
@@ -661,6 +741,8 @@ pub fn resolve_knowledge(
         "group_aliases": group_aliases,
         "workstream_links": workstream_links,
         "workstream_evidence": workstream_evidence,
+        "excerpts": excerpts,
+        "workstream_excerpts": workstream_excerpts,
         "diagnostics": {
             "missing_roots": missing_roots,
             "oversized_note_count": oversized_note_count,
@@ -676,15 +758,40 @@ pub fn resolve_knowledge(
         "workstream_links": workstream_links,
         "group_aliases": group_aliases,
         "knowledge": {
-            "resolver_version": "exact-v1",
+            "resolver_version": resolver_version,
             "context_is_background_only": true,
-            "excerpts": [],
+            "excerpts": excerpts,
+            "workstream_excerpts": workstream_excerpts,
         }
     });
     Ok(Some(KnowledgeResolution {
         snapshot_payload,
         vault_context,
     }))
+}
+
+fn bounded_excerpt(content: &str, max_bytes: usize) -> String {
+    if max_bytes == 0 {
+        return String::new();
+    }
+    let content = content.trim();
+    if content.len() <= max_bytes {
+        return content.to_owned();
+    }
+    const ELLIPSIS: &str = "…";
+    if max_bytes <= ELLIPSIS.len() {
+        return String::new();
+    }
+    let mut end = (max_bytes - ELLIPSIS.len()).min(content.len());
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    let bounded = &content[..end];
+    let end = bounded
+        .rfind(char::is_whitespace)
+        .filter(|end| *end >= max_bytes / 2)
+        .unwrap_or(end);
+    format!("{}{}", bounded[..end].trim_end(), ELLIPSIS)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1331,7 +1438,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_keeps_only_used_note_metadata_and_catalog_digest() {
+    fn snapshot_keeps_only_used_notes_and_bounded_excerpts() {
         let (_root, workspace) = workspace(&[
             ("Products/Alpha.md", "# Alpha\n"),
             (
@@ -1349,6 +1456,11 @@ mod tests {
         .unwrap();
         assert!(resolution.snapshot_payload.get("notes").is_none());
         assert_eq!(resolution.snapshot_payload["catalog_note_count"], 2);
+        assert_eq!(resolution.snapshot_payload["schema_version"], 2);
+        assert_eq!(
+            resolution.snapshot_payload["resolver_version"],
+            KNOWLEDGE_RESOLVER_VERSION
+        );
         assert_eq!(
             resolution.snapshot_payload["used_notes"]
                 .as_array()
@@ -1362,6 +1474,79 @@ mod tests {
                 .to_string()
                 .contains("private-unused-alias")
         );
+        assert_eq!(
+            resolution.snapshot_payload["excerpts"][0]["note_path"],
+            "Products/Alpha.md"
+        );
+        assert_eq!(
+            resolution.vault_context["knowledge"]["excerpts"][0]["text"],
+            "# Alpha"
+        );
+        assert_eq!(
+            resolution.vault_context["knowledge"]["workstream_excerpts"]
+                .as_object()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn excerpts_are_bounded_and_never_include_generated_daily_blocks() {
+        let large = "useful context ".repeat(600);
+        let content = format!(
+            "# Alpha\n<!-- log-inbox:daily:old:begin -->\nGenerated claim.\n<!-- log-inbox:daily:old:end -->\n{large}"
+        );
+        let (_root, workspace) = workspace(&[("Products/Alpha.md", &content)]);
+        let resolution = resolve_knowledge(
+            &workspace,
+            &[collection("workspace")],
+            &[],
+            &[event("evt_1", "Alpha", "10")],
+        )
+        .unwrap()
+        .unwrap();
+        let excerpt = resolution.snapshot_payload["excerpts"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(excerpt.len() <= MAX_EXCERPT_BYTES);
+        assert!(excerpt.ends_with('…'));
+        assert!(!excerpt.contains("Generated claim."));
+    }
+
+    #[test]
+    fn identical_excerpt_text_from_distinct_notes_keeps_distinct_identity() {
+        let (_root, workspace) = workspace(&[
+            (
+                "Products/Alpha.md",
+                "---\ntitle: Alpha\n---\nShared background.",
+            ),
+            (
+                "Products/Beta.md",
+                "---\ntitle: Beta\n---\nShared background.",
+            ),
+        ]);
+        let resolution = resolve_knowledge(
+            &workspace,
+            &[collection("workspace")],
+            &[
+                mapping("work_item", "10", "Products/Alpha.md"),
+                mapping("work_item", "11", "Products/Beta.md"),
+            ],
+            &[
+                event("evt_1", "repo-one", "10"),
+                event("evt_2", "repo-two", "11"),
+            ],
+        )
+        .unwrap()
+        .unwrap();
+        let ids = resolution.snapshot_payload["excerpts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|excerpt| excerpt["id"].as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), 2);
     }
 
     #[test]

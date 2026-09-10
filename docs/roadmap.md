@@ -176,7 +176,9 @@ Exit gate: the pilot needs no database repair or manual proposal-folder cleanup,
 - [x] Group identifier aliases by canonical note; surface curated unresolved identities and hide transient technical noise in diagnostics.
 - [x] Resolve saved mappings and unique exact title/alias/reference matches before bounded text retrieval. Text retrieval does not create canonical links.
 - [ ] Add incremental local SQLite FTS only where pilot cases justify it; refresh at startup, periodically, when stale before generation, and via Rescan.
-- [ ] Show Context used with excerpts/revisions and per-workstream adjustment. Invalidate removed/excluded content; exclude generated blocks from self-reinforcing evidence.
+- [ ] Show Context used with excerpts/revisions and per-workstream adjustment.
+  - [x] Freeze and disclose exact bounded excerpts for local models; keep nonlocal models link-only, invalidate removed/excluded sources, and exclude generated blocks from self-reinforcing evidence.
+  - [ ] Let the owner exclude an excerpt per workstream and regenerate into a new immutable revision without changing its canonical link.
 - [ ] Evaluate drafts with versus without context. Keep Knowledge optional.
 
 Exit gate: representative cases show improved factual usefulness or reduced editing with manageable configuration effort.
