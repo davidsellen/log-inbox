@@ -161,7 +161,7 @@ Exit gate: recovery, idempotency, preserved-content, authorization and containme
 
 ### M3 — Daily Habit, Catch-up, and Expiry
 
-- [ ] Add previous-day generation at 00:15, editable time/timezone, restart catch-up and bounded background work.
+- [x] Add previous-day generation at 00:15, editable time/timezone, restart catch-up and bounded background work.
 - [x] Show recent statuses, meaningful missed-day counts, late-event updates and evidence-expiry warnings.
 - [ ] Preserve edited candidates on new evidence; implement dismiss/reopen and retention-safe revisions/amendments.
 - [ ] Coordinate cleanup across raw data, handled bodies, indexes, audit data and recovery copies.

@@ -1873,6 +1873,57 @@ async fn generate_daily_candidate(
         .into_iter()
         .map(|entry| entry.id)
         .collect::<Vec<_>>();
+    let current = state
+        .store
+        .current_proposal_revision(&profile.id, local_date)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    if let Some(current) = current.as_ref()
+        && let Some(snapshot_id) = current.snapshot_id.as_deref()
+    {
+        let snapshot = state
+            .store
+            .evidence_snapshot(snapshot_id)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .ok_or_else(|| ApiError::internal("the current evidence snapshot is missing"))?;
+        let snapshot_evidence = state
+            .store
+            .snapshot_evidence(snapshot_id)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        if snapshot_evidence.iter().any(|item| !item.available) {
+            let mut content =
+                serde_json::from_value::<DailyRevisionContent>(current.content.clone())
+                    .map_err(|error| ApiError::internal(error.to_string()))?;
+            let live_event_ids = evidence
+                .events
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>();
+            let has_new_evidence = has_new_automated_evidence(&live_event_ids, &snapshot.event_ids);
+            if !has_new_evidence && content.manual_entry_ids == manual_entry_ids {
+                return Ok(current.clone());
+            }
+            if !has_new_evidence {
+                content.manual_entry_ids = manual_entry_ids;
+                let content = serde_json::to_value(content)
+                    .map_err(|error| ApiError::internal(error.to_string()))?;
+                return state
+                    .store
+                    .create_proposal_revision_if_current(
+                        &profile.id,
+                        local_date,
+                        Some(snapshot_id),
+                        "structured_edit",
+                        &content,
+                        &current.id,
+                    )
+                    .map_err(|error| ApiError::conflict(error.to_string()));
+            }
+            return Err(ApiError::conflict(
+                "Some source evidence for this candidate has expired. Log Inbox will not replace a complete reviewed record from partial evidence. The existing revision is preserved; restore the missing source evidence before regenerating.",
+            ));
+        }
+    }
 
     if evidence.events.is_empty() {
         if manual_entry_ids.is_empty() {
@@ -1887,13 +1938,11 @@ async fn generate_daily_candidate(
             open_questions: Vec::new(),
         })
         .map_err(|error| ApiError::internal(error.to_string()))?;
-        if let Some(current) = state
-            .store
-            .current_proposal_revision(&profile.id, local_date)
-            .map_err(|error| ApiError::internal(error.to_string()))?
+        if let Some(current) = current
+            .as_ref()
             .filter(|current| current.snapshot_id.is_none() && current.content == content)
         {
-            return Ok(current);
+            return Ok(current.clone());
         }
         let revision = state
             .store
@@ -1910,10 +1959,6 @@ async fn generate_daily_candidate(
     let snapshot = state
         .store
         .create_evidence_snapshot(&profile.id, local_date, &event_ids)
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let current = state
-        .store
-        .current_proposal_revision(&profile.id, local_date)
         .map_err(|error| ApiError::internal(error.to_string()))?;
     if let Some(current) = current.as_ref()
         && current.snapshot_id.as_deref() == Some(snapshot.id.as_str())
@@ -3000,6 +3045,131 @@ mod knowledge_destination_tests {
                 .is_none()
         );
         assert!(!state.workspace.canonical_root().join("Work Log").exists());
+    }
+
+    #[tokio::test]
+    async fn regeneration_refuses_to_replace_expired_evidence_with_a_partial_day() {
+        let state = test_state();
+        let profile = state
+            .store
+            .save_active_workspace_profile(
+                state.workspace.root_binding(),
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+                None,
+            )
+            .unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+        state
+            .store
+            .ensure_daily_day(date, "Work Log/2026-09-09.md", None)
+            .unwrap();
+        let original = state
+            .store
+            .insert_event(log_inbox_core::models::LogEventInput {
+                timestamp: Some("2026-09-09T10:00:00Z".parse().unwrap()),
+                source: "codex/test".to_owned(),
+                level: Some("info".to_owned()),
+                message: "Recorded the original decision.".to_owned(),
+                metadata: None,
+                fingerprint: None,
+            })
+            .unwrap();
+        let snapshot = state
+            .store
+            .create_evidence_snapshot(&profile.id, date, std::slice::from_ref(&original.id))
+            .unwrap();
+        let original_revision = state
+            .store
+            .create_proposal_revision(
+                &profile.id,
+                date,
+                Some(&snapshot.id),
+                "generated",
+                &json!({
+                    "schema_version": 1,
+                    "manual_entry_ids": [],
+                    "open_questions": [],
+                    "workstreams": [{
+                        "id": "source:codex%2Ftest|task:retention",
+                        "title": "Retention safety",
+                        "evidence_event_ids": [original.id.clone()],
+                        "canonical_links": [],
+                        "outcome": [{"text": "Preserved the original decision.", "evidence_event_ids": [original.id.clone()]}],
+                        "decision": [], "trade_off": [], "validation": [], "blocker": [], "follow_up": []
+                    }]
+                }),
+            )
+            .unwrap();
+        let retention = state
+            .store
+            .save_daily_automation_settings(&profile.id, false, "00:15", 7, 1, 30, 30, None)
+            .unwrap();
+        state
+            .store
+            .run_retention_maintenance(&retention, Utc::now() + Duration::days(2))
+            .unwrap();
+        assert!(
+            state
+                .store
+                .snapshot_evidence(&snapshot.id)
+                .unwrap()
+                .iter()
+                .all(|item| !item.available)
+        );
+        let unchanged = generate_daily_candidate(&state, date, false)
+            .await
+            .expect("an unchanged expired candidate remains usable");
+        assert_eq!(unchanged.id, original_revision.id);
+        let manual = state
+            .store
+            .create_manual_daily_entry(
+                &profile.id,
+                date,
+                "Added owner-authored context after expiry.",
+                &[],
+            )
+            .unwrap();
+        let manual_revision = generate_daily_candidate(&state, date, false)
+            .await
+            .expect("manual notes can be attached without partial regeneration");
+        assert_eq!(manual_revision.snapshot_id, Some(snapshot.id.clone()));
+        assert_eq!(manual_revision.origin, "structured_edit");
+        assert!(
+            serde_json::from_value::<DailyRevisionContent>(manual_revision.content.clone())
+                .unwrap()
+                .manual_entry_ids
+                .contains(&manual.id)
+        );
+        state
+            .store
+            .insert_event(log_inbox_core::models::LogEventInput {
+                timestamp: Some("2026-09-09T11:00:00Z".parse().unwrap()),
+                source: "codex/test".to_owned(),
+                level: Some("info".to_owned()),
+                message: "Arrived after the original evidence expired.".to_owned(),
+                metadata: None,
+                fingerprint: None,
+            })
+            .unwrap();
+
+        let error = generate_daily_candidate(&state, date, true)
+            .await
+            .expect_err("partial regeneration must be refused");
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert!(error.message.contains("expired"));
+        assert_eq!(
+            state
+                .store
+                .current_proposal_revision(&profile.id, date)
+                .unwrap()
+                .unwrap()
+                .id,
+            manual_revision.id
+        );
     }
 
     #[tokio::test]

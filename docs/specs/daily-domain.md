@@ -45,6 +45,8 @@ An empty calendar date is not a missed day. A missed day has eligible unresolved
 
 An evidence snapshot is immutable and belongs to one day. It contains an ordered list of event IDs plus a digest of each redacted ingestion envelope. Event time determines day attribution; receipt time determines raw retention. A generation attempt always names one snapshot.
 
+If any event in the current snapshot has expired, generation never replaces that revision from the surviving subset. An unchanged request returns the preserved revision, and manual-note-only changes may create a new structured revision against the original snapshot. New automated evidence requires restoration of the missing source evidence before regeneration; no partial model summary is presented as a complete replacement.
+
 Future-dated events outside the configured tolerance are quarantined. They remain inspectable but cannot enter automatic generation until explicitly resolved. Expired evidence cannot be reconstructed from a surviving summary.
 
 Raw expiry clears only the snapshot's live-event reference. The immutable evidence ID, digest, ordering, and recorded disposition survive, so an already reviewed exact revision may still be applied when no newer evidence exists. The UI must disclose incomplete evidence; regeneration that would require expired raw content must refuse or use an explicit amendment path.
