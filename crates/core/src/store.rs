@@ -828,6 +828,35 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 19 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE knowledge_collections (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    label TEXT NOT NULL COLLATE NOCASE,
+                    purpose TEXT NOT NULL,
+                    roots_json TEXT NOT NULL,
+                    exclusions_json TEXT NOT NULL,
+                    enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+                    revision_digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(workspace_id, label),
+                    FOREIGN KEY(workspace_id) REFERENCES workspace_profiles(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX idx_knowledge_collections_workspace
+                    ON knowledge_collections(workspace_id, enabled, label);
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (19, 'bounded Knowledge collections', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -2279,10 +2308,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 18);
+        assert_eq!(store.schema_version().expect("version reads"), 19);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 18);
+        assert_eq!(store.schema_version().expect("version remains"), 19);
     }
 
     #[test]
@@ -2350,7 +2379,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 18);
+        assert_eq!(verification.schema_version, 19);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());

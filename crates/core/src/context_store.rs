@@ -1,13 +1,15 @@
 use crate::{
     models::{
-        ContextMapping, ExpiredMigrationBackup, IgnoredContextIdentity, LegacyCutoverImport,
-        LegacyMigrationArtifact, LinkSelector, MigrationItem, MigrationJournalEntry,
+        ContextMapping, ExpiredMigrationBackup, IgnoredContextIdentity, KnowledgeCollection,
+        LegacyCutoverImport, LegacyMigrationArtifact, LinkSelector, MigrationItem,
+        MigrationJournalEntry,
     },
     store::Store,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
+use sha2::{Digest, Sha256};
 use std::path::{Component, Path};
 use uuid::Uuid;
 
@@ -24,6 +26,175 @@ const SELECTOR_FIELDS: &[&str] = &[
 ];
 
 impl Store {
+    pub fn list_knowledge_collections(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<KnowledgeCollection>> {
+        let conn = self.connect()?;
+        let mut statement = conn.prepare(
+            "SELECT id, workspace_id, label, purpose, roots_json, exclusions_json, enabled, revision_digest, created_at, updated_at FROM knowledge_collections WHERE workspace_id = ?1 ORDER BY label, id",
+        )?;
+        statement
+            .query_map(params![workspace_id], knowledge_collection_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_knowledge_collection(
+        &self,
+        id: Option<&str>,
+        workspace_id: &str,
+        label: &str,
+        purpose: &str,
+        roots: &[String],
+        exclusions: &[String],
+        enabled: bool,
+        expected_updated_at: Option<DateTime<Utc>>,
+    ) -> Result<KnowledgeCollection> {
+        let label = label.trim();
+        let purpose = purpose.trim();
+        anyhow::ensure!(
+            !label.is_empty() && label.len() <= 100,
+            "Knowledge collection label must contain 1-100 bytes"
+        );
+        anyhow::ensure!(
+            !purpose.is_empty() && purpose.len() <= 1000,
+            "Knowledge collection purpose must contain 1-1000 bytes"
+        );
+        let roots = normalized_collection_paths(roots, 1, 8, "roots")?;
+        let exclusions = normalized_collection_paths(exclusions, 0, 32, "exclusions")?;
+        let revision_digest =
+            collection_revision_digest(label, purpose, &roots, &exclusions, enabled)?;
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        let workspace_is_active: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_profiles WHERE id = ?1 AND status = 'active')",
+            params![workspace_id],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            workspace_is_active,
+            "Knowledge collection must belong to the active workspace"
+        );
+        let now = Utc::now();
+        let saved_id = if let Some(id) = id {
+            validate_id(id)?;
+            let current: Option<String> = transaction
+                .query_row(
+                    "SELECT updated_at FROM knowledge_collections WHERE id = ?1 AND workspace_id = ?2",
+                    params![id, workspace_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let current = current.context("Knowledge collection does not exist")?;
+            let expected = expected_updated_at
+                .context("Knowledge collection update requires its expected timestamp")?;
+            anyhow::ensure!(
+                parse_time(current)? == expected,
+                "Knowledge collection changed; reload and try again"
+            );
+            let changed = transaction.execute(
+                r#"UPDATE knowledge_collections
+                   SET label = ?1, purpose = ?2, roots_json = ?3, exclusions_json = ?4,
+                       enabled = ?5, revision_digest = ?6, updated_at = ?7
+                   WHERE id = ?8 AND workspace_id = ?9 AND updated_at = ?10"#,
+                params![
+                    label,
+                    purpose,
+                    serde_json::to_string(&roots)?,
+                    serde_json::to_string(&exclusions)?,
+                    enabled,
+                    revision_digest,
+                    now.to_rfc3339(),
+                    id,
+                    workspace_id,
+                    expected.to_rfc3339(),
+                ],
+            )?;
+            anyhow::ensure!(changed == 1, "Knowledge collection changed while saving");
+            id.to_owned()
+        } else {
+            anyhow::ensure!(
+                expected_updated_at.is_none(),
+                "new Knowledge collection cannot have an expected timestamp"
+            );
+            let count: u32 = transaction.query_row(
+                "SELECT COUNT(*) FROM knowledge_collections WHERE workspace_id = ?1",
+                params![workspace_id],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(
+                count < 8,
+                "a workspace can have at most 8 Knowledge collections"
+            );
+            let id = format!("knowledge_{}", Uuid::new_v4().simple());
+            transaction.execute(
+                r#"INSERT INTO knowledge_collections
+                   (id, workspace_id, label, purpose, roots_json, exclusions_json, enabled,
+                    revision_digest, created_at, updated_at)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)"#,
+                params![
+                    id,
+                    workspace_id,
+                    label,
+                    purpose,
+                    serde_json::to_string(&roots)?,
+                    serde_json::to_string(&exclusions)?,
+                    enabled,
+                    revision_digest,
+                    now.to_rfc3339(),
+                ],
+            )?;
+            id
+        };
+        transaction.commit()?;
+        self.knowledge_collection(&saved_id)?
+            .context("Knowledge collection missing after save")
+    }
+
+    pub fn delete_knowledge_collection(
+        &self,
+        id: &str,
+        workspace_id: &str,
+        expected_updated_at: DateTime<Utc>,
+    ) -> Result<()> {
+        validate_id(id)?;
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        let workspace_is_active: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_profiles WHERE id = ?1 AND status = 'active')",
+            params![workspace_id],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            workspace_is_active,
+            "Knowledge collection must belong to the active workspace"
+        );
+        let changed = transaction.execute(
+            "DELETE FROM knowledge_collections WHERE id = ?1 AND workspace_id = ?2 AND updated_at = ?3",
+            params![id, workspace_id, expected_updated_at.to_rfc3339()],
+        )?;
+        anyhow::ensure!(
+            changed == 1,
+            "Knowledge collection changed or does not exist; reload and try again"
+        );
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn knowledge_collection(&self, id: &str) -> Result<Option<KnowledgeCollection>> {
+        validate_id(id)?;
+        self.connect()?
+            .query_row(
+                "SELECT id, workspace_id, label, purpose, roots_json, exclusions_json, enabled, revision_digest, created_at, updated_at FROM knowledge_collections WHERE id = ?1",
+                params![id],
+                knowledge_collection_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn expired_migration_backups(
         &self,
         completed_before: DateTime<Utc>,
@@ -662,6 +833,68 @@ fn normalized_selectors(selectors: &[LinkSelector]) -> Result<Vec<LinkSelector>>
     Ok(result)
 }
 
+fn normalized_collection_paths(
+    paths: &[String],
+    minimum: usize,
+    maximum: usize,
+    label: &str,
+) -> Result<Vec<String>> {
+    anyhow::ensure!(
+        (minimum..=maximum).contains(&paths.len()),
+        "Knowledge collection {label} must contain {minimum}-{maximum} paths"
+    );
+    let mut normalized = Vec::with_capacity(paths.len());
+    for value in paths {
+        let value = value.trim();
+        anyhow::ensure!(
+            !value.is_empty() && value.len() <= 1024 && !value.contains('\\'),
+            "Knowledge collection {label} contains an invalid path"
+        );
+        if value == "." {
+            normalized.push(value.to_owned());
+            continue;
+        }
+        let path = Path::new(value);
+        anyhow::ensure!(
+            !path.is_absolute()
+                && path
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_))),
+            "Knowledge collection {label} must use relative paths without traversal"
+        );
+        normalized.push(
+            path.components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
+        );
+    }
+    normalized.sort();
+    normalized.dedup();
+    anyhow::ensure!(
+        normalized.len() == paths.len(),
+        "Knowledge collection {label} must be unique"
+    );
+    Ok(normalized)
+}
+
+fn collection_revision_digest(
+    label: &str,
+    purpose: &str,
+    roots: &[String],
+    exclusions: &[String],
+    enabled: bool,
+) -> Result<String> {
+    let canonical = serde_json::to_vec(&serde_json::json!({
+        "label": label,
+        "purpose": purpose,
+        "roots": roots,
+        "exclusions": exclusions,
+        "enabled": enabled,
+    }))?;
+    Ok(format!("{:x}", Sha256::digest(canonical)))
+}
+
 fn validate_cutover_import(import: &LegacyCutoverImport) -> Result<()> {
     anyhow::ensure!(
         import.items.len() <= 10_000,
@@ -854,6 +1087,27 @@ fn context_mapping_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Context
     })
 }
 
+fn knowledge_collection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeCollection> {
+    let roots_json: String = row.get(4)?;
+    let exclusions_json: String = row.get(5)?;
+    Ok(KnowledgeCollection {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        label: row.get(2)?,
+        purpose: row.get(3)?,
+        roots: serde_json::from_str(&roots_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, error.into())
+        })?,
+        exclusions: serde_json::from_str(&exclusions_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, error.into())
+        })?,
+        enabled: row.get(6)?,
+        revision_digest: row.get(7)?,
+        created_at: parse_time(row.get::<_, String>(8)?)?,
+        updated_at: parse_time(row.get::<_, String>(9)?)?,
+    })
+}
+
 fn ignored_context_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IgnoredContextIdentity> {
     Ok(IgnoredContextIdentity {
         id: row.get(0)?,
@@ -981,6 +1235,136 @@ mod tests {
             })
             .unwrap();
         assert_eq!(ignored.normalized_value, "noise");
+    }
+
+    #[test]
+    fn manages_bounded_workspace_knowledge_collections_optimistically() {
+        let store = Store::open(std::env::temp_dir().join(format!(
+            "log-inbox-knowledge-collection-{}.sqlite3",
+            Uuid::new_v4()
+        )))
+        .unwrap();
+        let profile = active_profile(&store);
+        let saved = store
+            .save_knowledge_collection(
+                None,
+                &profile.id,
+                " Product context ",
+                " Product behavior and decisions ",
+                &["Products/Zeta".to_owned(), "Products/Alpha".to_owned()],
+                &["Products/Zeta/Archive".to_owned()],
+                true,
+                None,
+            )
+            .unwrap();
+        assert_eq!(saved.label, "Product context");
+        assert_eq!(saved.purpose, "Product behavior and decisions");
+        assert_eq!(
+            saved.roots,
+            vec!["Products/Alpha".to_owned(), "Products/Zeta".to_owned()]
+        );
+        assert_eq!(saved.revision_digest.len(), 64);
+        assert_eq!(
+            store.list_knowledge_collections(&profile.id).unwrap(),
+            vec![saved.clone()]
+        );
+
+        assert!(
+            store
+                .save_knowledge_collection(
+                    Some(&saved.id),
+                    &profile.id,
+                    "Product context",
+                    "Changed",
+                    &["Products".to_owned()],
+                    &[],
+                    true,
+                    None,
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .save_knowledge_collection(
+                    Some(&saved.id),
+                    &profile.id,
+                    "Product context",
+                    "Changed",
+                    &["Products".to_owned()],
+                    &[],
+                    true,
+                    Some(DateTime::<Utc>::UNIX_EPOCH),
+                )
+                .is_err()
+        );
+        let updated = store
+            .save_knowledge_collection(
+                Some(&saved.id),
+                &profile.id,
+                "Product context",
+                "Changed",
+                &["Products".to_owned()],
+                &[],
+                false,
+                Some(saved.updated_at),
+            )
+            .unwrap();
+        assert!(!updated.enabled);
+        assert_ne!(updated.revision_digest, saved.revision_digest);
+
+        for index in 1..8 {
+            store
+                .save_knowledge_collection(
+                    None,
+                    &profile.id,
+                    &format!("Collection {index}"),
+                    "Bounded context",
+                    &[".".to_owned()],
+                    &[],
+                    true,
+                    None,
+                )
+                .unwrap();
+        }
+        assert!(
+            store
+                .save_knowledge_collection(
+                    None,
+                    &profile.id,
+                    "Ninth collection",
+                    "Too many",
+                    &[".".to_owned()],
+                    &[],
+                    true,
+                    None,
+                )
+                .is_err()
+        );
+        for invalid in ["../escape", "/absolute", "folder\\windows"] {
+            assert!(
+                store
+                    .save_knowledge_collection(
+                        Some(&updated.id),
+                        &profile.id,
+                        "Product context",
+                        "Changed",
+                        &[invalid.to_owned()],
+                        &[],
+                        false,
+                        Some(updated.updated_at),
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            store
+                .delete_knowledge_collection(&updated.id, &profile.id, DateTime::<Utc>::UNIX_EPOCH,)
+                .is_err()
+        );
+        store
+            .delete_knowledge_collection(&updated.id, &profile.id, updated.updated_at)
+            .unwrap();
+        assert!(store.knowledge_collection(&updated.id).unwrap().is_none());
     }
 
     #[test]

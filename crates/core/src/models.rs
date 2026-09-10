@@ -131,6 +131,20 @@ pub struct IgnoredContextIdentity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KnowledgeCollection {
+    pub id: String,
+    pub workspace_id: String,
+    pub label: String,
+    pub purpose: String,
+    pub roots: Vec<String>,
+    pub exclusions: Vec<String>,
+    pub enabled: bool,
+    pub revision_digest: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackupVerification {
     pub path: PathBuf,
     pub schema_version: i64,
