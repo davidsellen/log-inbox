@@ -986,6 +986,23 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 22 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                ALTER TABLE manual_daily_entries ADD COLUMN deleted_at TEXT;
+
+                CREATE INDEX idx_manual_daily_entries_active_day
+                    ON manual_daily_entries(workspace_id, local_date, created_at)
+                    WHERE deleted_at IS NULL;
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (22, 'removable manual daily entries', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -1187,6 +1204,30 @@ impl Store {
             ],
         )?;
         Ok(session)
+    }
+
+    pub fn refresh_dashboard_session_csrf(
+        &self,
+        session_token: &str,
+        required_scope: &str,
+        now: DateTime<Utc>,
+        idle_ttl: Duration,
+    ) -> Result<(DashboardSession, String)> {
+        let mut session = self.authenticate_dashboard_session(
+            session_token,
+            None,
+            required_scope,
+            now,
+            idle_ttl,
+        )?;
+        let csrf_token = format!("csrf_{}", Uuid::new_v4().simple());
+        session.csrf_digest = token_digest(&csrf_token);
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE dashboard_sessions SET csrf_digest = ?1 WHERE token_digest = ?2 AND revoked_at IS NULL",
+            params![session.csrf_digest, session.token_digest],
+        )?;
+        Ok((session, csrf_token))
     }
 
     pub fn revoke_dashboard_session(&self, session_token: &str) -> Result<bool> {
@@ -2437,10 +2478,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 21);
+        assert_eq!(store.schema_version().expect("version reads"), 22);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 21);
+        assert_eq!(store.schema_version().expect("version remains"), 22);
     }
 
     #[test]
@@ -2508,7 +2549,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 21);
+        assert_eq!(verification.schema_version, 22);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());
@@ -2781,6 +2822,37 @@ mod tests {
                     Duration::minutes(30),
                 )
                 .is_err()
+        );
+        let (refreshed, refreshed_csrf) = store
+            .refresh_dashboard_session_csrf(
+                &credentials.session_token,
+                "logs:read",
+                now + Duration::minutes(1),
+                Duration::minutes(30),
+            )
+            .expect("session CSRF refreshes");
+        assert_eq!(refreshed.scopes, ["logs:read", "review:write"]);
+        assert!(
+            store
+                .authenticate_dashboard_session(
+                    &credentials.session_token,
+                    Some(&credentials.csrf_token),
+                    "review:write",
+                    now + Duration::minutes(2),
+                    Duration::minutes(30),
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .authenticate_dashboard_session(
+                    &credentials.session_token,
+                    Some(&refreshed_csrf),
+                    "review:write",
+                    now + Duration::minutes(2),
+                    Duration::minutes(30),
+                )
+                .is_ok()
         );
         assert!(
             store

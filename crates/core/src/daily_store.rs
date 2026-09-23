@@ -52,7 +52,7 @@ impl Store {
                 |row| row.get(0),
             )?;
             let mut manual_statement = transaction.prepare(
-                "SELECT id FROM manual_daily_entries WHERE workspace_id = ?1 AND local_date = ?2 ORDER BY created_at, id",
+                "SELECT id FROM manual_daily_entries WHERE workspace_id = ?1 AND local_date = ?2 AND deleted_at IS NULL ORDER BY created_at, id",
             )?;
             let manual_ids = manual_statement
                 .query_map(params![workspace_id, local_date.to_string()], |row| {
@@ -517,6 +517,71 @@ impl Store {
         anyhow::ensure!(changed == 1, "schedule run is not claimed");
         self.daily_schedule_run(workspace_id, local_date)?
             .context("schedule run missing after finish")
+    }
+
+    pub fn retry_failed_daily_schedule_runs(
+        &self,
+        workspace_id: &str,
+        exact_error: &str,
+        now: DateTime<Utc>,
+    ) -> Result<u64> {
+        anyhow::ensure!(!exact_error.is_empty(), "schedule error is required");
+        let changed = self.connect()?.execute(
+            r#"UPDATE daily_schedule_runs
+               SET state = 'pending', attempts = 0, next_attempt_at = ?1,
+                   claim_token = NULL, lease_expires_at = NULL, claimed_at = NULL,
+                   completed_at = NULL, last_error = NULL, updated_at = ?1
+               WHERE workspace_id = ?2 AND state = 'failed' AND last_error = ?3"#,
+            params![now.to_rfc3339(), workspace_id, exact_error],
+        )?;
+        Ok(changed as u64)
+    }
+
+    /// Requeue failed preparation runs so a corrected model can process them again.
+    pub fn retry_all_failed_daily_schedule_runs(
+        &self,
+        workspace_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<u64> {
+        let changed = self.connect()?.execute(
+            r#"UPDATE daily_schedule_runs
+               SET state = 'pending', attempts = 0, next_attempt_at = ?1,
+                   claim_token = NULL, lease_expires_at = NULL, claimed_at = NULL,
+                   completed_at = NULL, last_error = NULL, updated_at = ?1
+               WHERE workspace_id = ?2 AND state = 'failed'"#,
+            params![now.to_rfc3339(), workspace_id],
+        )?;
+        Ok(changed as u64)
+    }
+
+    /// A claimed run cannot survive this single-process service restarting. Requeue
+    /// those orphaned leases immediately so the dashboard does not remain stuck in
+    /// "Generating" until the normal lease expires.
+    pub fn recover_interrupted_daily_schedule_runs(&self, now: DateTime<Utc>) -> Result<u64> {
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        transaction.execute(
+            r#"UPDATE daily_days
+               SET generation_status = 'failed', updated_at = ?1
+               WHERE generation_status IN ('queued', 'running')
+                 AND EXISTS (
+                   SELECT 1 FROM daily_schedule_runs run
+                   WHERE run.workspace_id = daily_days.workspace_id
+                     AND run.local_date = daily_days.local_date
+                     AND run.state = 'claimed'
+                 )"#,
+            params![now.to_rfc3339()],
+        )?;
+        let changed = transaction.execute(
+            r#"UPDATE daily_schedule_runs
+               SET state = 'pending', attempts = 0, next_attempt_at = ?1,
+                   claim_token = NULL, lease_expires_at = NULL, claimed_at = NULL,
+                   completed_at = NULL, last_error = NULL, updated_at = ?1
+               WHERE state = 'claimed'"#,
+            params![now.to_rfc3339()],
+        )?;
+        transaction.commit()?;
+        Ok(changed as u64)
     }
 
     pub fn daily_schedule_runs(
@@ -1028,7 +1093,7 @@ impl Store {
     ) -> Result<Vec<ManualDailyEntry>> {
         let conn = self.connect()?;
         let mut statement = conn.prepare(
-            "SELECT id, workspace_id, local_date, text, references_json, created_at, updated_at FROM manual_daily_entries WHERE workspace_id = ?1 AND local_date = ?2 ORDER BY created_at, id",
+            "SELECT id, workspace_id, local_date, text, references_json, created_at, updated_at FROM manual_daily_entries WHERE workspace_id = ?1 AND local_date = ?2 AND deleted_at IS NULL ORDER BY created_at, id",
         )?;
         statement
             .query_map(
@@ -1042,12 +1107,34 @@ impl Store {
     fn manual_daily_entry(&self, id: &str) -> Result<Option<ManualDailyEntry>> {
         self.connect()?
             .query_row(
-                "SELECT id, workspace_id, local_date, text, references_json, created_at, updated_at FROM manual_daily_entries WHERE id = ?1",
+                "SELECT id, workspace_id, local_date, text, references_json, created_at, updated_at FROM manual_daily_entries WHERE id = ?1 AND deleted_at IS NULL",
                 params![id],
                 manual_entry_from_row,
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn delete_manual_daily_entry(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        id: &str,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE manual_daily_entries SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND workspace_id = ?3 AND local_date = ?4 AND deleted_at IS NULL",
+            params![now, id, workspace_id, local_date.to_string()],
+        )?;
+        anyhow::ensure!(changed == 1, "manual entry was not found");
+        transaction.execute(
+            "UPDATE daily_days SET freshness = 'update_available', updated_at = ?1 WHERE workspace_id = ?2 AND local_date = ?3 AND current_revision_id IS NOT NULL",
+            params![now, workspace_id, local_date.to_string()],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn create_evidence_snapshot(
@@ -2100,6 +2187,44 @@ impl Store {
             params![disposition, related_event_id, actor, reason, Utc::now().to_rfc3339(), snapshot_id, event_id],
         )?;
         anyhow::ensure!(changed == 1, "snapshot evidence was not found");
+        Ok(())
+    }
+
+    pub fn decide_snapshot_evidence_batch(
+        &self,
+        snapshot_id: &str,
+        decisions: &[(String, String)],
+        actor: &str,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            (1..=500).contains(&decisions.len()),
+            "evidence decision batch must contain between 1 and 500 items"
+        );
+        anyhow::ensure!(!actor.trim().is_empty(), "decision actor is required");
+        let mut event_ids = std::collections::HashSet::new();
+        for (event_id, disposition) in decisions {
+            anyhow::ensure!(!event_id.trim().is_empty(), "evidence event ID is required");
+            anyhow::ensure!(
+                event_ids.insert(event_id.as_str()),
+                "evidence decision batch contains duplicate event IDs"
+            );
+            anyhow::ensure!(
+                matches!(disposition.as_str(), "include" | "omit"),
+                "bulk evidence decisions must be include or omit"
+            );
+        }
+
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        let decided_at = Utc::now().to_rfc3339();
+        for (event_id, disposition) in decisions {
+            let changed = transaction.execute(
+                "UPDATE evidence_snapshot_events SET disposition = ?1, related_event_id = NULL, decision_actor = ?2, decision_reason = NULL, decided_at = ?3 WHERE snapshot_id = ?4 AND event_id = ?5",
+                params![disposition, actor, decided_at, snapshot_id, event_id],
+            )?;
+            anyhow::ensure!(changed == 1, "snapshot evidence was not found");
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -3686,6 +3811,38 @@ mod tests {
                 .disposition
                 .is_none()
         );
+        store
+            .decide_snapshot_evidence_batch(
+                &snapshot.id,
+                &[
+                    (event_ids[0].clone(), "omit".to_owned()),
+                    (event_ids[1].clone(), "include".to_owned()),
+                ],
+                "owner",
+            )
+            .expect("bulk evidence decisions store atomically");
+        let bulk_decisions = store.snapshot_evidence(&snapshot.id).unwrap();
+        assert_eq!(bulk_decisions[0].disposition.as_deref(), Some("omit"));
+        assert_eq!(bulk_decisions[1].disposition.as_deref(), Some("include"));
+        assert!(
+            store
+                .decide_snapshot_evidence_batch(
+                    &snapshot.id,
+                    &[
+                        (event_ids[0].clone(), "include".to_owned()),
+                        ("missing-event".to_owned(), "omit".to_owned()),
+                    ],
+                    "owner",
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store.snapshot_evidence(&snapshot.id).unwrap()[0]
+                .disposition
+                .as_deref(),
+            Some("omit"),
+            "a rejected batch rolls back every decision"
+        );
 
         let first_revision = store
             .create_proposal_revision(
@@ -3758,6 +3915,124 @@ mod tests {
                 .current_revision_id,
             Some(edited.id)
         );
+    }
+
+    #[test]
+    fn deleting_a_manual_entry_hides_it_and_stales_the_current_revision() {
+        let store = Store::open(std::env::temp_dir().join(format!(
+            "log-inbox-manual-delete-{}.sqlite3",
+            Uuid::new_v4()
+        )))
+        .unwrap();
+        let profile = store
+            .create_pending_workspace_profile(
+                "manual-delete-binding",
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+            )
+            .unwrap();
+        let profile = store.activate_workspace_profile(&profile.id).unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 9, 11).unwrap();
+        store
+            .ensure_daily_day(date, "Work Log/2026-09-11.md", None)
+            .unwrap();
+        let manual = store
+            .create_manual_daily_entry(&profile.id, date, "Remove this note.", &[])
+            .unwrap();
+        store
+            .create_proposal_revision(
+                &profile.id,
+                date,
+                None,
+                "manual",
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "manual_entry_ids": [manual.id],
+                    "workstreams": []
+                }),
+            )
+            .unwrap();
+
+        store
+            .delete_manual_daily_entry(&profile.id, date, &manual.id)
+            .unwrap();
+
+        assert!(
+            store
+                .manual_daily_entries(&profile.id, date)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .daily_day(&profile.id, date)
+                .unwrap()
+                .unwrap()
+                .freshness,
+            "update_available"
+        );
+        assert!(
+            store
+                .delete_manual_daily_entry(&profile.id, date, &manual.id)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn retries_only_schedule_runs_blocked_by_the_completed_migration() {
+        let store = Store::open(std::env::temp_dir().join(format!(
+            "log-inbox-migration-retry-{}.sqlite3",
+            Uuid::new_v4()
+        )))
+        .unwrap();
+        let profile = store
+            .create_pending_workspace_profile(
+                "migration-retry-binding",
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+            )
+            .unwrap();
+        let profile = store.activate_workspace_profile(&profile.id).unwrap();
+        let now = Utc::now();
+        let date = NaiveDate::from_ymd_opt(2026, 9, 10).unwrap();
+        let run = store
+            .enqueue_daily_schedule_run(&profile.id, date, now, "UTC", "settings")
+            .unwrap();
+        let claimed = store
+            .claim_daily_schedule_run(&profile.id, date, now)
+            .unwrap()
+            .unwrap();
+        store
+            .finish_daily_schedule_run(
+                &profile.id,
+                date,
+                claimed.claim_token.as_deref().unwrap(),
+                Some("migration gate"),
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .retry_failed_daily_schedule_runs(&profile.id, "migration gate", now)
+                .unwrap(),
+            1
+        );
+        let retried = store
+            .daily_schedule_runs(&profile.id, 10)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.local_date == run.local_date)
+            .unwrap();
+        assert_eq!(retried.state, "pending");
+        assert_eq!(retried.attempts, 0);
+        assert!(retried.last_error.is_none());
     }
 
     #[test]

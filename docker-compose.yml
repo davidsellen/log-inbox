@@ -1,6 +1,8 @@
 services:
   ollama:
     image: ollama/ollama:latest
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "${LOG_INBOX_LLM_CONTEXT_LENGTH:-32768}"
     volumes:
       - ollama-data:/root/.ollama
     healthcheck:
@@ -51,7 +53,7 @@ services:
     environment:
       LOG_INBOX_LLM_BASE_URL: "${LOG_INBOX_LLM_BASE_URL:-http://ollama:11434/v1}"
       LOG_INBOX_LLM_MODEL: "${LOG_INBOX_LLM_MODEL:-granite3.3:2b}"
-      LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS: "${LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS:-300}"
+      LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS: "${LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS:-1200}"
       LOG_INBOX_PUBLIC_INGEST_URL: "${LOG_INBOX_PUBLIC_INGEST_URL:-http://127.0.0.1:8787}"
       LOG_INBOX_WORKSPACE_DIR: "${LOG_INBOX_WORKSPACE_DIR:-/workspace}"
     ports:

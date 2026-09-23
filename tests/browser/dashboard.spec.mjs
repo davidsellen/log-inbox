@@ -6,7 +6,7 @@ const dailyHtml = await readFile(
   "utf8"
 );
 
-function dailyResponse(date = "2026-09-08", { revisionId = "revision_1", origin = "generated", freshness = "current", applyStatus = null, dismissed = false, lateEvidence = false, lateDeferred = false, contextSnapshot = null } = {}) {
+function dailyResponse(date = "2026-09-08", { revisionId = "revision_1", origin = "generated", freshness = "current", applyStatus = null, dismissed = false, lateEvidence = false, lateDeferred = false, contextSnapshot = null, evidenceDisposition = null } = {}) {
   const events = [{ id: "evt_1", source: "codex/fedora", timestamp: `${date}T09:00:00Z`, message: "Validated the Daily workflow." }];
   if (lateEvidence) events.push({ id: "evt_late", source: "codex/fedora", timestamp: `${date}T10:00:00Z`, message: "Late deployment evidence." });
   return {
@@ -45,7 +45,7 @@ function dailyResponse(date = "2026-09-08", { revisionId = "revision_1", origin 
     },
     current_snapshot: { id: "snapshot_1", event_ids: ["evt_1"] },
     current_context_snapshot: contextSnapshot,
-    current_snapshot_evidence: [{ event_id: "evt_1", available: true, position: 0, event_digest: "digest", disposition: null }],
+    current_snapshot_evidence: [{ event_id: "evt_1", available: true, position: 0, event_digest: "digest", disposition: evidenceDisposition }],
     active_late_evidence_deferrals: lateDeferred ? [{ workspace_id: "workspace_fixture", local_date: date, revision_id: "revision_1", event_id: "evt_late", available: true, event_digest: "late_digest", deferred_at: `${date}T11:00:00Z`, reopened_at: null }] : [],
     candidate_freshness: lateEvidence ? (lateDeferred ? "current" : "update_available") : freshness,
     new_evidence_count: lateEvidence ? (lateDeferred ? 0 : 1) : (freshness === "update_available" ? 1 : 0),
@@ -99,6 +99,8 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
   let lateDeferred = false;
   let currentOrigin = origin;
   let currentRevisionId = "revision_1";
+  let manualDeleted = false;
+  let evidenceDisposition = null;
   let currentContextDetails = structuredClone(contextDetails);
   let comparisonAttempts = 0;
   let collections = structuredClone(knowledgeCollections);
@@ -113,7 +115,7 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
       loggedIn = true;
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ csrf_token: "csrf_fixture" }) });
     }
-    if (url.pathname === "/api/v2/auth/session") return route.fulfill({ status: loggedIn ? 200 : 401, contentType: "application/json", body: JSON.stringify(loggedIn ? { authenticated: true } : { error: "Sign in required" }) });
+    if (url.pathname === "/api/v2/auth/session") return route.fulfill({ status: loggedIn ? 200 : 401, contentType: "application/json", body: JSON.stringify(loggedIn ? { authenticated: true, csrf_token: "csrf_fixture" } : { error: "Sign in required" }) });
     if (url.pathname === "/api/v2/settings/workspace" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ workspace_path: "/workspace", active_profile: activeProfile, binding_matches: Boolean(activeProfile) }) });
     if (url.pathname === "/api/v2/settings/workspace/preview" && request.method() === "POST") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ settings: request.postDataJSON(), destination_example: "Journal/2026-09-08.md", preview_digest: "preview_fixture", changes_saved: false }) });
     if (url.pathname === "/api/v2/settings/workspace" && request.method() === "PUT") {
@@ -193,9 +195,9 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
     if (url.pathname === "/api/v2/migration/cutover" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ operation_id: "refocus_fixture", report_digest: "f".repeat(64), workspace_id: "workspace_fixture", root_binding: "binding_fixture", ready: true, cutover_status: migrationCompleted ? "completed" : "not_started", completed_operation_id: migrationCompleted ? "refocus_fixture" : null, items: migrationCompleted ? [] : migrationItems, blockers: [], warnings: migrationItems.length ? ["Malformed proposal will be preserved."] : [] }) });
     if (url.pathname === "/api/v2/migration/cutover" && request.method() === "POST") {
       migrationCompleted = true;
-      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ operation_id: "refocus_fixture", status: "completed", backup_file: "backup.sqlite3", imported_items: migrationItems.length, cleaned_files: 0, preserved_items: migrationItems.length }) });
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ operation_id: "refocus_fixture", status: "completed", backup_file: "backup.sqlite3", imported_items: migrationItems.length, cleaned_files: 0, preserved_items: migrationItems.length, retried_preparation_runs: 5 }) });
     }
-    if (url.pathname === "/api/v2/daily/overview" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ today: "2026-09-08", timezone: "Europe/Stockholm", missed_count: 1, days: [{ local_date: "2026-09-08", status: freshness === "update_available" ? "update_available" : "in_review", event_count: 1, manual_entry_count: 1, revision_number: 1, new_evidence_count: freshness === "update_available" ? 1 : 0, manual_entries_changed: false, expired_evidence_count: 0, schedule_state: null, schedule_error: null }, { local_date: "2026-09-07", status: "missed", event_count: 2, manual_entry_count: 0, revision_number: null, new_evidence_count: 0, manual_entries_changed: false, expired_evidence_count: 0, schedule_state: null, schedule_error: null }] }) });
+    if (url.pathname === "/api/v2/daily/overview" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ today: "2026-09-08", timezone: "Europe/Stockholm", missed_count: 1, days: [{ local_date: "2026-09-08", status: freshness === "update_available" ? "update_available" : "in_review", event_count: 1, manual_entry_count: 1, revision_number: 1, new_evidence_count: freshness === "update_available" ? 1 : 0, manual_entries_changed: false, expired_evidence_count: 0, schedule_state: null, schedule_error: null }, { local_date: "2026-09-07", status: "generation_failed", event_count: 2, manual_entry_count: 0, revision_number: null, new_evidence_count: 0, manual_entries_changed: false, expired_evidence_count: 0, schedule_state: "failed", schedule_error: "model unavailable" }] }) });
     if (url.pathname.endsWith("/apply-preview") && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ workspace_id: "workspace_fixture", local_date: "2026-09-08", destination_path: "Work Log/2026/Sep/Daily log 2026-09-08.md", revision_id: "revision_1", revision_content_hash: "a".repeat(64), block_id: "day_fixture", will_create_note: false, template_used: null, previous_block: "<!-- log-inbox:daily:day_fixture:begin -->\nOld\n<!-- log-inbox:daily:day_fixture:end -->", next_block: "<!-- log-inbox:daily:day_fixture:begin -->\nReviewed Daily\n<!-- log-inbox:daily:day_fixture:end -->", expected_old_block_hash: "b".repeat(64), intended_new_block_hash: "c".repeat(64), expected_target_exists: true, expected_original_content_hash: "e".repeat(64), updated_content_hash: "d".repeat(64) }) });
     if (url.pathname.endsWith("/retry") && request.method() === "POST") {
       currentApplyStatus = { ...currentApplyStatus, state: "finalized", failure_reason: null, can_retry: false };
@@ -215,11 +217,24 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
       if (input.continue_with === "b") currentContextDetails = { status: "none", workstreams: [] };
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ assignment: { a: "with_context", b: "without_context" }, current_revision_id: currentRevisionId }) });
     }
+    if (/^\/api\/v2\/daily\/\d{4}-\d{2}-\d{2}\/manual\/manual_1$/.test(url.pathname) && request.method() === "DELETE") {
+      manualDeleted = true;
+      return route.fulfill({ status: 204 });
+    }
     if (url.pathname.endsWith("/context") && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(currentContextDetails) });
     const match = url.pathname.match(/^\/api\/v2\/daily\/(\d{4}-\d{2}-\d{2})$/);
     if (match && request.method() === "GET") {
       if (dailyStatus !== 200) return route.fulfill({ status: dailyStatus, contentType: "application/json", body: JSON.stringify({ error: "Daily fixture unavailable" }) });
-      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dailyResponse(match[1], { revisionId: currentRevisionId, origin: currentOrigin, freshness, applyStatus: currentApplyStatus, dismissed, lateEvidence, lateDeferred, contextSnapshot: currentContextDetails.snapshot || null })) });
+      const response = dailyResponse(match[1], { revisionId: currentRevisionId, origin: currentOrigin, freshness, applyStatus: currentApplyStatus, dismissed, lateEvidence, lateDeferred, contextSnapshot: currentContextDetails.snapshot || null, evidenceDisposition });
+      if (manualDeleted) {
+        response.manual_entries = [];
+        response.candidate_freshness = "update_available";
+      }
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(response) });
+    }
+    if (/^\/api\/v2\/daily\/\d{4}-\d{2}-\d{2}\/evidence$/.test(url.pathname) && request.method() === "PUT") {
+      evidenceDisposition = request.postDataJSON().decisions[0]?.disposition || null;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([{ event_id: "evt_1", available: true, position: 0, event_digest: "digest", disposition: evidenceDisposition }]) });
     }
     if (url.pathname.endsWith("/late-evidence/evt_late") && ["POST", "DELETE"].includes(request.method())) {
       lateDeferred = request.method() === "POST";
@@ -254,12 +269,56 @@ test("refocused Daily shows one date, destination, notes, and exact preview", as
   await expect(page.locator("#context-status")).toHaveText("No Knowledge");
   await expect(page.locator("#context-card")).toContainText("Daily evidence and your notes only");
   await expect(page.getByRole("button", { name: "Compare without Knowledge" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /Mon, Sep 7 Needs review/i })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Mon, Sep 7 Generation failed/i })).toBeVisible();
   await expect(page.locator("#missed-summary")).toHaveText("1 missed");
 
   await page.getByLabel("Daily log date").fill("2026-09-07");
   await page.getByLabel("Daily log date").dispatchEvent("change");
   await expect.poll(() => requests.some(request => request.path === "/api/v2/daily/2026-09-07")).toBe(true);
+  await expect(page.getByRole("status")).toContainText("Automatic generation failed: model unavailable");
+});
+
+test("refocused Daily stages included evidence by default and applies all decisions once", async ({ page }) => {
+  const requests = await mockDaily(page);
+  await openDaily(page);
+
+  await page.getByText("Review source events and include or omit them").click();
+  const decision = page.getByLabel(/Evidence decision:/);
+  await expect(decision).toHaveValue("include");
+  await expect(page.getByText("1 decision ready to apply")).toBeVisible();
+  await page.getByRole("button", { name: "Omit all" }).click();
+  await expect(decision).toHaveValue("omit");
+  await page.getByRole("button", { name: "Apply all" }).click();
+
+  await expect.poll(() => requests.find(request => request.path.endsWith("/evidence") && request.method === "PUT")?.body).toEqual({
+    expected_revision_id: "revision_1",
+    decisions: [{ event_id: "evt_1", disposition: "omit" }]
+  });
+  await expect(page.getByText("All evidence decisions saved")).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Applied 1 evidence decision");
+});
+
+test("refocused login can remember this device", async ({ page }) => {
+  const requests = await mockDaily(page);
+  await page.goto("http://daily.log-inbox.test/?date=2026-09-08");
+  await page.getByLabel("Owner secret").fill("fixture owner secret");
+  await page.getByLabel("Keep me signed in on this device for 30 days").check();
+  await page.getByRole("button", { name: "Sign in" }).click();
+
+  await expect.poll(() => requests.find(request => request.path === "/api/v2/auth/login")?.body).toEqual({ owner_secret: "fixture owner secret", remember_me: true });
+  await expect(page.locator("#daily-app")).toBeVisible();
+});
+
+test("refocused Daily deletes a manual note after confirmation", async ({ page }) => {
+  const requests = await mockDaily(page);
+  page.on("dialog", dialog => dialog.accept());
+  await openDaily(page);
+
+  await page.locator(".manual-item").getByRole("button", { name: "Delete" }).click();
+
+  await expect.poll(() => requests.some(request => request.path.endsWith("/manual/manual_1") && request.method === "DELETE")).toBe(true);
+  await expect(page.getByText("No manual notes for this day.")).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Manual note deleted");
 });
 
 test("refocused settings explains and commits reviewed legacy migration", async ({ page }) => {
@@ -274,6 +333,7 @@ test("refocused settings explains and commits reviewed legacy migration", async 
 
   await expect.poll(() => requests.find(request => request.path === "/api/v2/migration/cutover" && request.method === "POST")?.body).toEqual({ operation_id: "refocus_fixture", report_digest: "f".repeat(64) });
   await expect(page.locator("#migration-summary")).toContainText("Migration completed");
+  await expect(page.getByRole("status")).toContainText("5 blocked preparation runs were queued again");
 });
 
 test("refocused Daily saves structured edits against the visible revision", async ({ page }) => {
@@ -313,17 +373,14 @@ test("refocused Daily reviews the exact managed block before Apply", async ({ pa
   await expect(page.getByRole("status")).toContainText("Applied to Work Log/2026/Sep");
 });
 
-test("refocused Daily keeps CSRF authority in memory only", async ({ page }) => {
+test("refocused Daily restores in-memory CSRF authority from its session after reload", async ({ page }) => {
   await mockDaily(page);
   await openDaily(page);
 
   await page.reload();
-  await expect(page.getByRole("button", { name: "Unlock changes" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "+ Add note" })).toBeDisabled();
-  await expect(page.getByRole("status")).toContainText("Reviewing read-only after reload");
-
-  await page.getByRole("button", { name: "Unlock changes" }).click();
-  await expect(page.getByLabel("Owner secret")).toBeFocused();
+  await expect(page.getByRole("button", { name: "Unlock changes" })).toBeHidden();
+  await expect(page.getByRole("button", { name: "+ Add note" })).toBeEnabled();
+  await expect(page.getByLabel("Owner secret")).toBeHidden();
 });
 
 test("refocused Daily previews and saves first-run destination settings", async ({ page }) => {
@@ -612,6 +669,7 @@ test("Knowledge navigation is lazy, keyboard accessible, and URL-addressable", a
   await expect(page).toHaveURL(/view=knowledge/);
   await expect(page.getByRole("heading", { name: "Knowledge links" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Names to review" })).toBeVisible();
+  await page.getByText("Saved links and setup", { exact: true }).click();
   await page.getByText("Source collections (1)", { exact: true }).click();
   await expect(page.getByRole("heading", { name: "Product context" })).toBeVisible();
   await expect(page.getByText("Products/Alpha", { exact: true })).toBeVisible();
@@ -629,6 +687,7 @@ test("Knowledge creates a collection only after reviewing the bounded definition
   await openDaily(page);
   await page.getByRole("tab", { name: "Knowledge" }).click();
 
+  await page.getByText("Saved links and setup", { exact: true }).click();
   await expect(page.getByText("No source collections. Daily still works, but canonical-note search is unavailable.")).toBeVisible();
   await page.getByRole("button", { name: "New collection" }).first().click();
   await page.getByLabel("Collection name").fill(" Product context ");
@@ -656,6 +715,7 @@ test("Knowledge edits, pauses, and removes definitions without implying file cha
   page.on("dialog", dialog => dialog.accept());
   await openDaily(page);
   await page.getByRole("tab", { name: "Knowledge" }).click();
+  await page.getByText("Saved links and setup", { exact: true }).click();
   await page.getByText("Source collections (1)", { exact: true }).click();
 
   await page.getByRole("button", { name: "Edit" }).click();
@@ -680,18 +740,18 @@ test("Knowledge edits, pauses, and removes definitions without implying file cha
   expect(removal.body).toEqual({ expected_updated_at: "2026-09-10T11:00:00Z" });
 });
 
-test("Knowledge stays useful but read-only after a reload loses CSRF authority", async ({ page }) => {
+test("Knowledge remains editable after reload restores CSRF authority", async ({ page }) => {
   await mockDaily(page, { knowledgeCollections: [knowledgeCollection()] });
   await openDaily(page);
   await page.getByRole("tab", { name: "Knowledge" }).click();
   await page.reload();
 
+  await page.getByText("Saved links and setup", { exact: true }).click();
   await page.getByText("Source collections (1)", { exact: true }).click();
   await expect(page.getByRole("heading", { name: "Product context" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "New collection" }).first()).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Edit" })).toBeDisabled();
-  await expect(page.getByRole("status")).toContainText("Reviewing Knowledge read-only");
-  await expect(page.getByRole("button", { name: "Unlock changes" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "New collection" }).first()).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Edit" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Unlock changes" })).toBeHidden();
 });
 
 test("Knowledge links a reviewed name through bounded note search and can ignore noise", async ({ page }) => {
@@ -734,6 +794,7 @@ test("Knowledge exposes collection load failures with a retry", async ({ page })
   await openDaily(page);
   await page.getByRole("tab", { name: "Knowledge" }).click();
 
+  await page.getByText("Saved links and setup", { exact: true }).click();
   await expect(page.getByText("Collections could not be loaded: Knowledge fixture unavailable")).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
 });

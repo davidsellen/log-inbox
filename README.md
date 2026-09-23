@@ -6,7 +6,7 @@ Local-first software for turning selected engineering activity into reviewed dai
 
 Log Inbox is a single-owner, self-hosted pipeline:
 
-- Hosts, scripts, and coding agents send selected activity to the HTTP ingest API.
+- Hosts and scripts send selected activity to the HTTP ingest API; configured coding agents can use the ingestion-only MCP tool.
 - Log Inbox keeps the redacted evidence in SQLite and prepares one structured candidate per day.
 - You add manual work, review or edit the candidate, inspect the exact Markdown change, and explicitly Apply it.
 
@@ -41,7 +41,17 @@ The stack includes a private Ollama service and pulls `granite3.3:2b` by default
 
 ## Send activity
 
-Send one bounded event to the collector:
+Codex can use the authenticated MCP endpoint without a shell command:
+
+```bash
+codex mcp add log-inbox \
+  --url http://127.0.0.1:8787/mcp \
+  --bearer-token-env-var LOG_INBOX_API_KEY
+```
+
+Restart existing Codex sessions after registration so they discover `log_activity`. Keep `LOG_INBOX_API_KEY` in the Codex process environment; the registration stores only its variable name.
+
+Other producers can send one bounded event to the HTTP collector:
 
 ```bash
 curl -sS http://127.0.0.1:8787/v1/logs \
@@ -109,7 +119,7 @@ The essential settings are:
 - `LOG_INBOX_WORKSPACE_HOST_DIR`: host path of the existing Markdown workspace.
 - `LOG_INBOX_WORKSPACE_DIR`: container mount path, normally `/workspace`.
 - `LOG_INBOX_ALLOWED_HOSTS` and `LOG_INBOX_ALLOWED_ORIGINS`: exact dashboard request boundaries.
-- `LOG_INBOX_LLM_BASE_URL`, `LOG_INBOX_LLM_MODEL`, and optional `LOG_INBOX_LLM_API_KEY`: model connection used for draft generation.
+- `LOG_INBOX_LLM_BASE_URL`, `LOG_INBOX_LLM_MODEL`, `LOG_INBOX_LLM_CONTEXT_LENGTH` (default `32768`), `LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS` (default `1200`), and optional `LOG_INBOX_LLM_API_KEY`: model connection used for draft generation. The context and timeout must accommodate the bounded evidence prompt and CPU inference time.
 
 The collector and dashboard bind to loopback by default. Put them behind an authenticated secure route before allowing nonlocal access.
 
@@ -119,6 +129,7 @@ The collector and dashboard bind to loopback by default. Put them behind an auth
 - [Product brief](docs/specs/product-brief.md)
 - [Architecture](docs/specs/architecture.md)
 - [Ingest API](docs/specs/ingest-api.md)
+- [MCP interface](docs/specs/mcp-tools.md)
 - [Refocused API](docs/specs/refocus-api.md)
 - [Daily domain](docs/specs/daily-domain.md)
 - [Storage model](docs/specs/storage.md)

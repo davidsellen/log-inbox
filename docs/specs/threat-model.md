@@ -24,7 +24,7 @@ Nonlocal access is unsupported unless the owner places the service behind an aut
 | Owner browser | Human review surface after an authenticated session and CSRF validation |
 | Producer | May ingest bounded events with its ingestion credential; cannot claim manual authorship |
 | Configured model | Untrusted processor of explicitly selected redacted evidence/context |
-| MCP client | Receives only its granted scopes; tokens are independently revocable |
+| MCP client | Acts only as a bounded event producer with an independently revocable ingestion key |
 | Markdown editor/sync | Independent writer; never trusted to preserve Log Inbox markers atomically |
 | Workspace contents | Untrusted input, including Markdown, links, templates, filenames, and symlinks |
 
@@ -40,7 +40,7 @@ Nonlocal access is unsupported unless the owner places the service behind an aut
 | `settings:write` | Change reviewed ordinary settings and Knowledge collection definitions | Reveal stored secrets, read note content, or bypass destination review |
 | `vault:write` | Execute an already reviewed exact Apply operation | Select a destination or approve a revision |
 
-The initial dashboard owner session may receive all dashboard scopes, but every handler still checks its required scope. Initial MCP support excludes `vault:write`.
+The initial dashboard owner session may receive all dashboard scopes, but every handler still checks its required scope. Initial MCP support has only `logs:ingest`; it cannot read logs or reach any dashboard, review, generation, settings, Knowledge, or `vault:write` operation.
 
 ## Browser Session Contract
 

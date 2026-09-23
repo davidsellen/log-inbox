@@ -17,23 +17,14 @@ const MAX_PROMPT_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_PROMPT_METADATA_BYTES: usize = 8 * 1024;
 const MAX_PROMPT_BYTES: usize = 512 * 1024;
 const MAX_LLM_RESPONSE_BYTES: usize = 256 * 1024;
-const DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS: u64 = 300;
+const DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS: u64 = 1200;
 pub const DAILY_GENERATION_CONTRACT: &str = "daily-structured-v1";
 const CONTEXT_METADATA_KEYS: &[&str] = &[
-    "task_id",
-    "session_id",
     "event_type",
     "entry_kind",
-    "sequence",
-    "repo",
-    "project",
     "product",
     "app",
     "service",
-    "branch",
-    "base_branch",
-    "target_branch",
-    "commit",
     "commit_message",
     "work_item",
     "pull_request",
@@ -47,7 +38,6 @@ const CONTEXT_METADATA_KEYS: &[&str] = &[
     "follow_up",
     "duration_ms",
     "activity",
-    "sender",
     "status",
     "artifact_path",
     "artifact_sha256",
@@ -190,11 +180,41 @@ pub struct StructuredWorkstream {
     pub follow_up: Vec<StructuredFact>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct StructuredFact {
     pub text: String,
     pub evidence_event_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StructuredFactInput {
+    Object {
+        text: String,
+        evidence_event_ids: Vec<String>,
+    },
+    Text(String),
+}
+
+impl<'de> Deserialize<'de> for StructuredFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match StructuredFactInput::deserialize(deserializer)? {
+            StructuredFactInput::Object {
+                text,
+                evidence_event_ids,
+            } => Ok(Self {
+                text,
+                evidence_event_ids,
+            }),
+            StructuredFactInput::Text(text) => Ok(Self {
+                text,
+                evidence_event_ids: Vec::new(),
+            }),
+        }
+    }
 }
 
 pub fn parse_strict_daily_draft(
@@ -203,6 +223,24 @@ pub fn parse_strict_daily_draft(
 ) -> Result<StructuredDailyDraft, String> {
     let mut draft: StructuredDailyDraft = serde_json::from_str(content)
         .map_err(|error| format!("LLM daily draft did not match the structured schema: {error}"))?;
+    // Some local models emit a concise string for a fact. Preserve it and attach
+    // the workstream's already-validated evidence instead of discarding the run.
+    for workstream in &mut draft.workstreams {
+        for facts in [
+            &mut workstream.outcome,
+            &mut workstream.decision,
+            &mut workstream.trade_off,
+            &mut workstream.validation,
+            &mut workstream.blocker,
+            &mut workstream.follow_up,
+        ] {
+            for fact in facts.iter_mut() {
+                if fact.evidence_event_ids.is_empty() {
+                    fact.evidence_event_ids = workstream.evidence_event_ids.clone();
+                }
+            }
+        }
+    }
     deduplicate_daily_facts(&mut draft);
     if draft.workstreams.is_empty() {
         return Err("LLM daily draft must contain at least one workstream".to_owned());
@@ -354,13 +392,63 @@ struct ChatMessage {
 struct PromptEvent<'a> {
     group_id: String,
     id: &'a str,
-    timestamp: &'a chrono::DateTime<chrono::Utc>,
-    source: &'a str,
-    level: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<&'a chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    level: Option<&'a str>,
     message: &'a str,
     message_complete: bool,
     metadata: Cow<'a, Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     fingerprint: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct DailyPromptGroup<'a> {
+    group_id: String,
+    events: Vec<DailyPromptEvent<'a>>,
+}
+
+#[derive(Serialize)]
+struct DailyPromptEvent<'a> {
+    message: &'a str,
+    message_complete: bool,
+    metadata: Cow<'a, Map<String, Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelDailyDraft {
+    workstreams: Vec<ModelDailyWorkstream>,
+    open_questions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelDailyWorkstream {
+    id: String,
+    title: String,
+    outcome: Vec<String>,
+    decision: Vec<String>,
+    trade_off: Vec<String>,
+    validation: Vec<String>,
+    blocker: Vec<String>,
+    follow_up: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelDailyWorkstreamResult {
+    title: String,
+    outcome: Vec<String>,
+    decision: Vec<String>,
+    trade_off: Vec<String>,
+    validation: Vec<String>,
+    blocker: Vec<String>,
+    follow_up: Vec<String>,
+    open_questions: Vec<String>,
 }
 
 pub async fn generate_automated_daily_summary(
@@ -382,6 +470,19 @@ async fn suggest_automated_summary(
     args: SuggestMarkdownSummaryArgs,
     events: Vec<StoredLogEvent>,
 ) -> Result<SummaryProposal, String> {
+    tracing::info!(mode = %args.mode, event_count = events.len(), attempt = 1, "LLM summary attempt started");
+    let result = suggest_automated_summary_once(config, args.clone(), events).await;
+    if result.is_ok() {
+        tracing::info!(mode = %args.mode, attempt = 1, "LLM summary attempt succeeded");
+    }
+    result
+}
+
+async fn suggest_automated_summary_once(
+    config: Option<&LlmConfig>,
+    args: SuggestMarkdownSummaryArgs,
+    events: Vec<StoredLogEvent>,
+) -> Result<SummaryProposal, String> {
     let Some(config) = config else {
         if args.mode == "daily-consolidation" {
             return Err(
@@ -397,7 +498,6 @@ async fn suggest_automated_summary(
         ));
     };
 
-    let prompt = build_prompt(&args, &events)?;
     let _request_permit = config
         .request_gate
         .acquire()
@@ -408,12 +508,56 @@ async fn suggest_automated_summary(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| error.to_string())?;
+
+    if args.mode == "daily-consolidation" {
+        let groups = event_groups(&events, &args);
+        let mut workstreams = Vec::with_capacity(groups.len());
+        let mut open_questions = Vec::new();
+        for (index, (group_id, group_events)) in groups.iter().enumerate() {
+            tracing::info!(
+                group = index + 1,
+                group_count = groups.len(),
+                event_count = group_events.len(),
+                "LLM daily workstream started"
+            );
+            let prompt = build_prompt(&args, group_events)?;
+            let content = request_model(&client, config, prompt, true).await?;
+            let (workstream, mut questions) =
+                parse_single_daily_workstream(&content, group_id, group_events)?;
+            workstreams.push(workstream);
+            open_questions.append(&mut questions);
+        }
+        let draft = StructuredDailyDraft {
+            workstreams,
+            open_questions,
+        };
+        return daily_proposal(draft, &args, &events, &config.base_url);
+    }
+
+    let prompt = build_prompt(&args, &events)?;
+    let content = request_model(&client, config, prompt, false).await?;
+    parse_proposal(&content, &args, &events, &config.base_url)
+}
+
+async fn request_model(
+    client: &reqwest::Client,
+    config: &LlmConfig,
+    prompt: String,
+    daily: bool,
+) -> Result<String, String> {
+    let response_format = if daily {
+        daily_response_format()
+    } else {
+        json!({ "type": "json_object" })
+    };
+    let temperature = if daily { 0.0 } else { 0.2 };
     let mut request = client
         .post(format!("{}/chat/completions", config.base_url))
         .json(&json!({
             "model": config.model,
-            "temperature": 0.2,
-            "response_format": { "type": "json_object" },
+            "temperature": temperature,
+            "max_tokens": if daily { 512 } else { 2048 },
+            "response_format": response_format,
             "messages": [
                 {
                     "role": "system",
@@ -453,10 +597,46 @@ async fn suggest_automated_summary(
     let content = chat
         .choices
         .first()
-        .map(|choice| choice.message.content.as_str())
+        .map(|choice| choice.message.content.clone())
         .ok_or_else(|| "LLM response did not include a choice".to_owned())?;
+    Ok(content)
+}
 
-    parse_proposal(content, &args, &events, &config.base_url)
+fn daily_response_format() -> Value {
+    let facts = json!({
+        "type": "array",
+        "maxItems": 4,
+        "items": { "type": "string", "maxLength": 320 }
+    });
+    json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "daily_draft",
+            "strict": true,
+            "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                    "title", "outcome", "decision", "trade_off", "validation",
+                    "blocker", "follow_up", "open_questions"
+                ],
+                "properties": {
+                    "title": { "type": "string", "maxLength": 100 },
+                    "outcome": facts,
+                    "decision": facts,
+                    "trade_off": facts,
+                    "validation": facts,
+                    "blocker": facts,
+                    "follow_up": facts,
+                    "open_questions": {
+                        "type": "array",
+                        "maxItems": 2,
+                        "items": { "type": "string", "maxLength": 320 }
+                    }
+                }
+            }
+        }
+    })
 }
 
 fn demote_workstream_headings(markdown: &str) -> String {
@@ -474,33 +654,33 @@ fn build_prompt(
     args: &SuggestMarkdownSummaryArgs,
     events: &[StoredLogEvent],
 ) -> Result<String, String> {
-    let prompt_events = events_for_prompt(&args.mode, events)
-        .into_iter()
-        .map(|event| prompt_event(event, args))
-        .collect::<Vec<_>>();
-    let event_slice =
-        serde_json::to_string_pretty(&prompt_events).map_err(|error| error.to_string())?;
+    let event_slice = if args.mode == "daily-consolidation" {
+        serde_json::to_string(&daily_prompt_groups(args, events))
+            .map_err(|error| error.to_string())?
+    } else {
+        let prompt_events = events_for_prompt(&args.mode, events)
+            .into_iter()
+            .map(|event| prompt_event(event, args))
+            .collect::<Vec<_>>();
+        serde_json::to_string(&prompt_events).map_err(|error| error.to_string())?
+    };
     let vault_context =
-        serde_json::to_string_pretty(&args.vault_context).map_err(|error| error.to_string())?;
+        serde_json::to_string(&args.vault_context).map_err(|error| error.to_string())?;
     let allowed_links =
         serde_json::to_string(&allowed_canonical_links(args)).map_err(|error| error.to_string())?;
     let (response_shape, format_rules) = if args.mode == "daily-consolidation" {
         (
             r#"{
-  "workstreams": [{
-    "id": "copy supplied group_id",
-    "title": "Concise human-readable workstream name",
-    "evidence_event_ids": ["every supplied event ID exactly once"],
-    "outcome": [{"text": "Supported fact", "evidence_event_ids": ["evt_..."]}],
-    "decision": [],
-    "trade_off": [],
-    "validation": [],
-    "blocker": [],
-    "follow_up": []
-  }],
+  "title": "Concise human-readable workstream name",
+  "outcome": ["Supported fact"],
+  "decision": [],
+  "trade_off": [],
+  "validation": [],
+  "blocker": [],
+  "follow_up": [],
   "open_questions": []
 }"#,
-            "- Include exactly one workstream for every supplied group_id.\n- Copy each group_id into id exactly and assign every supplied event ID to that group; never invent an ID.\n- Every factual item has exactly text and evidence_event_ids. Transport-only lifecycle events remain represented at workstream level but do not need a boilerplate factual item.\n- Use the adaptive factual fields and omit unsupported facts. Arrays may be empty, but each workstream needs at least one factual item.\n- Merge repetitive lifecycle facts while retaining distinct outcomes, decisions, trade-offs, validation, blockers, and follow-up.\n- Earlier events carrying decision metadata must support a Decision fact; events carrying tests or validation metadata must support a Validation fact.\n- Do not choose links, references, or write Markdown; the server renders reviewed Markdown.",
+            "- Summarize this one supplied evidence group. The server already owns its identity and evidence IDs; do not return either.\n- Return concise fact strings only.\n- Use the adaptive factual fields and omit unsupported facts. Arrays may be empty, but include at least one factual item.\n- Merge repetitive lifecycle facts while retaining distinct outcomes, decisions, trade-offs, validation, blockers, and follow-up.\n- Events carrying decision metadata must support a Decision fact; events carrying tests or validation metadata must support a Validation fact.\n- Do not choose links, references, or write Markdown; the server renders reviewed Markdown.",
         )
     } else {
         (
@@ -526,7 +706,7 @@ Vault context:
 Allowed canonical links:
 {allowed_links}
 
-Events:
+Evidence groups:
 {event_slice}
 
 Return JSON with this exact shape:
@@ -662,14 +842,45 @@ fn prompt_event<'a>(
     PromptEvent {
         group_id: resolved_event_group_key(event, args),
         id: &event.id,
-        timestamp: &event.timestamp,
-        source: &event.source,
-        level: &event.level,
+        timestamp: Some(&event.timestamp),
+        source: Some(event.source.as_str()),
+        level: Some(event.level.as_str()),
         message,
         message_complete,
-        metadata: bounded_metadata(&event.metadata),
+        metadata: prompt_metadata(&event.metadata),
         fingerprint: event.fingerprint.as_deref(),
     }
+}
+
+fn daily_prompt_groups<'a>(
+    args: &SuggestMarkdownSummaryArgs,
+    events: &'a [StoredLogEvent],
+) -> Vec<DailyPromptGroup<'a>> {
+    let mut groups = BTreeMap::<String, Vec<&StoredLogEvent>>::new();
+    for event in events_for_prompt(&args.mode, events) {
+        groups
+            .entry(resolved_event_group_key(event, args))
+            .or_default()
+            .push(event);
+    }
+    groups
+        .into_iter()
+        .map(|(group_id, events)| DailyPromptGroup {
+            group_id,
+            events: events
+                .into_iter()
+                .map(|event| {
+                    let (message, message_complete) =
+                        bounded_prefix(&event.message, MAX_PROMPT_MESSAGE_BYTES);
+                    DailyPromptEvent {
+                        message,
+                        message_complete,
+                        metadata: prompt_metadata(&event.metadata),
+                    }
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 fn resolved_event_group_key(event: &StoredLogEvent, args: &SuggestMarkdownSummaryArgs) -> String {
@@ -696,24 +907,34 @@ fn bounded_prefix(value: &str, max_bytes: usize) -> (&str, bool) {
     (&value[..end], false)
 }
 
-fn bounded_metadata(metadata: &Map<String, Value>) -> Cow<'_, Map<String, Value>> {
-    if serde_json::to_vec(metadata).is_ok_and(|encoded| encoded.len() <= MAX_PROMPT_METADATA_BYTES)
-    {
-        return Cow::Borrowed(metadata);
-    }
-
+fn prompt_metadata(metadata: &Map<String, Value>) -> Cow<'_, Map<String, Value>> {
     let mut context = Map::new();
     for key in CONTEXT_METADATA_KEYS {
         if let Some(value) = metadata.get(*key) {
             context.insert((*key).to_owned(), value.clone());
         }
     }
-    context.insert(
-        "_prompt_notice".to_owned(),
-        Value::String(
-            "metadata bounded for LLM; full redacted metadata remains in SQLite".to_owned(),
-        ),
-    );
+    if serde_json::to_vec(&context).is_ok_and(|encoded| encoded.len() > MAX_PROMPT_METADATA_BYTES) {
+        context.retain(|key, _| {
+            matches!(
+                key.as_str(),
+                "event_type"
+                    | "entry_kind"
+                    | "product"
+                    | "app"
+                    | "service"
+                    | "modules"
+                    | "tests"
+                    | "validation"
+                    | "decision"
+                    | "trade_off"
+                    | "blocker"
+                    | "follow_up"
+                    | "status"
+                    | "workstream"
+            )
+        });
+    }
     Cow::Owned(context)
 }
 
@@ -724,28 +945,8 @@ fn parse_proposal(
     provider: &str,
 ) -> Result<SummaryProposal, String> {
     if args.mode == "daily-consolidation" {
-        let expected_event_ids = events
-            .iter()
-            .map(|event| event.id.clone())
-            .collect::<Vec<_>>();
-        let draft = parse_strict_daily_draft(content, &expected_event_ids)?;
-        validate_daily_workstream_groups(&draft, events, args)?;
-        validate_durable_lifecycle_evidence(&draft, events, args)?;
-        return Ok(SummaryProposal {
-            target_note: default_target_note(args),
-            link_candidates: allowed_canonical_links(args),
-            canonical_links: configured_workstream_links(args),
-            markdown: render_strict_daily_markdown(&draft, args, events),
-            evidence_event_ids: expected_event_ids,
-            confidence: "medium".to_owned(),
-            open_questions: draft.open_questions.clone(),
-            requires_review: true,
-            provider: provider.to_owned(),
-            supersedes_proposal_ids: Vec::new(),
-            consolidation_job_id: None,
-            link_context_revision: link_context_revision(args),
-            structured_draft: Some(draft),
-        });
+        let draft = parse_grouped_daily_draft(content, events, args)?;
+        return daily_proposal(draft, args, events, provider);
     }
 
     let value: Value = serde_json::from_str(content).map_err(|error| {
@@ -776,6 +977,142 @@ fn parse_proposal(
         link_context_revision: link_context_revision(args),
         structured_draft: None,
     })
+}
+
+fn daily_proposal(
+    draft: StructuredDailyDraft,
+    args: &SuggestMarkdownSummaryArgs,
+    events: &[StoredLogEvent],
+    provider: &str,
+) -> Result<SummaryProposal, String> {
+    validate_daily_workstream_groups(&draft, events, args)?;
+    validate_durable_lifecycle_evidence(&draft, events, args)?;
+    let expected_event_ids = events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>();
+    Ok(SummaryProposal {
+        target_note: default_target_note(args),
+        link_candidates: allowed_canonical_links(args),
+        canonical_links: configured_workstream_links(args),
+        markdown: render_strict_daily_markdown(&draft, args, events),
+        evidence_event_ids: expected_event_ids,
+        confidence: "medium".to_owned(),
+        open_questions: draft.open_questions.clone(),
+        requires_review: true,
+        provider: provider.to_owned(),
+        supersedes_proposal_ids: Vec::new(),
+        consolidation_job_id: None,
+        link_context_revision: link_context_revision(args),
+        structured_draft: Some(draft),
+    })
+}
+
+fn parse_single_daily_workstream(
+    content: &str,
+    group_id: &str,
+    events: &[StoredLogEvent],
+) -> Result<(StructuredWorkstream, Vec<String>), String> {
+    let model: ModelDailyWorkstreamResult = serde_json::from_str(content)
+        .map_err(|error| format!("LLM daily draft did not match the structured schema: {error}"))?;
+    let evidence_event_ids = events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>();
+    let facts = |values: Vec<String>| {
+        values
+            .into_iter()
+            .map(|text| StructuredFact {
+                text,
+                evidence_event_ids: evidence_event_ids.clone(),
+            })
+            .collect()
+    };
+    let workstream = StructuredWorkstream {
+        id: group_id.to_owned(),
+        title: model.title,
+        evidence_event_ids: evidence_event_ids.clone(),
+        outcome: facts(model.outcome),
+        decision: facts(model.decision),
+        trade_off: facts(model.trade_off),
+        validation: facts(model.validation),
+        blocker: facts(model.blocker),
+        follow_up: facts(model.follow_up),
+    };
+    let draft = StructuredDailyDraft {
+        workstreams: vec![workstream],
+        open_questions: model.open_questions,
+    };
+    let serialized = serde_json::to_string(&draft).map_err(|error| error.to_string())?;
+    let expected_event_ids = events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>();
+    let mut validated = parse_strict_daily_draft(&serialized, &expected_event_ids)?;
+    Ok((validated.workstreams.remove(0), validated.open_questions))
+}
+
+fn parse_grouped_daily_draft(
+    content: &str,
+    events: &[StoredLogEvent],
+    args: &SuggestMarkdownSummaryArgs,
+) -> Result<StructuredDailyDraft, String> {
+    let model: ModelDailyDraft = serde_json::from_str(content)
+        .map_err(|error| format!("LLM daily draft did not match the structured schema: {error}"))?;
+    let groups = event_groups(events, args);
+    if model.workstreams.len() != groups.len() {
+        return Err(format!(
+            "daily draft returned {} workstreams for {} evidence groups",
+            model.workstreams.len(),
+            groups.len()
+        ));
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut workstreams = Vec::with_capacity(model.workstreams.len());
+    for workstream in model.workstreams {
+        if !seen.insert(workstream.id.clone()) {
+            return Err(format!("duplicate workstream ID: {}", workstream.id));
+        }
+        let group_events = groups
+            .get(&workstream.id)
+            .ok_or_else(|| format!("daily draft invented workstream ID: {}", workstream.id))?;
+        let evidence_event_ids = group_events
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<Vec<_>>();
+        let facts = |values: Vec<String>| {
+            values
+                .into_iter()
+                .map(|text| StructuredFact {
+                    text,
+                    evidence_event_ids: evidence_event_ids.clone(),
+                })
+                .collect()
+        };
+        workstreams.push(StructuredWorkstream {
+            id: workstream.id,
+            title: workstream.title,
+            evidence_event_ids: evidence_event_ids.clone(),
+            outcome: facts(workstream.outcome),
+            decision: facts(workstream.decision),
+            trade_off: facts(workstream.trade_off),
+            validation: facts(workstream.validation),
+            blocker: facts(workstream.blocker),
+            follow_up: facts(workstream.follow_up),
+        });
+    }
+
+    let hydrated = StructuredDailyDraft {
+        workstreams,
+        open_questions: model.open_questions,
+    };
+    let serialized = serde_json::to_string(&hydrated).map_err(|error| error.to_string())?;
+    let expected_event_ids = events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>();
+    parse_strict_daily_draft(&serialized, &expected_event_ids)
 }
 
 fn workstream_links(value: &Value, args: &SuggestMarkdownSummaryArgs) -> Vec<String> {
@@ -1712,20 +2049,14 @@ mod tests {
                 "workstreams": [{
                     "id": "source:codex%2Ftest|task:task-1",
                     "title": "Authentication review",
-                    "evidence_event_ids": ["evt_decision", "evt_validation", "evt_complete"],
-                    "outcome": [{
-                        "text": "Completed the authentication review.",
-                        "evidence_event_ids": ["evt_complete"]
-                    }],
-                    "decision": decision.into_iter().map(|id| json!({
-                        "text": "Kept the local callback override.",
-                        "evidence_event_ids": [id]
-                    })).collect::<Vec<_>>(),
-                    "validation": validation.into_iter().map(|id| json!({
-                        "text": "Authentication tests passed.",
-                        "evidence_event_ids": [id]
-                    })).collect::<Vec<_>>()
-                }]
+                    "outcome": ["Completed the authentication review."],
+                    "decision": decision.into_iter().map(|_| "Kept the local callback override.").collect::<Vec<_>>(),
+                    "trade_off": [],
+                    "validation": validation.into_iter().map(|_| "Authentication tests passed.").collect::<Vec<_>>(),
+                    "blocker": [],
+                    "follow_up": []
+                }],
+                "open_questions": []
             })
             .to_string()
         };
@@ -1873,15 +2204,12 @@ mod tests {
             "workstreams": [{
                 "id": "repo:portal-api|task:navigation",
                 "title": "Navigation validation",
-                "evidence_event_ids": ["evt_navigation"],
-                "outcome": [{
-                    "text": "Kept the chat open.",
-                    "evidence_event_ids": ["evt_navigation"]
-                }],
-                "validation": [{
-                    "text": "Validated the host route.",
-                    "evidence_event_ids": ["evt_navigation"]
-                }]
+                "outcome": ["Kept the chat open."],
+                "decision": [],
+                "trade_off": [],
+                "validation": ["Validated the host route."],
+                "blocker": [],
+                "follow_up": []
             }],
             "open_questions": []
         })
@@ -1929,11 +2257,7 @@ mod tests {
         );
         assert!(!projected.message_complete);
         assert!(!projected.message.ends_with("END"));
-        assert_eq!(
-            projected.metadata.get("task_id"),
-            Some(&Value::from("task_123"))
-        );
-        assert!(projected.metadata.contains_key("_prompt_notice"));
+        assert!(projected.metadata.is_empty());
         assert_eq!(event.message, full_message);
     }
 
@@ -2242,8 +2566,7 @@ mod tests {
               "workstreams": [{
                 "id": "canonical:alpha",
                 "title": "Alpha",
-                "evidence_event_ids": ["evt_one", "evt_two"],
-                "outcome": [{"text": "Handled both aliases", "evidence_event_ids": ["evt_one", "evt_two"]}],
+                "outcome": ["Handled both aliases"],
                 "decision": [], "trade_off": [], "validation": [], "blocker": [], "follow_up": []
               }],
               "open_questions": []

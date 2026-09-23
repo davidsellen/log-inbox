@@ -45,13 +45,13 @@ Source collections are secondary setup under Knowledge. They define small, named
 
 Creating or editing a collection is review-first. The owner enters one to eight relative roots and optional exclusions, then reviews matched/eligible counts and any missing or oversized sources before Save is enabled. Missing reviewed roots are not created. Saving changes only SQLite configuration and never creates, moves, edits, or deletes Markdown. Pause controls whether future candidates may use the collection; Remove deletes only the definition.
 
-Folder discovery is a bounded typeahead inside collection path fields. It returns safe relative directory paths only—never filenames or Markdown content. Knowledge loads independently from Daily, remains visible but read-only after a reload until changes are unlocked, and has an addressable `?view=knowledge` URL with browser-history navigation.
+Folder discovery is a bounded typeahead inside collection path fields. It returns safe relative directory paths only—never filenames or Markdown content. Knowledge loads independently from Daily, restores mutation access from a valid session after reload without persisting the CSRF token in browser storage, and has an addressable `?view=knowledge` URL with browser-history navigation.
 
 ## Boundaries
 
 - No browser directory picker, IndexedDB vault, file tree, or general vault browsing.
 - No proposal inbox, per-task staging queue, or background legacy writer.
 - No automatic Apply and no edits outside the owned Daily block.
-- The current release exposes no MCP route. Structured MCP inspection and separately authorized Apply are future roadmap work.
+- The collector exposes only the ingestion-oriented `log_activity` MCP tool. Structured MCP inspection and separately authorized Apply remain future roadmap work.
 
 The authoritative route and state contracts are in [Refocused Dashboard API](refocus-api.md) and [Daily domain](daily-domain.md).

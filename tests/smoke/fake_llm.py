@@ -17,38 +17,22 @@ class Handler(BaseHTTPRequestHandler):
             (item.get("content", "") for item in messages if item.get("role") == "user"),
             "",
         )
-        events = prompt.partition("Events:\n")[2].partition("\n\nReturn JSON")[0]
-        group = re.search(r'"group_id"\s*:\s*"([^"]+)"', events)
-        event = re.search(r'"id"\s*:\s*"([^"]+)"', events)
-        if not group or not event:
+        evidence = prompt.partition("Evidence groups:\n")[2].partition(
+            "\n\nReturn JSON"
+        )[0]
+        group = re.search(r'"group_id"\s*:\s*"([^"]+)"', evidence)
+        if not group:
             self.send_error(422)
             return
-        event_id = event.group(1)
         content = json.dumps(
             {
-                "workstreams": [
-                    {
-                        "id": group.group(1),
-                        "title": "Compose smoke workflow",
-                        "evidence_event_ids": [event_id],
-                        "outcome": [
-                            {
-                                "text": "Validated the live Daily workflow.",
-                                "evidence_event_ids": [event_id],
-                            }
-                        ],
-                        "decision": [],
-                        "trade_off": [],
-                        "validation": [
-                            {
-                                "text": "The live Compose smoke test passed.",
-                                "evidence_event_ids": [event_id],
-                            }
-                        ],
-                        "blocker": [],
-                        "follow_up": [],
-                    }
-                ],
+                "title": "Compose smoke workflow",
+                "outcome": ["Validated the live Daily workflow."],
+                "decision": [],
+                "trade_off": [],
+                "validation": ["The live Compose smoke test passed."],
+                "blocker": [],
+                "follow_up": [],
                 "open_questions": [],
             }
         )

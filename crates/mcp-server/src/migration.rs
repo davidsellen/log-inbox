@@ -158,6 +158,7 @@ pub(crate) struct CutoverCommitResult {
     pub imported_items: usize,
     pub cleaned_files: usize,
     pub preserved_items: usize,
+    pub retried_preparation_runs: u64,
 }
 
 #[derive(Serialize)]
@@ -493,6 +494,7 @@ fn finish_cutover_cleanup(
             imported_items: operation.details["imported_items"].as_u64().unwrap_or(0) as usize,
             cleaned_files: operation.details["cleaned_files"].as_u64().unwrap_or(0) as usize,
             preserved_items: operation.details["preserved_items"].as_u64().unwrap_or(0) as usize,
+            retried_preparation_runs: 0,
         });
     }
     let mut cleaned_files = 0;
@@ -554,6 +556,7 @@ fn finish_cutover_cleanup(
         imported_items,
         cleaned_files,
         preserved_items,
+        retried_preparation_runs: 0,
     })
 }
 
@@ -656,7 +659,7 @@ fn inventory_rules(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let target_path = (matches.len() == 1)
+        let catalog_path = (matches.len() == 1)
             .then(|| matches[0].path.clone())
             .filter(|path| {
                 workspace
@@ -682,6 +685,24 @@ fn inventory_rules(
             });
             existing == legacy
         });
+        let direct_path = [
+            rule.target_note_id.clone(),
+            format!("{}.md", rule.target_note_id),
+        ]
+        .into_iter()
+        .find(|path| {
+            workspace
+                .resolve_markdown_path(Path::new(path), MarkdownPathMode::ExistingFile)
+                .is_ok()
+        });
+        let reviewed_path = existing_mapping
+            .map(|mapping| mapping.canonical_note_path.clone())
+            .filter(|path| {
+                workspace
+                    .resolve_markdown_path(Path::new(path), MarkdownPathMode::ExistingFile)
+                    .is_ok()
+            });
+        let target_path = catalog_path.or(direct_path).or(reviewed_path);
         let existing_conflict = existing_mapping.is_some_and(|mapping| {
             target_path
                 .as_deref()
@@ -1110,6 +1131,50 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_path_targets_resolve_without_a_browser_catalog() {
+        let root = temp_dir("migration-path-target");
+        fs::create_dir_all(root.join("Products")).unwrap();
+        fs::write(root.join("Products/Product.md"), "# Product\n").unwrap();
+        let workspace = InspectedWorkspace::inspect(&root).unwrap();
+        let store = Store::open(root.join("app.sqlite3")).unwrap();
+        let profile = store
+            .save_active_workspace_profile(
+                workspace.root_binding(),
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+                None,
+            )
+            .unwrap();
+        store
+            .save_link_rule(&VaultLinkRule {
+                id: "rule_path".to_owned(),
+                selectors: vec![LinkSelector {
+                    field: "repo".to_owned(),
+                    operator: "exact".to_owned(),
+                    value: "product".to_owned(),
+                }],
+                target_note_id: "Products/Product".to_owned(),
+                enabled: true,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+
+        let report = inventory_cutover(&store, &profile, &workspace, None, &[]).unwrap();
+        assert!(report.ready, "{:?}", report.blockers);
+        assert!(report.items.iter().any(|item| {
+            item.source_identity == "vault_link_rule:rule_path"
+                && item.status == "ready"
+                && item.details["target_path"] == "Products/Product.md"
+        }));
 
         fs::remove_dir_all(root).unwrap();
     }

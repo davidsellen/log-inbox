@@ -86,12 +86,13 @@ Do not send secrets, access tokens, complete diffs, source files, personal data,
 
 ## Codex Instructions
 
-Add this adapted section to the agent's global or repository `AGENTS.md`. Keep the URL and key in environment variables rather than committing credentials.
+Register the global Streamable HTTP server with `codex mcp add log-inbox --url http://127.0.0.1:8787/mcp --bearer-token-env-var LOG_INBOX_API_KEY`, then add this adapted section to the agent's global or repository `AGENTS.md`. Keep the key in the Codex process environment rather than committing credentials.
 
 ```md
 ## Activity reporting
 
-- For meaningful work, send an HTTP log event when work starts and one when it completes, fails, or becomes blocked.
+- For meaningful work, call the `log-inbox` MCP server's `log_activity` tool when work starts and when it completes, fails, or becomes blocked.
+- Do not use shell commands or direct HTTP as a fallback. If the MCP tool is unavailable, continue the primary task and report the missed activity briefly.
 - Before the start event, inspect the repository basename, current branch, and relevant working-tree paths. Derive short module names from the paths involved.
 - Reuse one stable `task_id` and `session_id`; increment integer `sequence` for each event.
 - Use `event_type=start` and `status=running` initially. Finish with `event_type=complete|blocked|failed` and the matching status.
@@ -100,7 +101,7 @@ Add this adapted section to the agent's global or repository `AGENTS.md`. Keep t
 - Make the terminal event daily-note-ready: include the outcome, important decision or diagnosis, validation, blocker or follow-up, and durable links without dumping raw logs.
 - Do not read, create, or append an Obsidian daily note for work logging. Send the material to Log Inbox; its consolidation workflow owns Markdown generation and review.
 - Never send secrets, tokens, source contents, full diffs, personal data, or large command output. Reporting failure must not corrupt or replace the primary task result.
-- POST JSON to `$LOG_INBOX_URL/v1/logs` using `Authorization: Bearer $LOG_INBOX_API_KEY`.
+- Pass `source`, `level`, `message`, and structured `metadata` directly to `log_activity`.
 ```
 
-The agent can issue the POST with `curl` on Unix-like shells or `Invoke-RestMethod` in PowerShell. Generate JSON with the platform's JSON serializer when values come from Git commands; avoid hand-built quoting. Bound reporting requests to a few seconds so an unavailable inbox cannot stall the primary task.
+The MCP client supplies `Authorization: Bearer <LOG_INBOX_API_KEY>` outside the workspace shell sandbox. Existing Codex sessions must restart after registration to discover the tool.

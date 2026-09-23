@@ -31,7 +31,7 @@ If logs must be accepted from another device:
 
 ## Dashboard authentication
 
-The Daily service refuses to start without an owner secret of at least 20 bytes. Login stores an Argon2 verifier and issues independently generated session and CSRF credentials. Only credential digests are stored. Sessions carry explicit scopes, have 30-minute idle and eight-hour absolute expiry, and are revoked when the owner secret changes.
+The Daily service refuses to start without an owner secret of at least 20 bytes. Login stores an Argon2 verifier and issues independently generated session and CSRF credentials. Only credential digests are stored. A valid session can rotate and recover an in-memory CSRF token after a reload; the browser never persists the owner secret or CSRF token. Sessions carry explicit scopes and are revoked when the owner secret changes. Standard sessions have a 30-minute idle and eight-hour absolute expiry; explicitly remembered device sessions last up to 30 days.
 
 Allowed Host and Origin values are exact configuration, not suffix matches. Login and logout require both; logout additionally requires the session CSRF token. Secret replacement requires the explicit rotation setting.
 

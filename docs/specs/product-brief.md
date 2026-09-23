@@ -25,11 +25,11 @@ Keep manual notes separate from automated summaries. Report model failures visib
 - Automatic Apply, raw-log fallback masquerading as a ready summary, or silent overwrites of edited drafts.
 - Browser filesystem write mode, per-task proposal staging, or operational proposal files inside the Markdown workspace after cutover.
 - Public multi-tenant hosting, multiple active workspaces/models, full editor-plugin emulation, or broad agent write access in the initial delivery.
-- MCP as ingestion, mandatory agent-specific producer clients, or productivity/surveillance metrics.
+- MCP as the sole ingestion path, broad agent read/write access, mandatory agent-specific producer clients, or productivity/surveillance metrics.
 
 ## First Usable Refocused Release
 
-- Preserve the existing HTTP ingestion envelope and useful Rust behavior.
+- Preserve the existing HTTP ingestion envelope and useful Rust behavior; offer a narrow MCP adapter over the same validated storage path.
 - Scope events, settings, mappings, decisions, and revisions to a stable workspace profile.
 - Resolve dates on the server using the workspace timezone; retain event time and receipt time separately.
 - Generate validated structured workstreams, with explicit evidence coverage and no automatic raw fallback.

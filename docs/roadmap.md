@@ -131,6 +131,7 @@ M0 is delivered as three behavior-preserving review slices: **M0a Contracts**, *
 - [x] **M0b:** Add representative golden event/day fixtures and characterize useful existing behavior.
 - [x] Add formatting/Clippy checks and a Chromium/Firefox browser test harness; record actual results instead of assuming the current suite passes.
 - [x] **M0c:** Add versioned migrations, consistent backup/restore verification, an idempotent migration journal, stable workspace identity, and the authentication/authorization foundation.
+- [x] Expose authenticated agent ingestion through one bounded MCP `log_activity` tool without restoring legacy read, review, proposal, or Apply tools.
 
 Exit gate: contracts and fixtures are reviewable, the backup can be restored, and no new unauthenticated writable exposure has been introduced.
 

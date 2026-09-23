@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+cd "$repo_root"
+
 require_command() {
   command -v "$1" >/dev/null 2>&1 || {
     printf 'required command is missing: %s\n' "$1" >&2
@@ -8,28 +12,35 @@ require_command() {
   }
 }
 
-for command_name in curl docker jq mktemp sha256sum; do
+for command_name in chown curl docker jq mktemp sha256sum stat; do
   require_command "$command_name"
 done
 
 smoke_root=$(mktemp -d "${TMPDIR:-/tmp}/log-inbox-compose-smoke.XXXXXX")
 project="log-inbox-smoke-$$"
-export LOG_INBOX_SMOKE_UID="$(id -u)"
-export LOG_INBOX_SMOKE_GID="$(id -g)"
+export LOG_INBOX_SMOKE_UID="${LOG_INBOX_SMOKE_UID:-$(stat -c %u "$repo_root")}"
+export LOG_INBOX_SMOKE_GID="${LOG_INBOX_SMOKE_GID:-$(stat -c %g "$repo_root")}"
 export LOG_INBOX_SMOKE_DATA_DIR="$smoke_root/data"
 export LOG_INBOX_SMOKE_WORKSPACE_DIR="$smoke_root/workspace"
 compose="docker compose -p $project -f docker-compose.smoke.yml"
 mkdir -p "$LOG_INBOX_SMOKE_DATA_DIR" "$LOG_INBOX_SMOKE_WORKSPACE_DIR/Journal"
 
 cleanup() {
+  status=$?
+  trap - EXIT INT TERM
+  if [ "$status" -ne 0 ]; then
+    $compose logs --no-color >&2 || true
+  fi
   $compose down --volumes --remove-orphans >/dev/null 2>&1 || true
   rm -rf "$smoke_root"
+  exit "$status"
 }
 trap cleanup EXIT INT TERM
 
 local_date=$(date -u +%F)
 target="$LOG_INBOX_SMOKE_WORKSPACE_DIR/Journal/$local_date.md"
 printf '%s\n' '---' 'title: Existing owner note' '---' '' 'Owner content before the managed block.' >"$target"
+chown -R "$LOG_INBOX_SMOKE_UID:$LOG_INBOX_SMOKE_GID" "$smoke_root"
 
 $compose up --build --detach --wait
 collector_port=$($compose port collector 8787 | awk -F: 'END {print $NF}')
@@ -40,11 +51,15 @@ daily_headers="Host: 127.0.0.1:8788"
 origin_header="Origin: http://127.0.0.1:8788"
 cookie_jar="$smoke_root/cookies"
 
-event_body=$(jq -n --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{source:"smoke/compose",level:"info",timestamp:$timestamp,message:"Completed the live Compose smoke workflow.",metadata:{task_id:"compose-smoke",event_type:"complete",status:"succeeded",repo:"log-inbox",tests:["live Compose smoke"]}}')
-curl -fsS --max-time 10 "$collector_url/v1/logs" \
+event_body=$(jq -n --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"log_activity",arguments:{source:"smoke/compose",level:"info",timestamp:$timestamp,message:"Completed the live Compose smoke workflow.",metadata:{task_id:"compose-smoke",event_type:"complete",status:"succeeded",repo:"log-inbox",tests:["live Compose smoke"]}},_meta:{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{name:"compose-smoke",version:"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}')
+curl -fsS --max-time 10 "$collector_url/mcp" \
   -H 'Authorization: Bearer smoke-ingest-key' \
   -H 'Content-Type: application/json' \
-  --data-binary "$event_body" >/dev/null
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: log_activity' \
+  --data-binary "$event_body" | jq -e '.result.structuredContent.status == "stored"' >/dev/null
 
 login=$(curl -fsS --max-time 10 "$daily_url/api/v2/auth/login" \
   -H "$daily_headers" -H "$origin_header" -H 'Content-Type: application/json' \

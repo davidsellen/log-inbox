@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderMap, Request, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
 use log_inbox_core::{
@@ -105,6 +105,8 @@ fn env_list(name: &str, fallback: &str) -> HashSet<String> {
 #[derive(Debug, Deserialize)]
 struct LoginRequest {
     owner_secret: String,
+    #[serde(default)]
+    remember_me: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +122,18 @@ struct EvidenceDecisionRequest {
     disposition: String,
     related_event_id: Option<String>,
     reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EvidenceDecisionBatchRequest {
+    expected_revision_id: String,
+    decisions: Vec<EvidenceDecisionBatchItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EvidenceDecisionBatchItem {
+    event_id: String,
+    disposition: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -345,6 +359,18 @@ async fn main() -> anyhow::Result<()> {
         workspace,
     };
     recover_daily_applies(&state);
+    match state
+        .store
+        .recover_interrupted_daily_schedule_runs(Utc::now())
+    {
+        Ok(count) if count > 0 => {
+            tracing::warn!(count, "Recovered interrupted Daily preparation runs")
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(error = %error, "Could not recover interrupted Daily preparation runs")
+        }
+    }
     let scheduler_state = state.clone();
     tokio::spawn(async move {
         run_daily_scheduler(scheduler_state).await;
@@ -443,8 +469,16 @@ fn build_router(state: AppState) -> Router {
             post(refocus_create_manual_entry),
         )
         .route(
+            "/api/v2/daily/{date}/manual/{entry_id}",
+            delete(refocus_delete_manual_entry),
+        )
+        .route(
             "/api/v2/daily/{date}/dismiss",
             post(refocus_dismiss_daily).delete(refocus_reopen_daily),
+        )
+        .route(
+            "/api/v2/daily/{date}/evidence",
+            put(refocus_decide_daily_evidence_batch),
         )
         .route(
             "/api/v2/daily/{date}/evidence/{event_id}",
@@ -498,6 +532,11 @@ async fn refocus_login(
         return Err(ApiError::unauthorized("owner secret is not valid"));
     }
     let credentials = generate_session_credentials();
+    let (idle_ttl, absolute_ttl, cookie_max_age) = if input.remember_me {
+        (Duration::days(30), Duration::days(30), 30 * 24 * 60 * 60)
+    } else {
+        (Duration::minutes(30), Duration::hours(8), 8 * 60 * 60)
+    };
     state
         .store
         .create_dashboard_session(
@@ -507,8 +546,8 @@ async fn refocus_login(
                 .map(|scope| (*scope).to_owned())
                 .collect::<Vec<_>>(),
             Utc::now(),
-            Duration::minutes(30),
-            Duration::hours(8),
+            idle_ttl,
+            absolute_ttl,
         )
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let secure = if request_uses_https(&headers) {
@@ -517,12 +556,12 @@ async fn refocus_login(
         ""
     };
     let cookie = format!(
-        "log_inbox_session={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800{secure}",
-        credentials.session_token
+        "log_inbox_session={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={cookie_max_age}{secure}",
+        credentials.session_token,
     );
     Ok((
         [(header::SET_COOKIE, cookie)],
-        Json(json!({ "csrf_token": credentials.csrf_token, "expires_in_seconds": 28800 })),
+        Json(json!({ "csrf_token": credentials.csrf_token, "expires_in_seconds": cookie_max_age })),
     )
         .into_response())
 }
@@ -531,10 +570,19 @@ async fn refocus_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let session = authorize_refocus(&state, &headers, "logs:read", false)?;
-    Ok(Json(
-        json!({ "authenticated": true, "scopes": session.scopes, "absolute_expires_at": session.absolute_expires_at }),
-    ))
+    validate_request_boundary(&state.refocus, &headers, false)?;
+    let token = session_cookie(&headers)
+        .ok_or_else(|| ApiError::unauthorized("dashboard session cookie is missing"))?;
+    let (session, csrf_token) = state
+        .store
+        .refresh_dashboard_session_csrf(token, "logs:read", Utc::now(), Duration::days(30))
+        .map_err(|_| ApiError::unauthorized("dashboard session is not authorized"))?;
+    Ok(Json(json!({
+        "authenticated": true,
+        "scopes": session.scopes,
+        "absolute_expires_at": session.absolute_expires_at,
+        "csrf_token": csrf_token
+    })))
 }
 
 async fn refocus_logout(
@@ -621,9 +669,14 @@ async fn refocus_save_automation_settings(
             input.expected_updated_at,
         )
         .map_err(|error| ApiError::conflict(error.to_string()))?;
+    let requeued_failed_runs = state
+        .store
+        .retry_all_failed_daily_schedule_runs(&profile.id, Utc::now())
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(json!({
         "settings": settings,
         "saved": true,
+        "requeued_failed_runs": requeued_failed_runs,
         "writes_markdown_automatically": false
     })))
 }
@@ -1254,7 +1307,7 @@ async fn refocus_commit_cutover(
 ) -> Result<Json<migration::CutoverCommitResult>, ApiError> {
     authorize_refocus(&state, &headers, "settings:write", true)?;
     let (profile, workspace) = active_refocus_context(&state)?;
-    migration::commit_cutover(
+    let mut result = migration::commit_cutover(
         &state.store,
         &profile,
         &workspace,
@@ -1262,8 +1315,16 @@ async fn refocus_commit_cutover(
         &state.legacy_support_files,
         &request,
     )
-    .map(Json)
-    .map_err(|error| ApiError::conflict(error.to_string()))
+    .map_err(|error| ApiError::conflict(error.to_string()))?;
+    result.retried_preparation_runs = state
+        .store
+        .retry_failed_daily_schedule_runs(
+            &profile.id,
+            "review and complete the legacy-data migration in Settings before changing a Daily candidate or applying Markdown",
+            Utc::now(),
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(result))
 }
 
 async fn refocus_preview_workspace_settings(
@@ -2080,23 +2141,27 @@ fn daily_overview_status(
 ) -> &'static str {
     if apply.is_some_and(|operation| operation.state != "finalized") {
         "apply_attention"
+    } else if apply.is_some_and(|operation| operation.state == "finalized")
+        || day.is_some_and(|day| day.review_status == "applied")
+    {
+        if update_available {
+            "update_available"
+        } else {
+            "applied"
+        }
+    } else if day.is_some_and(|day| day.review_status == "dismissed") {
+        "dismissed"
+    } else if update_available {
+        "update_available"
+    } else if revision.is_some() {
+        "in_review"
     } else if day.is_some_and(|day| day.generation_status == "failed")
         || schedule_run.is_some_and(|run| run.state == "failed")
     {
         "generation_failed"
-    } else if update_available {
-        "update_available"
-    } else if apply.is_some_and(|operation| operation.state == "finalized")
-        || day.is_some_and(|day| day.review_status == "applied")
-    {
-        "applied"
-    } else if day.is_some_and(|day| day.review_status == "dismissed") {
-        "dismissed"
     } else if day.is_some_and(|day| matches!(day.generation_status.as_str(), "queued" | "running"))
     {
         "generating"
-    } else if revision.is_some() {
-        "in_review"
     } else if has_automated_input
         && date < today
         && !schedule_run.is_some_and(|run| matches!(run.state.as_str(), "pending" | "claimed"))
@@ -3001,6 +3066,22 @@ async fn refocus_create_manual_entry(
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
+async fn refocus_delete_manual_entry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((date, entry_id)): AxumPath<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    authorize_refocus(&state, &headers, "review:write", true)?;
+    let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let (profile, _) = active_refocus_context(&state)?;
+    state
+        .store
+        .delete_manual_daily_entry(&profile.id, local_date, &entry_id)
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn refocus_generate_daily(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3757,6 +3838,31 @@ async fn refocus_decide_daily_evidence(
     Ok(Json(evidence))
 }
 
+async fn refocus_decide_daily_evidence_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(date): AxumPath<String>,
+    Json(input): Json<EvidenceDecisionBatchRequest>,
+) -> Result<Json<Vec<log_inbox_core::models::SnapshotEvidence>>, ApiError> {
+    authorize_refocus(&state, &headers, "review:write", true)?;
+    require_cutover_for_daily_mutation(&state)?;
+    let snapshot = current_snapshot_for_review(&state, &date, &input.expected_revision_id)?;
+    let decisions = input
+        .decisions
+        .into_iter()
+        .map(|decision| (decision.event_id, decision.disposition))
+        .collect::<Vec<_>>();
+    state
+        .store
+        .decide_snapshot_evidence_batch(&snapshot.id, &decisions, "owner")
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let evidence = state
+        .store
+        .snapshot_evidence(&snapshot.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(evidence))
+}
+
 async fn refocus_reopen_daily_evidence(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -4154,7 +4260,7 @@ async fn reconcile_daily_schedule(state: &AppState, now: DateTime<Utc>) -> Resul
                 .store
                 .finish_daily_schedule_run(&profile.id, local_date, claim_token, None, Utc::now())
                 .map_err(|error| ApiError::internal(error.to_string()))?;
-            continue;
+            return Ok(());
         }
         state
             .store
@@ -4201,11 +4307,17 @@ async fn reconcile_daily_schedule(state: &AppState, now: DateTime<Utc>) -> Resul
                     .map_err(|store_error| ApiError::internal(store_error.to_string()))?;
             }
         }
+        // Process at most one claimed day per reconciliation. This keeps the UI and
+        // model workload aligned around one terminal result before another day starts.
+        return Ok(());
     }
     Ok(())
 }
 
 fn bounded_schedule_error(message: &str) -> String {
+    if message.contains("LLM daily draft did not match the structured schema") {
+        return "The local model returned an invalid Daily draft. Nothing was written; retry generation. If it repeats, check the configured model or disable automatic preparation until the model is corrected.".to_owned();
+    }
     let sanitized = message
         .chars()
         .map(|character| {
@@ -4245,7 +4357,9 @@ fn authorize_refocus(
     }
     state
         .store
-        .authenticate_dashboard_session(token, csrf, scope, Utc::now(), Duration::minutes(30))
+        // The absolute expiry and cookie lifetime still enforce the selected session policy;
+        // this refresh window must cover remembered sessions after an idle period.
+        .authenticate_dashboard_session(token, csrf, scope, Utc::now(), Duration::days(30))
         .map_err(|_| ApiError::unauthorized("dashboard session is not authorized"))
 }
 
@@ -4571,6 +4685,66 @@ mod knowledge_destination_tests {
         assert_eq!(
             route_status(refocused, "GET", "/api/knowledge", "").await,
             StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn login_can_issue_a_thirty_day_device_session() {
+        let state = test_state();
+        state
+            .store
+            .set_owner_secret_hash(&hash_owner_secret("owner-secret-for-tests").unwrap())
+            .unwrap();
+        let app = build_router(state);
+        let response = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/auth/login",
+            json!({"owner_secret": "owner-secret-for-tests", "remember_me": true}),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get(header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("Max-Age=2592000")
+        );
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let login_body = response_json(response).await;
+        assert_eq!(login_body["expires_in_seconds"], 2_592_000);
+        let restored = json_response(
+            app,
+            "GET",
+            "/api/v2/auth/session",
+            Value::Null,
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(restored.status(), StatusCode::OK);
+        let restored_body = response_json(restored).await;
+        assert_eq!(restored_body["authenticated"], true);
+        assert_ne!(restored_body["csrf_token"], login_body["csrf_token"]);
+        assert!(
+            restored_body["csrf_token"]
+                .as_str()
+                .unwrap()
+                .starts_with("csrf_")
         );
     }
 

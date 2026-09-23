@@ -4,17 +4,17 @@ Status: active Daily interface.
 
 All routes use exact configured Host/Origin boundaries. Error responses have `{ "error": "..." }`.
 
-The server exposes only the authenticated v2 Daily/settings/migration routes, health endpoint, and static root assets. Removed browser-vault, proposal/consolidation, and `/mcp` routes have no runtime aliases.
+The Daily server exposes only the authenticated v2 Daily/settings/migration routes, health endpoint, and static root assets. Removed browser-vault, proposal/consolidation, and Daily-service `/mcp` routes have no runtime aliases. The separate collector exposes the ingestion-only MCP endpoint.
 
 ## Authentication
 
 ### `POST /api/v2/auth/login`
 
-Body: `{ "owner_secret": "..." }`. Requires an allowed Host and Origin. Returns an `HttpOnly`, `SameSite=Strict` session cookie plus an in-memory CSRF token. The cookie is `Secure` when the validated login request uses an HTTPS origin, which keeps explicitly allowed HTTP and HTTPS deployments independent.
+Body: `{ "owner_secret": "...", "remember_me": true|false }`. Requires an allowed Host and Origin. Returns an `HttpOnly`, `SameSite=Strict` session cookie plus an in-memory CSRF token. Remembered sessions last up to 30 days; other sessions last up to eight hours. The cookie is `Secure` when the validated login request uses an HTTPS origin, which keeps explicitly allowed HTTP and HTTPS deployments independent.
 
 ### `GET /api/v2/auth/session`
 
-Requires the session cookie and `logs:read`. Returns the granted scopes and absolute expiry.
+Requires the session cookie and `logs:read`. Returns the granted scopes, absolute expiry, and a freshly rotated CSRF token so a reload can restore mutation access without retaining the owner secret or CSRF token in persistent browser storage.
 
 ### `POST /api/v2/auth/logout`
 

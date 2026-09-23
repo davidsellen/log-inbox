@@ -4,8 +4,8 @@ Docker Compose runs the local stack.
 
 ## Services
 
-- `collector` binds to `127.0.0.1:8787` by default, accepts authenticated events, and writes only to the shared app-data volume.
-- `mcp` is the historical service name for the Daily web service. It binds to `127.0.0.1:8788`, reads shared app data, and mounts exactly one Markdown workspace at `LOG_INBOX_WORKSPACE_DIR`. It currently exposes the dashboard and v2 HTTP API, not an MCP route.
+- `collector` binds to `127.0.0.1:8787` by default, accepts authenticated HTTP events and MCP `log_activity` calls, and writes only to the shared app-data volume.
+- `mcp` is the historical service name for the Daily web service. It binds to `127.0.0.1:8788`, reads shared app data, and mounts exactly one Markdown workspace at `LOG_INBOX_WORKSPACE_DIR`. It exposes the dashboard and v2 HTTP API; the actual ingestion-only MCP route is served by the collector on port 8787.
 - `ollama` is private to the Compose network and stores models in `ollama-data`.
 - `ollama-pull` downloads the configured model before the Daily service starts.
 

@@ -35,4 +35,4 @@ trusted producers --HTTP ingest--> collector --SQLite--> Daily service/dashboard
 
 ## Deployment boundary
 
-The ordinary dashboard container receives only the shared app-data volume and one read/write Markdown workspace mount. Legacy proposal/context mounts are available solely through the reviewed migration override. The current release has no MCP route or general knowledge browser.
+The ordinary dashboard container receives only the shared app-data volume and one read/write Markdown workspace mount. Legacy proposal/context mounts are available solely through the reviewed migration override. The collector exposes only the authenticated ingestion MCP tool; there is no general MCP knowledge browser or MCP Markdown writer.
