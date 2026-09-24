@@ -20,7 +20,17 @@ The tool is additive, non-destructive, non-idempotent, and closed-world. Agents 
 
 The removed legacy MCP surface included log browsing, review mutation, proposal staging, and Markdown Apply operations. None are restored. Review, generation, and Apply remain behind the authenticated Daily dashboard and its reviewed-revision contract.
 
-## Future interface
+## Future read-only context interface
+
+The next MCP expansion, if the M4 pilot justifies it, is a separate read-only connection named `log-inbox-context`. It is intentionally distinct from this collector endpoint: `log_activity` credentials remain write-only, and context credentials cannot ingest events or mutate Daily.
+
+The endpoint is disabled unless a dedicated context-read credential is configured in the dashboard service. It reuses the reviewed workspace binding and enabled reference folders. Agents may search eligible note titles, aliases and relative paths and read bounded excerpts with source digests; every request rechecks path containment, exclusions, file eligibility and workspace identity. Returned Markdown is untrusted reference data, not executable instructions.
+
+The interface must not provide full-vault browsing, arbitrary file reads, generated Daily blocks, recursive link following, automatic generation, Markdown writes, or knowledge-note promotion. Ambiguous identity matches remain ambiguous. Markdown remains authoritative; AI-generated knowledge requires a later proposal/review/apply contract.
+
+Required evidence before enabling it: one real product/two-module vertical slice, separate-credential tests, path and exclusion tests, bounded UTF-8 excerpts, changed/deleted-note handling, concurrent ingestion/generation checks, and measured usefulness versus setup effort.
+
+## Future write boundary
 
 M5 may add structured, bounded generation and inspection tools for explicitly tested clients. A future Markdown write tool must additionally require:
 

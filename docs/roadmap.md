@@ -1,6 +1,6 @@
 # Daily Engineering Knowledge Roadmap
 
-Status: usable refocused release; personal-pilot validation active. Updated 2026-09-10. Initial baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
+Status: usable refocused release; personal-pilot validation active. Updated 2026-09-24. Initial baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
 
 This roadmap defines the target direction, delivered foundation, and remaining delivery order. The [README](../README.md) and runtime specs describe the active Daily release; milestone checkboxes record implemented and pending work.
 
@@ -11,7 +11,7 @@ Turn selected engineering activity into a concise, evidence-linked daily record:
 Keep Log Inbox a single-owner, self-hosted HTTP collector, dashboard, scheduler, MCP interface, and reviewed Markdown writer. It is not a vault manager, Notion clone, generic agent-memory platform, or developer productivity tracker.
 
 - **Daily is the product:** date navigation, structured drafts, evidence review, omissions, preview, and Apply.
-- **Knowledge is optional context:** selected source collections and canonical mappings, not a prerequisite for a useful draft.
+- **Reference context is optional shared context:** human-maintained Markdown product/module notes can ground Daily drafts and, later, approved agent reads. It is not a prerequisite for a useful draft and is not an autonomous memory store.
 - **Settings configures the service:** workspace, dates, automation, model connection, retention, security, and integration.
 
 ### Current delivery: make Daily understandable
@@ -26,13 +26,33 @@ Use bounded intake receipt aggregates and content-free timing diagnostics. The o
 
 The service operates on a workspace available to its Docker host. Signing in from another device does not make that device's local folder available. Synchronization, if needed, remains an explicitly configured external responsibility.
 
+## Recall and navigation delivery
+
+Keep Daily quiet: one date toolbar and Search history, without a recent-day list or permanent sidebar.
+
+- [x] Calendar previous/next, Today, date picker and browser history without a page refresh. Removed the recent-day strip after owner feedback; retained-history search remains the path for finding past work.
+- [x] Full-page Settings with General, Markdown destination and Preparation & retention sections; independent saves, retained edits across sections, and return to the same Daily context. Optional diagnostics stay collapsed instead of expanding a configuration popup.
+- [x] Single-column Daily with one date toolbar, brand navigation, grouped draft/recovery/save controls and compact manual notes. The date heading and grouped controls replace the day strip. Settings retains changed-value saves and optional maintenance disclosures.
+- [x] Removed the recent-day count control and scrolling JavaScript. Existing backend preferences remain API-compatible; no retention or scheduling changes.
+- [x] Model-independent, submitted literal-text search across retained manual notes, activity and readable current drafts. Search is not restricted by the overview lookback. Results show date, source and excerpt, open the exact item, and preserve the query/results when returning.
+- [x] Bounded results and retention disclosure; no persisted content index, Markdown crawl, metadata search or superseded-revision search. Search queries stay out of the browser address bar and persistent browser storage.
+- [ ] Complete a real-user walkthrough: find an older PR, inspect two matches, return to Today during generation, and record observed confusion. Expert and simulated-user reviews are not substitutes for this evidence.
+- [ ] Verify search latency alongside real deployment ingestion/generation. The opt-in synthetic `history_search_timing_with_concurrent_writer` test covers 50,000 events and 180 frozen dates, including concurrent ingestion; it does not prove production performance.
+
+Next, only after retrieval proves useful:
+
+- [ ] **Ask your log**, experimental and disabled by default in Settings. When enabled, expose Ask inside search, not as another permanent tab. Answers must cite accessible source items, disclose missing/expired history, remain read-only, and leave ordinary search usable when the model fails. Review provider consent, source-data boundaries, latency and answer grounding before shipping. Do not expose a nonfunctional flag before the feature exists.
+- [ ] **Saved daily Markdown search** for longer-term recall, limited to the configured Daily scope, with safe indexing, external-edit detection and deletion/exclusion invalidation. No general vault browser.
+
+Navigation/search completion does not satisfy Daily generation reliability or the ten-active-day pilot gate.
+
 ## Scope and Defaults
 
 - One active workspace and one active LLM connection per instance.
 - Generic folder-based Markdown; no editor-opening integration or required folder names.
 - Relative Markdown links as the portable baseline, with detected/configurable wikilink style and explicit override.
 - One day aggregate and one current proposal candidate per day, with immutable revisions; no per-task proposal worker after cutover.
-- Today opens by default. Show date navigation, recent statuses, and past days with eligible unresolved evidence. Do not count empty calendar days as missed work.
+- Today opens by default. Show date navigation and selected-day status; use history search to find retained past work. Do not count empty calendar days as missed work.
 - Manual entries remain separate under My notes; disclose redaction/normalization and never silently rewrite authored prose with the model.
 - Render Outcome, Decision, Trade-off, Validation, Blocker, and Follow-up only when supported. Keep useful work-item, PR, commit, and validation references in Markdown; keep raw metadata in app data.
 - Prefer one canonical subject in a heading and optional categorized Related links. Unmapped subjects may remain plain text.
@@ -174,7 +194,7 @@ Exit gate: recovery, idempotency, preserved-content, authorization and containme
 ### M3 — Daily Habit, Catch-up, and Expiry
 
 - [x] Add previous-day generation at 00:15, editable time/timezone, restart catch-up and bounded background work.
-- [x] Show recent statuses, meaningful missed-day counts, late-event updates and evidence-expiry warnings.
+- [x] Show selected-day status, late-event updates and evidence-expiry warnings. Recent-list counts were removed from the dashboard after owner feedback.
 - [x] Preserve edited candidates on new evidence; implement dismiss/reopen and retention-safe revisions/amendments.
 - [x] Coordinate cleanup across raw data, handled bodies, indexes, audit data and recovery copies.
 - [ ] Run a ten-active-day personal pilot using the [pilot guide](pilot.md); record correctness, review burden and operational problems.
@@ -182,6 +202,8 @@ Exit gate: recovery, idempotency, preserved-content, authorization and containme
 Exit gate: the pilot needs no database repair or manual proposal-folder cleanup, and no loss/authorization blocker remains.
 
 ### M4 — Optional Knowledge Context
+
+M4 remains an evidence-gated context milestone, not a commitment to build a general knowledge-management product. The intended shared-brain loop is: a human maintains a product or module note; an approved agent reads bounded, cited context; the agent reports work through normal activity ingestion; Daily summarizes the reported work while treating the note as background, never as proof that work happened. Markdown remains the source of truth.
 
 - [x] Add named source collections: label, purpose, selected existing/reviewed-new roots, and exclusions.
 - [x] Keep folder search confined to collection selection and note search to templates/mappings/context; no general vault browser.
@@ -193,7 +215,11 @@ Exit gate: the pilot needs no database repair or manual proposal-folder cleanup,
   - [x] Let the owner exclude an excerpt per workstream and regenerate into a new immutable revision without changing its canonical link.
 - [ ] Evaluate drafts with versus without context. Keep Knowledge optional.
   - [x] Add an opt-in blind paired-comparison workflow with identical frozen inputs, immutable shadow drafts, categorical owner feedback, and atomic selected-arm promotion.
-  - [ ] Run representative real-model comparisons using the [pilot guide](pilot.md) and review usefulness, editing burden, latency, and configuration effort before accepting the result.
+- [ ] Run representative real-model comparisons using the [pilot guide](pilot.md) and review usefulness, editing burden, latency, and configuration effort before accepting the result.
+- [ ] Prove one vertical slice with one real product and two modules: note maintenance, exact/ambiguous identity resolution, bounded agent read, activity report, and grounded Daily review.
+- [ ] Add read-only context MCP only after the vertical slice passes. Use a separate credential and dashboard-side workspace boundary; keep collector `log_activity` write-only and unchanged.
+- [ ] Expose note titles, relative paths, match reasons, bounded excerpts and source digests only. Recheck enabled-folder eligibility on every read; never expose arbitrary files, full-vault search, generated Daily blocks, or write tools.
+- [ ] Measure retrieval usefulness, setup/maintenance effort, correction rate, latency and prompt cost. A neutral or negative result keeps Knowledge optional and stops expansion.
 
 Exit gate: representative cases show improved factual usefulness or reduced editing with manageable configuration effort.
 
@@ -202,7 +228,7 @@ Exit gate: representative cases show improved factual usefulness or reduced edit
 - [ ] Add UI-managed local/custom model presets, connection/capability testing, encrypted credentials, explicit egress consent and bounded guided preferences.
 - [ ] Add versioned configuration import/export without secrets or Markdown content; review destination changes after import.
 - [ ] Add the optional first-run host setup helper for workspace validation, identity/security generation and Compose startup; no ongoing workflow features.
-- [ ] Add structured MCP generation/inspection interfaces for tested clients; separately gate approved-revision Apply with revocable `vault:write`.
+- [ ] Add structured MCP generation/inspection interfaces for tested clients only if the M4 read-only context slice proves useful; separately gate approved-revision Apply with revocable `vault:write`.
 - [ ] Run a small external pilot before expanding distribution or making demand claims.
 
 Exit gate: every additional outbound-data or write path passes its own security, compatibility and recovery acceptance tests. If a remote model is needed before M5, bring its complete privacy/security requirements forward, not only its endpoint setting.
@@ -256,6 +282,7 @@ Use ten active engineering days, comparing some drafts with a small Git/manual-n
 - General note creation/editing tools, vault trees, reorganization, graph UI, template languages, and automatic “everything needs a home” queues.
 - Multiple active workspaces/models, teams, public multi-tenant hosting, and guaranteed compatibility with every Markdown extension.
 - Broad autonomous MCP writes or automatic Apply.
+- An autonomous knowledge writer, automatic note creation, or activity-to-knowledge promotion without a separate proposal/review/apply contract.
 - New brokers/microservices as a prerequisite for modularity. Split Rust modules and UI responsibilities first.
 
 ## Design References

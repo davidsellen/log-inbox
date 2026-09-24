@@ -6,7 +6,7 @@ The pilot decides whether Log Inbox reduces the work of maintaining an accurate 
 
 1. Confirm the dashboard and collector health checks pass.
 2. In Settings, review the mounted workspace, timezone, Daily destination example, preparation schedule, and retention policy. Save only settings you intend to activate.
-3. Start without Knowledge if you want a baseline. Knowledge collections and mappings are optional and never choose the Daily destination.
+3. Start without reference context for a baseline. Reference folders and mappings are optional and never choose the Daily destination. Do not treat setup effort as value by itself.
 4. Use real engineering days. An active day is one with work you expected to appear; empty calendar days do not count.
 
 ## Daily loop
@@ -22,7 +22,7 @@ For each active day:
 3. Generate or review the current candidate. Check outcomes, decisions, trade-offs, validation, blockers, follow-up, evidence coverage, and canonical links.
 4. Correct structured facts or explicitly omit irrelevant evidence. Regeneration never silently replaces an edited candidate.
 5. Review the exact destination and managed-block diff, then Apply. Nothing writes Markdown before this confirmation.
-6. If a prior day was missed, select it from Recent days and use the same loop. Scheduled preparation may create a review candidate, but never auto-Applies it.
+6. If a prior day was missed, use the date picker, Previous/Next, or Search history and use the same loop. Scheduled preparation may create a review candidate, but never auto-Applies it.
 
 ## Ten-day worksheet
 
@@ -34,11 +34,11 @@ Keep this outside the Markdown workspace if you do not want pilot administration
 
 Stop and treat the pilot as blocked if there is data loss, an unauthorized write, a silent overwrite, silently discarded evidence, or a need for database/proposal-folder repair. Ordinary wording edits or a model failure are findings, not reasons to hide the day.
 
-## Knowledge comparison
+## Reference-context comparison
 
-On representative current, unedited candidates that contain matched Knowledge notes, choose **Compare Knowledge**. The two drafts use the same frozen evidence, model, and generation contract; their assignment stays hidden until you choose. Record which is more useful, which needs less editing, and the arm you want to continue with. The selected arm becomes a new immutable candidate and still requires the normal Apply review.
+On representative current, unedited candidates that contain matched reference notes, choose **Compare Knowledge**. The two drafts use the same frozen evidence, model, and generation contract; their assignment stays hidden until you choose. Record which is more useful, which needs less editing, and the arm you want to continue with. The selected arm becomes a new immutable candidate and still requires the normal Apply review.
 
-Use several different work types rather than repeating one repository/task shape. At the end, review whether Knowledge improved factual usefulness or reduced editing often enough to justify its configuration effort and latency. Add local FTS only if concrete missed-context cases show exact mappings and bounded retrieval are insufficient.
+Use several different work types rather than repeating one repository/task shape. At the end, review whether reference context improved factual usefulness or reduced editing often enough to justify its configuration effort and latency. For the future shared-brain slice, test one product and two modules end to end: a human-maintained note, an approved bounded agent read, a normal activity report, and a Daily draft that discloses what context it used. Add local FTS only if concrete missed-context cases show exact mappings and bounded retrieval are insufficient.
 
 ## Exit review
 

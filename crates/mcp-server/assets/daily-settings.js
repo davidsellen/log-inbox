@@ -1,13 +1,8 @@
-import { $, el, action } from "./daily-helpers.js";
+import { $, el, action, isPlainLinkClick } from "./daily-helpers.js";
 // Settings owns destination, automation, and migration forms and requests.
 export function createSettings({
   app,
   api,
-  notice,
-  openDialog,
-  closeDialog,
-  rememberDialogFields,
-  dialogHasChanges,
   selectDay,
   selectView,
   generate,
@@ -19,7 +14,102 @@ export function createSettings({
     automation: null,
     settingsPreview: null,
     migration: null,
+    initialized: false,
+    saving: false,
   };
+  const forms = {
+    destination: "settings-form",
+    preparation: "automation-box",
+  };
+  const baselines = new Map();
+  function values(section) {
+    return JSON.stringify(
+      [...$(forms[section]).querySelectorAll("input,textarea,select")].map(
+        (input) => [input.id, input.value, input.checked],
+      ),
+    );
+  }
+  function dirty(section) {
+    return Boolean(
+      forms[section] &&
+      state.initialized &&
+      baselines.get(section) !== values(section),
+    );
+  }
+  function updateDirtyLabels() {
+    $("reference-settings").href =
+      `?date=${encodeURIComponent(app.date)}&view=knowledge`;
+    for (const link of document.querySelectorAll("[data-settings-link]")) {
+      if (!link.dataset.label) link.dataset.label = link.textContent;
+      const section = link.dataset.settingsLink;
+      link.textContent = `${link.dataset.label}${dirty(section) ? " · Unsaved" : ""}`;
+      $("settings-section-select").querySelector(
+        `option[value="${section}"]`,
+      ).textContent = link.textContent;
+      link.href = `?date=${encodeURIComponent(app.date)}&view=settings&section=${section}`;
+    }
+    updateSaveButtons();
+  }
+  function updateSaveButtons() {
+    const allowed = !!app.csrf && !state.saving;
+    $("save-automation").disabled =
+      !allowed ||
+      (!dirty("preparation") && !!state.automation?.saved) ||
+      !$("automation-box").checkValidity();
+    $("save-settings").disabled =
+      !allowed ||
+      !state.settingsPreview ||
+      (!dirty("destination") && !!state.workspaceSettings?.active_profile);
+  }
+  function markSaved(section) {
+    baselines.set(section, values(section));
+    updateDirtyLabels();
+  }
+  function pageNotice(message, error = false) {
+    const node = $("settings-page-notice");
+    node.textContent = message;
+    node.hidden = !message;
+    node.className = `notice${error ? " error" : ""}`;
+  }
+  async function saving(form, task) {
+    if (state.saving || !app.csrf) return;
+    state.saving = true;
+    const opener = document.activeElement;
+    $(form).inert = true;
+    try {
+      await task();
+    } finally {
+      state.saving = false;
+      $(form).inert = false;
+      updateSaveButtons();
+      if (
+        document.activeElement === document.body ||
+        $(form).contains(document.activeElement)
+      ) {
+        const target =
+          !opener.disabled && opener.isConnected && !opener.closest("[hidden]")
+            ? opener
+            : $(form).querySelector('[role="status"]');
+        if (target) {
+          if (target !== opener) target.tabIndex = -1;
+          target.focus({ preventScroll: true });
+        }
+      }
+    }
+  }
+  function showSection(section) {
+    section = forms[section] ? section : "general";
+    app.settingsSection = section;
+    for (const panel of document.querySelectorAll("[data-settings-section]"))
+      panel.hidden = panel.dataset.settingsSection !== section;
+    for (const link of document.querySelectorAll("[data-settings-link]")) {
+      if (link.dataset.settingsLink === section)
+        link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
+    }
+    $("settings-section-select").value = section;
+    updateDirtyLabels();
+  }
   async function loadWorkspaceSettings() {
     state.workspaceSettings = await api("/api/v2/settings/workspace");
   }
@@ -127,14 +217,27 @@ export function createSettings({
           el(
             "div",
             "subtle",
-            "Preparation is currently running; refresh this dialog in a moment.",
+            "Preparation is currently running. Open the day to follow its progress.",
           ),
         );
       runs.append(row);
     }
   }
 
-  function openSettings() {
+  function refreshAccess() {
+    $("settings-readonly").hidden = !!app.csrf;
+    for (const form of Object.values(forms))
+      for (const control of $(form).querySelectorAll(
+        "input,select,textarea,button",
+      ))
+        control.disabled = !app.csrf;
+    $("save-settings").disabled = !app.csrf || !state.settingsPreview;
+    $("commit-migration").disabled = !app.csrf || !state.migration?.ready;
+    updateSaveButtons();
+  }
+  function prepare() {
+    refreshAccess();
+    if (state.initialized) return;
     const profile = state.workspaceSettings?.active_profile;
     $("workspace-path").textContent =
       `Mounted workspace: ${state.workspaceSettings?.workspace_path || "Unavailable"}`;
@@ -154,7 +257,24 @@ export function createSettings({
     renderAutomationSettings();
     enhanceAutomationRuns();
     renderMigration();
-    openDialog($("settings-dialog"));
+    $("preparation-unavailable").hidden = !!profile;
+    refreshAccess();
+    pageNotice(
+      !profile ? "Choose and save a Markdown destination to get started." : "",
+    );
+    state.initialized = true;
+    for (const section of Object.keys(forms)) markSaved(section);
+  }
+
+  function openSettings(section) {
+    const ready =
+      state.workspaceSettings?.active_profile &&
+      state.workspaceSettings?.binding_matches;
+    return selectView(
+      "settings",
+      true,
+      typeof section === "string" ? section : ready ? "general" : "destination",
+    );
   }
 
   async function loadMigration() {
@@ -170,8 +290,12 @@ export function createSettings({
     }
     const migration = state.migration;
     const completed = migration.cutover_status === "completed";
+    $("migration-label").textContent = completed
+      ? "Maintenance"
+      : "Older data migration";
     box.hidden = !completed && !migration.items.length;
     if (box.hidden) return;
+    if (!completed) box.open = true;
     $("migration-summary").textContent = completed
       ? `Migration completed (${migration.completed_operation_id}). Preserved items remain available in app storage.`
       : `${migration.items.length} older item${migration.items.length === 1 ? "" : "s"} found. ${migration.ready ? "Ready for reviewed migration." : "Resolve the blockers below before migration."}`;
@@ -204,13 +328,18 @@ export function createSettings({
           report_digest: migration.report_digest,
         }),
       });
-      await Promise.all([loadMigration(), loadAutomation()]);
-      renderAutomationSettings();
-      notice(
+      await loadMigration();
+      if (!dirty("preparation")) {
+        await loadAutomation();
+        renderAutomationSettings();
+        enhanceAutomationRuns();
+        markSaved("preparation");
+      }
+      pageNotice(
         `Migration completed. ${result.imported_items} items preserved or imported; ${result.cleaned_files} unchanged pending files cleaned. ${result.retried_preparation_runs || 0} blocked preparation run${result.retried_preparation_runs === 1 ? " was" : "s were"} queued again. Backup: ${result.backup_file}.`,
       );
     } catch (error) {
-      notice(error.message, true);
+      pageNotice(error.message, true);
       $("commit-migration").disabled = false;
     }
   }
@@ -228,15 +357,18 @@ export function createSettings({
   async function previewSettings(event) {
     event.preventDefault();
     try {
-      state.settingsPreview = await api("/api/v2/settings/workspace/preview", {
+      const draft = workspaceDraft();
+      const preview = await api("/api/v2/settings/workspace/preview", {
         method: "POST",
-        body: JSON.stringify(workspaceDraft()),
+        body: JSON.stringify(draft),
       });
+      if (JSON.stringify(draft) !== JSON.stringify(workspaceDraft())) return;
+      state.settingsPreview = preview;
       $("settings-preview").textContent =
         `Example: ${state.settingsPreview.destination_example}. Nothing has been saved or created.`;
       $("settings-preview").className = "notice";
       $("settings-preview").hidden = false;
-      $("save-settings").disabled = false;
+      updateSaveButtons();
     } catch (error) {
       $("settings-preview").textContent = error.message;
       $("settings-preview").className = "notice error";
@@ -258,20 +390,27 @@ export function createSettings({
           expected_updated_at: active?.updated_at || null,
         }),
       });
-      rememberDialogFields($("settings-dialog"), (id) =>
-        id.startsWith("setting-"),
-      );
-      if (!dialogHasChanges($("settings-dialog")))
-        closeDialog($("settings-dialog"), true);
+      markSaved("destination");
       await loadWorkspaceSettings();
       await loadMigration();
+      if (!active) {
+        await loadAutomation();
+        renderAutomationSettings();
+        enhanceAutomationRuns();
+        markSaved("preparation");
+        $("preparation-unavailable").hidden = true;
+      }
       if (!app.date) {
         app.overview = await api("/api/v2/daily/overview");
         app.date = app.overview.today;
         $("day").value = app.date;
       }
       if (!hasPendingChanges()) await loadDay();
-      notice(
+      $("settings-preview").textContent =
+        "Destination saved. Existing days keep their previous destinations.";
+      $("save-settings").disabled = true;
+      state.settingsPreview = null;
+      pageNotice(
         "Daily settings saved. Existing days keep their previous destinations.",
       );
     } catch (error) {
@@ -315,10 +454,7 @@ export function createSettings({
       await loadAutomation();
       renderAutomationSettings();
       enhanceAutomationRuns();
-      rememberDialogFields(
-        $("settings-dialog"),
-        (id) => !id.startsWith("setting-"),
-      );
+      markSaved("preparation");
       if (result.requeued_failed_runs)
         status.textContent = `Saved. Requeued ${result.requeued_failed_runs} failed preparation run${result.requeued_failed_runs === 1 ? "" : "s"}; they will retry automatically. No Markdown is written automatically.`;
       if (!hasPendingChanges()) await loadDay();
@@ -332,16 +468,44 @@ export function createSettings({
   }
   function bindEvents() {
     $("settings").addEventListener("click", openSettings);
-    $("close-settings").addEventListener("click", () =>
-      closeDialog($("settings-dialog")),
+    $("close-settings").addEventListener("click", () => selectView("daily"));
+    $("back-to-settings").addEventListener("click", () =>
+      openSettings("general"),
     );
+    for (const link of document.querySelectorAll("[data-settings-link]"))
+      link.addEventListener("click", (event) => {
+        if (!isPlainLinkClick(event)) return;
+        event.preventDefault();
+        selectView("settings", true, link.dataset.settingsLink);
+      });
+    $("settings-section-select").addEventListener("change", (event) =>
+      selectView("settings", true, event.target.value),
+    );
+    $("settings-page").addEventListener("input", updateDirtyLabels);
+    $("settings-page").addEventListener("change", updateDirtyLabels);
+    const invalidatePreview = () => {
+      state.settingsPreview = null;
+      $("save-settings").disabled = true;
+      $("settings-preview").hidden = true;
+    };
+    $("settings-form").addEventListener("input", invalidatePreview);
+    $("settings-form").addEventListener("change", invalidatePreview);
     $("settings-form").addEventListener("submit", previewSettings);
-    $("save-settings").addEventListener("click", saveSettings);
-    $("save-automation").addEventListener("click", saveAutomation);
-    $("commit-migration").addEventListener("click", commitMigration);
-    $("reference-settings").addEventListener("click", () =>
-      selectView("knowledge"),
+    $("save-settings").addEventListener("click", () =>
+      saving("settings-form", saveSettings),
     );
+    $("automation-box").addEventListener("submit", (event) => {
+      event.preventDefault();
+      saving("automation-box", saveAutomation);
+    });
+    $("commit-migration").addEventListener("click", () =>
+      saving("migration-box", commitMigration),
+    );
+    $("reference-settings").addEventListener("click", (event) => {
+      if (!isPlainLinkClick(event)) return;
+      event.preventDefault();
+      selectView("knowledge");
+    });
   }
   return {
     bindEvents,
@@ -349,6 +513,16 @@ export function createSettings({
     loadAutomation,
     loadMigration,
     openSettings,
+    prepare,
+    showSection,
+    hasChanges: () => Object.keys(forms).some(dirty),
+    pageNotice,
+    discard: () => {
+      state.initialized = false;
+    },
+    get saving() {
+      return state.saving;
+    },
     get workspaceSettings() {
       return state.workspaceSettings;
     },

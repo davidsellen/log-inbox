@@ -9,15 +9,25 @@
   <body>
     <header>
       <div class="bar">
-        <div class="brand">Log Inbox</div>
+        <a class="brand" id="home-link" href="/">Log Inbox</a>
         <div class="actions">
-          <button id="settings" hidden>Settings</button
+          <button id="settings" class="header-link" hidden>Settings</button
           ><button id="unlock" hidden>Unlock changes</button>
-          <div class="online">● Service online</div>
         </div>
       </div>
     </header>
-    <main class="shell">
+    <div
+      id="connection-warning"
+      class="connection-warning"
+      role="status"
+      hidden
+    >
+      <div class="bar">
+        <span>Connection trouble. Your edits are still here.</span>
+        <button id="retry-connection">Retry connection</button>
+      </div>
+    </div>
+    <main class="shell" id="main-shell">
       <section id="login-panel" class="card" hidden>
         <h1>Open your Daily log</h1>
         <p class="subtle">
@@ -39,179 +49,113 @@
         </form>
       </section>
       <section id="daily-app" hidden>
-        <nav class="tabs" role="tablist" aria-label="Dashboard views">
-          <button
-            id="daily-tab"
-            class="tab"
-            role="tab"
-            aria-selected="true"
-            aria-controls="daily-panel"
-          >
-            Daily</button
-          ><button
-            id="knowledge-tab"
-            class="tab"
-            role="tab"
-            aria-selected="false"
-            aria-controls="knowledge-panel"
-            hidden
-          >
-            Reference notes
-          </button>
-        </nav>
-        <section id="daily-panel" role="tabpanel" aria-labelledby="daily-tab">
-          <section id="recent" class="recent" aria-labelledby="recent-title">
+        <section id="daily-panel" aria-labelledby="day-title">
+          <div class="day-head">
             <div>
-              <div id="recent-title" class="recent-title">Recent days</div>
-              <div id="missed-summary" class="subtle"></div>
+              <h1 id="day-title">Daily</h1>
+              <div id="status" class="subtle"></div>
             </div>
-            <div id="recent-days" class="recent-days"></div>
-          </section>
+          </div>
           <nav class="date-nav" aria-label="Daily navigation">
-            <button id="previous-day" aria-label="Previous day">←</button
-            ><input id="day" type="date" aria-label="Daily log date" /><button
-              id="next-day"
-              aria-label="Next day"
-            >
-              →</button
-            ><button id="today">Today</button>
+            <div class="date-stepper">
+              <button id="previous-day" aria-label="Previous day">←</button
+              ><input id="day" type="date" aria-label="Daily log date" /><button
+                id="next-day"
+                aria-label="Next day"
+              >
+                →
+              </button>
+            </div>
+            <button id="today">Today</button>
+            <button id="search-history">Search history</button>
+            <button id="back-to-results" hidden>Back to results</button>
           </nav>
           <div id="day-load-status" class="notice" role="status" hidden>
             <span id="day-load-message"></span>
             <button id="retry-day-load" hidden>Retry loading day</button>
           </div>
-          <div class="day-head">
-            <div>
-              <h1 id="day-title">Daily</h1>
-              <div id="destination" class="destination subtle"></div>
-              <div id="status" class="subtle"></div>
-            </div>
-            <div class="actions">
-              <button id="dismiss" hidden>Dismiss</button
-              ><button id="add-note">+ Add note</button
-              ><button id="generate" class="primary">Generate candidate</button>
-            </div>
-          </div>
+
           <div id="notice" class="notice" hidden role="status"></div>
-          <div id="intake-status" class="subtle" aria-live="polite"></div>
-          <details id="intake-details" hidden>
-            <summary>Connected activity sources</summary>
-            <ul id="intake-sources"></ul>
-          </details>
-          <section id="generation-status" class="notice" role="status" hidden>
-            <span id="generation-message"></span>
-            <button id="view-generation" hidden>View running day</button>
-            <button id="cancel-generation" hidden>Cancel generation</button>
-            <button id="retry-generation" hidden>Retry preparation</button>
-            <button id="browse-activity">Browse activity</button>
-            <details id="generation-error" hidden>
-              <summary>Error details</summary>
-              <div id="generation-error-text"></div>
-            </details>
-          </section>
-          <div id="reference-recovery" class="notice" hidden>
-            <p>
-              Some reference notes are unavailable or no longer match this
-              draft. Retry using only your activity and notes, or check
-              Reference notes in Settings.
-            </p>
-            <button id="retry-without-references">
-              Retry without reference notes
-            </button>
-          </div>
-          <p id="revision-reference-mode" class="subtle" hidden>
-            Generated without reference notes · based on your activity and
-            notes.
-          </p>
-          <div class="grid">
-            <div class="stack">
-              <section class="card">
-                <div class="card-head">
-                  <h2>My notes</h2>
-                  <span class="subtle"
-                    >Your words, never rewritten by the model</span
-                  >
+          <div class="stack daily-content">
+            <section id="empty-day" class="card" hidden>
+              <h2 id="empty-day-title"></h2>
+              <p id="empty-day-message" class="subtle"></p>
+              <button id="empty-add-note">+ Add note</button>
+            </section>
+            <section class="card" id="notes-card">
+              <div class="card-head">
+                <h2>My notes</h2>
+                <button id="add-note">+ Add note</button>
+              </div>
+              <div id="manual-list"></div>
+            </section>
+            <section class="card" id="draft-card">
+              <div class="card-head">
+                <h2>Daily draft</h2>
+                <div class="actions">
+                  <button id="edit-draft" hidden>Edit draft</button>
+                  <button id="save-candidate" hidden>Save edits</button>
+                  <button id="generate" class="primary">Create draft</button>
                 </div>
-                <div id="manual-list"></div>
-              </section>
-              <section class="card">
-                <div class="card-head">
-                  <h2>Daily draft</h2>
-                  <button id="edit-draft" hidden>Edit draft</button
-                  ><button id="save-candidate" hidden>Save edits</button>
-                </div>
-                <div id="readable-draft"></div>
-                <div id="candidate"></div>
-              </section>
-              <section class="card">
-                <div class="card-head">
-                  <h2 id="activity-title">Evidence</h2>
-                  <span id="evidence-count" class="subtle"></span>
-                </div>
-                <details id="activity-details" open>
-                  <summary>
-                    Review source events and include or omit them
-                  </summary>
-                  <p class="subtle">
-                    Automated activity stays available even if draft preparation
-                    fails. Reviewing individual items is optional.
-                  </p>
-                  <div class="activity-navigation">
-                    <input
-                      id="activity-search"
-                      type="search"
-                      aria-label="Search automated activity"
-                      placeholder="Search activity or source"
-                    /><button
-                      id="activity-previous"
-                      aria-label="Previous activity"
-                    >
-                      ↑ Previous</button
-                    ><button id="activity-next" aria-label="Next activity">
-                      Next ↓</button
-                    ><span
-                      id="activity-position"
-                      class="subtle"
-                      aria-live="polite"
-                    ></span>
-                  </div>
-                  <div
-                    id="evidence"
-                    class="activity-scroll"
-                    role="region"
-                    aria-labelledby="activity-title"
-                    tabindex="0"
-                  ></div>
-                  <p id="activity-empty" class="subtle" hidden>
-                    No matching activity. Try another search.
-                  </p>
+              </div>
+              <section
+                id="generation-status"
+                class="notice"
+                role="status"
+                hidden
+              >
+                <span id="generation-message"></span>
+                <button id="view-generation" hidden>View running day</button>
+                <button id="cancel-generation" hidden>Cancel generation</button>
+                <button id="retry-generation" hidden>Retry preparation</button>
+                <button id="browse-activity">Browse activity</button>
+                <details id="generation-error" hidden>
+                  <summary>Error details</summary>
+                  <div id="generation-error-text"></div>
                 </details>
               </section>
-            </div>
-            <aside class="stack">
-              <section class="card">
-                <div class="card-head">
-                  <h2>Save or share</h2>
-                  <span id="write-status" class="subtle"
-                    >Nothing is written yet</span
-                  >
-                </div>
-                <details>
-                  <summary>Preview file</summary>
-                  <pre id="preview"></pre>
-                </details>
-                <button id="copy-draft" hidden>Copy draft</button>
-                <div class="dialog-actions">
+              <div id="reference-recovery" class="notice" hidden>
+                <p>
+                  Some reference notes are unavailable or no longer match this
+                  draft. Retry using only your activity and notes, or check
+                  Reference notes in Settings.
+                </p>
+                <button id="retry-without-references">
+                  Retry without reference notes
+                </button>
+              </div>
+              <p id="revision-reference-mode" class="subtle" hidden>
+                Generated without reference notes · based on your activity and
+                notes.
+              </p>
+              <section id="apply-attention" class="card" hidden>
+                <h2>Apply needs attention</h2>
+                <p id="apply-attention-message"></p>
+                <p id="apply-attention-detail" class="subtle"></p>
+                <button id="retry-apply">Verify and retry</button>
+              </section>
+
+              <div id="readable-draft"></div>
+              <div id="candidate"></div>
+              <details id="file-details">
+                <summary id="file-details-label">Destination</summary>
+                <div id="destination" class="destination subtle"></div>
+                <pre id="preview" hidden></pre>
+              </details>
+              <div id="draft-save" class="draft-save" hidden>
+                <span id="write-status" class="subtle"></span>
+                <div class="actions">
+                  <button id="dismiss" hidden>Dismiss</button>
+                  <button id="copy-draft" hidden>Copy draft</button>
                   <button id="review-apply" class="primary" hidden>
                     Review &amp; save
                   </button>
                 </div>
-              </section>
-              <section id="context-card" class="card" hidden>
-                <div class="card-head">
-                  <h2>Context used</h2>
-                  <span id="context-status" class="pill"></span>
-                </div>
+              </div>
+              <details id="context-card" class="draft-context" hidden>
+                <summary>
+                  Context used <span id="context-status" class="pill"></span>
+                </summary>
                 <strong id="context-kind"></strong>
                 <p id="context-message" class="subtle"></p>
                 <div id="context-list"></div>
@@ -232,39 +176,72 @@
                   only a newly regenerated revision; they never edit source
                   notes or canonical links.
                 </p>
-              </section>
-              <section id="apply-attention" class="card" hidden>
-                <h2>Apply needs attention</h2>
-                <p id="apply-attention-message"></p>
-                <p id="apply-attention-detail" class="subtle"></p>
-                <button id="retry-apply">Verify and retry</button>
-              </section>
-              <details class="card">
-                <summary>How this works</summary>
-                <p>
-                  Choose a day, add anything you did manually, then generate.
-                  Review the structured result and evidence. Saving edits
-                  creates a new revision; it does not touch your workspace.
-                </p>
+              </details>
+            </section>
+            <section class="card" id="activity-card">
+              <div class="card-head">
+                <h2 id="activity-title">Evidence</h2>
+                <span id="evidence-count" class="subtle"></span>
+              </div>
+
+              <details id="activity-details" open>
+                <summary>Review source events and include or omit them</summary>
                 <p class="subtle">
-                  Review Apply shows the exact managed block and frozen
-                  destination. Only Confirm Apply writes; content outside that
-                  block is preserved.
+                  Automated activity stays available even if draft preparation
+                  fails. Reviewing individual items is optional.
+                </p>
+                <div class="activity-navigation">
+                  <input
+                    id="activity-search"
+                    type="search"
+                    aria-label="Search automated activity"
+                    placeholder="Search activity or source"
+                  /><button
+                    id="activity-previous"
+                    aria-label="Previous activity"
+                  >
+                    ↑ Previous</button
+                  ><button id="activity-next" aria-label="Next activity">
+                    Next ↓</button
+                  ><span
+                    id="activity-position"
+                    class="subtle"
+                    aria-live="polite"
+                  ></span>
+                </div>
+                <div
+                  id="evidence"
+                  class="activity-scroll"
+                  role="region"
+                  aria-labelledby="activity-title"
+                  tabindex="0"
+                ></div>
+                <p id="activity-empty" class="subtle" hidden>
+                  No matching activity. Try another search.
                 </p>
               </details>
-            </aside>
+            </section>
+            <details class="card">
+              <summary>How this works</summary>
+              <p>
+                Choose a day, add anything you did manually, then generate.
+                Review the structured result and evidence. Saving edits creates
+                a new revision; it does not touch your workspace.
+              </p>
+              <p class="subtle">
+                Review Apply shows the exact managed block and frozen
+                destination. Only Confirm Apply writes; content outside that
+                block is preserved.
+              </p>
+            </details>
           </div>
         </section>
-        <section
-          id="knowledge-panel"
-          role="tabpanel"
-          aria-labelledby="knowledge-tab"
-          hidden
-        >
+        <section id="knowledge-panel" aria-labelledby="knowledge-title" hidden>
           <div class="knowledge-head">
             <button id="back-to-daily">← Back to Daily</button>
+            <button id="back-to-settings">Back to Settings</button>
             <div>
-              <h1>Reference notes</h1>
+              <h1 id="knowledge-title">Reference notes</h1>
               <p class="subtle">
                 Optional background for better daily drafts. Link a product or
                 project to an existing note; Daily works without this setup.
@@ -309,148 +286,274 @@
         </div>
       </form>
     </dialog>
-    <dialog id="settings-dialog">
-      <form id="settings-form" class="dialog-body">
+    <dialog
+      id="history-dialog"
+      data-readonly="true"
+      aria-labelledby="history-title"
+    >
+      <div class="dialog-body history-body">
         <div class="dialog-head">
-          <div>
-            <h2>Daily settings</h2>
-            <div id="workspace-path" class="subtle"></div>
-          </div>
-          <button type="button" id="close-settings" aria-label="Close settings">
-            Close
-          </button>
+          <h2 id="history-title">Search history</h2>
+          <button id="close-history" type="button">Close</button>
         </div>
-        <section class="settings-section">
-          <h3>Reference notes</h3>
-          <p>
-            Optional product and engineering notes that help explain your work.
-          </p>
-          <button type="button" id="reference-settings">
-            Manage reference notes
-          </button>
-        </section>
-        <section>
-          <h3>Markdown destination</h3>
-          <p>
-            Choose where reviewed Daily records go. Preview validates an
-            example; Save affects new days only and creates no files.
-          </p>
-          <label class="field"
-            >Timezone<input
-              id="setting-timezone"
+        <form id="history-form" class="history-form">
+          <label for="history-query">Find text in past work</label>
+          <div class="actions">
+            <input
+              id="history-query"
+              type="search"
+              maxlength="200"
               required
-              placeholder="Europe/Stockholm" /></label
-          ><label class="field"
-            >Daily folder<input
-              id="setting-daily-root"
-              required
-              placeholder="Work Log" /></label
-          ><label class="field"
-            >File pattern<input
-              id="setting-daily-pattern"
-              required
-              placeholder="{year}/{month_name}/Daily log {month_name} {day}.md"
-          /></label>
-          <div class="subtle">
-            Supported tokens: {year}, {month}, {month_name}, {day}, {date}.
-            Double braces produce literal braces.
+              placeholder="PR number, phrase, or error"
+            /><button type="submit">Search</button>
           </div>
-          <label class="field"
-            >Template path (optional)<input
-              id="setting-template"
-              placeholder="Templates/Daily.md" /></label
-          ><label class="field"
-            >Link style<select id="setting-link-style">
-              <option value="markdown">Markdown links</option>
-              <option value="wikilink">Wiki links</option>
-            </select></label
-          >
-          <div id="settings-preview" class="notice" hidden></div>
-          <div class="dialog-actions">
-            <button type="submit">Preview destination</button
-            ><button type="button" id="save-settings" class="primary" disabled>
-              Save destination
-            </button>
-          </div>
-        </section>
-        <section id="automation-box" class="settings-section" hidden>
-          <div>
-            <h3>Preparation and retention</h3>
-            <!-- Keep this safety statement's text node intact. -->
-            <!-- prettier-ignore -->
-            <p>Optional scheduling prepares candidates after a day ends. It never writes Markdown; you still review and Confirm Apply.</p>
-          </div>
-          <label class="check-field"
-            ><input id="automation-enabled" type="checkbox" /><span
-              ><strong>Prepare candidates automatically</strong><br /><span
-                class="subtle"
-                >Uses the saved timezone and catches up only within the window
-                below.</span
-              ></span
-            ></label
-          >
-          <div class="settings-fields">
-            <label class="field"
-              >Preparation time<input id="automation-time" type="time" /></label
-            ><label class="field"
-              >Catch-up window (days)<input
-                id="automation-catchup"
-                type="number"
-                min="1"
-                max="90" /></label
-            ><label class="field"
-              >Raw evidence retention (days)<input
-                id="retention-raw"
-                type="number"
-                min="1"
-                max="3650" /></label
-            ><label class="field"
-              >Audit retention (days)<input
-                id="retention-audit"
-                type="number"
-                min="1"
-                max="3650" /></label
-            ><label class="field"
-              >Apply recovery retention (days)<input
-                id="retention-recovery"
-                type="number"
-                min="1"
-                max="3650"
-            /></label>
-          </div>
-          <p class="subtle">
-            Saving activates these retention periods even when automatic
-            preparation is off. Raw expiry keeps snapshot IDs, digests, and
-            review decisions, but removes source messages. Manual notes, active
-            dismissals, edited candidates, and migration artifacts are
-            preserved.
-          </p>
-          <div id="automation-status" class="notice" hidden></div>
-          <div id="automation-runs" class="subtle"></div>
-          <div class="dialog-actions">
-            <button type="button" id="save-automation" class="primary">
-              Save preparation &amp; retention
-            </button>
-          </div>
-        </section>
-        <section id="migration-box" class="migration-box" hidden>
-          <h3>Bring forward older Log Inbox data</h3>
-          <p id="migration-summary"></p>
-          <p class="subtle">
-            This creates and verifies a database backup first. It imports old
-            links, ignored names, and manual logs; preserves old settings and
-            proposal bytes in app storage; and removes only unchanged, valid
-            pending proposal files. Existing Markdown notes are never changed.
-          </p>
-          <ul id="migration-messages" class="migration-list"></ul>
-          <div class="dialog-actions">
-            <button type="button" id="commit-migration" class="primary">
-              Complete migration
-            </button>
-          </div>
-        </section>
-      </form>
+        </form>
+        <p class="subtle">
+          Searches retained app history; saved Markdown files are not searched.
+          Older activity may have expired.
+        </p>
+        <p id="history-status" role="status"></p>
+        <div
+          id="history-results"
+          class="history-results"
+          aria-label="Search results"
+        ></div>
+        <button id="history-more" hidden>More results</button>
+      </div>
     </dialog>
+    <main
+      id="settings-page"
+      class="shell"
+      hidden
+      aria-labelledby="settings-title"
+    >
+      <div class="settings-head">
+        <div>
+          <h1 id="settings-title" tabindex="-1">Settings</h1>
+        </div>
+        <button type="button" id="close-settings">← Back to Daily</button>
+      </div>
+      <p id="settings-page-notice" class="notice" role="status" hidden></p>
+      <p id="settings-readonly" class="notice" hidden>
+        Reviewing settings read-only. Unlock changes to save.
+      </p>
+      <div class="settings-layout">
+        <nav id="settings-sections" aria-label="Settings sections">
+          <a
+            href="?view=settings&amp;section=general"
+            data-settings-link="general"
+            >General</a
+          >
+          <a
+            href="?view=settings&amp;section=destination"
+            data-settings-link="destination"
+            >Markdown destination</a
+          >
+          <a
+            href="?view=settings&amp;section=preparation"
+            data-settings-link="preparation"
+            >Preparation &amp; retention</a
+          >
+        </nav>
+        <label class="field settings-mobile-nav"
+          >Settings section<select id="settings-section-select">
+            <option value="general">General</option>
+            <option value="destination">Markdown destination</option>
+            <option value="preparation">Preparation &amp; retention</option>
+          </select></label
+        >
+        <div class="settings-content">
+          <section
+            data-settings-section="general"
+            class="card"
+            aria-labelledby="settings-general-title"
+          >
+            <h2 id="settings-general-title" tabindex="-1">General</h2>
+            <section class="settings-section">
+              <h3>Activity connections</h3>
+              <p class="subtle">Across all dates, not just the selected day.</p>
+              <div id="intake-status" class="subtle" aria-live="polite"></div>
+              <details id="intake-details" hidden>
+                <summary>Connected activity sources</summary>
+                <ul id="intake-sources"></ul>
+              </details>
+            </section>
+            <section class="settings-section">
+              <h3>Reference notes</h3>
+              <p>
+                Optional product and engineering notes that help explain your
+                work.
+              </p>
+              <a href="?view=knowledge" id="reference-settings">
+                Manage reference notes →
+              </a>
+            </section>
+            <details id="migration-box" class="migration-box" hidden>
+              <summary id="migration-label">Maintenance</summary>
+              <p id="migration-summary"></p>
+              <p class="subtle">
+                Creates a verified database backup, imports older app data, and
+                removes only unchanged valid pending proposal files. Existing
+                Markdown notes are never changed.
+              </p>
+              <ul id="migration-messages" class="migration-list"></ul>
+              <button type="button" id="commit-migration" class="primary">
+                Complete migration
+              </button>
+            </details>
+          </section>
+          <form
+            id="settings-form"
+            data-settings-section="destination"
+            class="card"
+            aria-labelledby="settings-destination-title"
+            hidden
+          >
+            <h2 id="settings-destination-title" tabindex="-1">
+              Markdown destination
+            </h2>
+            <details class="subtle">
+              <summary>Mounted workspace</summary>
+              <p id="workspace-path"></p>
+            </details>
+            <p>
+              Choose where reviewed Daily records go. Preview validates an
+              example; Save affects new days only and creates no files.
+            </p>
+            <label class="field"
+              >Timezone<input
+                id="setting-timezone"
+                required
+                placeholder="Europe/Stockholm" /></label
+            ><label class="field"
+              >Daily folder<input
+                id="setting-daily-root"
+                required
+                placeholder="Work Log" /></label
+            ><label class="field"
+              >File pattern<input
+                id="setting-daily-pattern"
+                required
+                placeholder="{year}/{month_name}/Daily log {month_name} {day}.md"
+            /></label>
+            <div class="subtle">
+              Supported tokens: {year}, {month}, {month_name}, {day}, {date}.
+              Double braces produce literal braces.
+            </div>
+            <label class="field"
+              >Template path (optional)<input
+                id="setting-template"
+                placeholder="Templates/Daily.md" /></label
+            ><label class="field"
+              >Link style<select id="setting-link-style">
+                <option value="markdown">Markdown links</option>
+                <option value="wikilink">Wiki links</option>
+              </select></label
+            >
+            <div
+              id="settings-preview"
+              class="notice"
+              role="status"
+              hidden
+            ></div>
+            <div class="dialog-actions">
+              <button type="submit">Preview destination</button
+              ><button
+                type="button"
+                id="save-settings"
+                class="primary"
+                disabled
+              >
+                Save destination
+              </button>
+            </div>
+          </form>
+          <section
+            data-settings-section="preparation"
+            class="card"
+            aria-labelledby="settings-preparation-title"
+            hidden
+          >
+            <h2 id="settings-preparation-title" tabindex="-1">
+              Preparation &amp; retention
+            </h2>
+            <p id="preparation-unavailable" class="notice" hidden>
+              Save a Markdown destination before configuring preparation and
+              retention.
+            </p>
+            <form id="automation-box" class="settings-section" hidden>
+              <div>
+                <!-- Keep this safety statement's text node intact. -->
+                <!-- prettier-ignore -->
+                <p>Optional scheduling prepares candidates after a day ends. It never writes Markdown; you still review and Confirm Apply.</p>
+              </div>
+              <label class="check-field"
+                ><input id="automation-enabled" type="checkbox" /><span
+                  ><strong>Prepare candidates automatically</strong><br /><span
+                    class="subtle"
+                    >Uses the saved timezone and catches up only within the
+                    window below.</span
+                  ></span
+                ></label
+              >
+              <div class="settings-fields">
+                <label class="field"
+                  >Preparation time<input
+                    id="automation-time"
+                    type="time" /></label
+                ><label class="field"
+                  >Catch-up window (days)<input
+                    id="automation-catchup"
+                    type="number"
+                    min="1"
+                    max="90" /></label
+                ><label class="field"
+                  >Raw evidence retention (days)<input
+                    id="retention-raw"
+                    type="number"
+                    min="1"
+                    max="3650" /></label
+                ><label class="field"
+                  >Audit retention (days)<input
+                    id="retention-audit"
+                    type="number"
+                    min="1"
+                    max="3650" /></label
+                ><label class="field"
+                  >Apply recovery retention (days)<input
+                    id="retention-recovery"
+                    type="number"
+                    min="1"
+                    max="3650"
+                /></label>
+              </div>
+              <p class="subtle">
+                Saving activates these retention periods even when automatic
+                preparation is off. Raw expiry keeps snapshot IDs, digests, and
+                review decisions, but removes source messages. Manual notes,
+                active dismissals, edited candidates, and migration artifacts
+                are preserved.
+              </p>
+              <div
+                id="automation-status"
+                class="notice"
+                role="status"
+                hidden
+              ></div>
+              <div class="dialog-actions">
+                <button type="submit" id="save-automation" class="primary">
+                  Save preparation &amp; retention
+                </button>
+              </div>
+              <details id="automation-history">
+                <summary>Recent preparation runs</summary>
+                <div id="automation-runs" class="subtle"></div>
+              </details>
+            </form>
+          </section>
+        </div>
+      </div>
+    </main>
     <dialog id="apply-dialog">
       <div class="dialog-body">
         <div class="dialog-head">

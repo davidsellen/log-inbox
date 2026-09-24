@@ -40,6 +40,20 @@ Requires `settings:write` and CSRF. Validates an IANA timezone, relative daily r
 
 Requires `settings:write`, CSRF, and the exact preview digest. It activates the first workspace profile or updates the active profile in place using its expected ID and timestamp, preserving the stable workspace ID. Existing days retain their frozen timezone and destination. A replaced mount or stale settings editor returns `409 Conflict` and must be reviewed again.
 
+## Dashboard navigation and history
+
+The dashboard no longer displays a recent-day list or exposes its count setting. The existing dashboard-preference endpoint and overview limit remain supported for API compatibility; no stored preferences are deleted.
+
+`GET /api/v2/settings/dashboard` requires `logs:read` and an active reviewed workspace. Returns `{ "recent_days": 10 }` by default. `PUT` accepts the same shape with 7, 10, 14 or 30, requires `settings:write` and CSRF, and saves only workspace-scoped app preferences. Invalid values return 400; no scheduling, retention or Markdown behaviour changes. Explicit saves use last-write-wins semantics for this display-only setting.
+
+`GET /api/v2/history/search?q=...&cursor=...` requires `logs:read`. The trimmed literal query must contain 1–200 characters. Matching uses Unicode lowercasing without stemming or query syntax. Search covers retained manual notes, automated messages/sources and readable current-draft text, not metadata or prior revisions. Dates use frozen Daily intervals where present and the active timezone for unmaterialized days. No rail lookback applies.
+
+The response is `{ "matches": [{ "local_date", "kind", "id", "target", "excerpt" }], "next_cursor": null|string }`. Kinds are `note`, `activity`, `draft`; draft IDs identify the revision and `target` identifies its workstream (empty for open questions). Other kinds use the item ID and an empty target. Results sort by descending local date, then kind/ID/target for stable continuation. Responses contain at most 20 matching days and 200 items; continue with the returned opaque cursor and the same query. A large day can span pages. Reads reflect live retained data rather than a frozen search snapshot; deletions are excluded on the next search. Malformed queries/cursors return 400.
+
+`GET /api/v2/daily/{date}/activity/{id}` requires `logs:read`. It returns one retained event only if it belongs to the effective Daily interval, allowing exact navigation beyond the 500-event preview. Missing or out-of-day events return 404. It never changes inclusion or review state.
+
+Search runs on a blocking worker, without holding application writer/generation locks. Excerpts are bounded and must be rendered as text. Search is not a model call and does not index workspace files. Query parameters are API request data, not browser navigation URLs; deployment request logging should avoid retaining query content.
+
 ## Knowledge collections
 
 Knowledge collections are optional, named sets of Markdown source folders. They configure context boundaries only: creating, changing, pausing, or removing a collection never creates, moves, edits, or deletes workspace files. Daily generation remains useful without any collection.
@@ -122,6 +136,8 @@ Snapshot evidence carries an `available` flag. Expired raw evidence remains repr
 ### `GET /api/v2/daily/overview`
 
 Requires the session cookie and `logs:read`. It returns profile-local `today`, the IANA timezone and server time, summary counts, and at most 1–31 recent meaningful day records. Today is always present; untouched empty past dates are omitted. The bounded discovery window is returned as `window_start` and is derived from the larger of configured catch-up and raw-retention days, capped at 90 calendar days.
+
+Without an explicit `limit`, the endpoint uses the saved dashboard preference (default 10). `recent_days` reports the effective limit. The discovery window is at least that limit; summary counts describe only returned days, not all retained history. An explicit `limit` retains the existing 1–31 clamping behaviour.
 
 Each day exposes independent generation, review, freshness, scheduling, new-evidence, and expired-evidence facts plus one display status. Counts are exact and do not load event messages. Apply state is considered only when it belongs to the exact current revision. A past day is missed only when it has unhandled automated evidence; manual-only days are shown as notes to review. Browser navigation uses the returned profile-local Today rather than the device calendar.
 

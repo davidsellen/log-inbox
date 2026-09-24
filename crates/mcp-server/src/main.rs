@@ -36,6 +36,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod daily_writer;
 mod generation;
+mod history;
 pub mod knowledge;
 mod llm;
 mod migration;
@@ -448,6 +449,12 @@ fn build_router(state: AppState) -> Router {
             get(refocus_cutover_report).post(refocus_commit_cutover),
         )
         .route("/api/v2/daily/overview", get(refocus_daily_overview))
+        .route("/api/v2/history/search", get(history::search))
+        .route("/api/v2/daily/{date}/activity/{id}", get(history::activity))
+        .route(
+            "/api/v2/settings/dashboard",
+            get(history::preferences).put(history::save_preferences),
+        )
         .route("/api/v2/daily/{date}", get(refocus_daily_day))
         .route("/api/v2/daily/{date}/context", get(refocus_daily_context))
         .route(
@@ -2095,7 +2102,15 @@ async fn refocus_daily_overview(
         .parse::<chrono_tz::Tz>()
         .map_err(|_| ApiError::internal("the saved workspace timezone is invalid"))?;
     let today = Utc::now().with_timezone(&timezone).date_naive();
-    let limit = query.limit.unwrap_or(14).clamp(1, 31);
+    let limit = query
+        .limit
+        .unwrap_or(
+            state
+                .store
+                .recent_days_preference(&profile.id)
+                .map_err(|error| ApiError::internal(error.to_string()))?,
+        )
+        .clamp(1, 31);
     let automation = state
         .store
         .daily_automation_settings(&profile.id)
@@ -2179,6 +2194,7 @@ async fn refocus_daily_overview(
         "server_now": Utc::now(),
         "today": today,
         "timezone": profile.timezone,
+        "recent_days": limit,
         "missed_count": missed_count,
         "update_count": update_count,
         "failed_count": failed_count,
@@ -4745,6 +4761,10 @@ async fn dashboard_asset(AxumPath(name): AxumPath<String>) -> Response {
             "text/javascript",
             include_str!("../assets/daily-navigation.js"),
         ),
+        "daily-history.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../assets/daily-history.js"),
+        ),
         "daily.css" => ("text/css", include_str!("../assets/daily.css")),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
@@ -5053,6 +5073,168 @@ mod knowledge_destination_tests {
             })
             .unwrap();
         (state, profile, date)
+    }
+
+    #[tokio::test]
+    async fn history_and_dashboard_preferences_require_auth_and_scope_mutations() {
+        let (state, profile, date) = generation_test_state();
+        let credentials = generate_session_credentials();
+        state
+            .store
+            .create_dashboard_session(
+                &credentials,
+                &["logs:read".into(), "settings:write".into()],
+                Utc::now(),
+                Duration::hours(1),
+                Duration::hours(1),
+            )
+            .unwrap();
+        let cookie = format!("log_inbox_session={}", credentials.session_token);
+        let app = build_router(state.clone());
+        let search = "/api/v2/history/search?q=Validated";
+        assert_eq!(
+            json_response(app.clone(), "GET", search, json!({}), None, None)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let result =
+            json_response(app.clone(), "GET", search, json!({}), Some(&cookie), None).await;
+        assert_eq!(result.status(), StatusCode::OK);
+        let result = response_json(result).await;
+        assert_eq!(result["matches"][0]["local_date"], date.to_string());
+        assert_eq!(result["matches"][0]["kind"], "activity");
+        let id = result["matches"][0]["id"].as_str().unwrap();
+        let target = format!("/api/v2/daily/{date}/activity/{id}");
+        assert_eq!(
+            json_response(app.clone(), "GET", &target, json!({}), Some(&cookie), None)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            json_response(
+                app.clone(),
+                "GET",
+                "/api/v2/history/search?q=",
+                json!({}),
+                Some(&cookie),
+                None
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let uri = "/api/v2/settings/dashboard";
+        let defaults = response_json(
+            json_response(app.clone(), "GET", uri, json!({}), Some(&cookie), None).await,
+        )
+        .await;
+        assert_eq!(defaults["recent_days"], 10);
+        assert_eq!(
+            json_response(
+                app.clone(),
+                "PUT",
+                uri,
+                json!({"recent_days":30}),
+                Some(&cookie),
+                None
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            json_response(
+                app.clone(),
+                "PUT",
+                uri,
+                json!({"recent_days":9}),
+                Some(&cookie),
+                Some(&credentials.csrf_token)
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            json_response(
+                app.clone(),
+                "PUT",
+                uri,
+                json!({"recent_days":30}),
+                Some(&cookie),
+                Some(&credentials.csrf_token)
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(state.store.recent_days_preference(&profile.id).unwrap(), 30);
+        let overview = response_json(
+            json_response(
+                app.clone(),
+                "GET",
+                "/api/v2/daily/overview",
+                json!({}),
+                Some(&cookie),
+                None,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(overview["recent_days"], 30);
+        let overview = response_json(
+            json_response(
+                app.clone(),
+                "GET",
+                "/api/v2/daily/overview?limit=7",
+                json!({}),
+                Some(&cookie),
+                None,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(overview["recent_days"], 7);
+        let readonly = generate_session_credentials();
+        state
+            .store
+            .create_dashboard_session(
+                &readonly,
+                &["logs:read".into()],
+                Utc::now(),
+                Duration::hours(1),
+                Duration::hours(1),
+            )
+            .unwrap();
+        let readonly_cookie = format!("log_inbox_session={}", readonly.session_token);
+        assert_eq!(
+            json_response(
+                app.clone(),
+                "GET",
+                search,
+                json!({}),
+                Some(&readonly_cookie),
+                None
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            json_response(
+                app,
+                "PUT",
+                uri,
+                json!({"recent_days":7}),
+                Some(&readonly_cookie),
+                Some(&readonly.csrf_token)
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]

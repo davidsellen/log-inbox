@@ -76,6 +76,17 @@ curl -fsS --max-time 10 -X PUT "$daily_url/api/v2/settings/workspace" \
   -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
   -b "$cookie_jar" --data-binary "$save" >/dev/null
 
+# Retain preference API compatibility even though the day-list UI is removed.
+# History search needs no model call or Markdown write.
+curl -fsS --max-time 10 -X PUT "$daily_url/api/v2/settings/dashboard" \
+  -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+  -b "$cookie_jar" --data-binary '{"recent_days":30}' | jq -e '.recent_days == 30' >/dev/null
+curl -fsS --max-time 10 "$daily_url/api/v2/daily/overview" -H "$daily_headers" -b "$cookie_jar" \
+  | jq -e '.recent_days == 30' >/dev/null
+curl -fsS --max-time 10 --get "$daily_url/api/v2/history/search" --data-urlencode 'q=Compose smoke' \
+  -H "$daily_headers" -b "$cookie_jar" | jq -e '.matches | any(.kind == "activity")' >/dev/null
+curl -fsS --max-time 10 "$daily_url/assets/daily-history.js" -H "$daily_headers" >/dev/null
+
 generate_body="$smoke_root/generate.json"
 generate_status=$(curl -sS --max-time 20 -o "$generate_body" -w '%{http_code}' "$daily_url/api/v2/daily/$local_date/generate" \
   -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
@@ -142,3 +153,8 @@ curl -fsS --max-time 10 "$daily_url/api/v2/daily/$local_date" -H "$daily_headers
   | jq -e '.apply_status.state == "finalized" and .day.review_status == "applied"' >/dev/null
 
 printf 'Compose Daily smoke passed for %s\n' "$local_date"
+curl -fsS --max-time 10 "$daily_url/api/v2/settings/dashboard" -H "$daily_headers" -b "$cookie_jar" \
+  | jq -e '.recent_days == 30' >/dev/null
+curl -fsS --max-time 10 --get "$daily_url/api/v2/history/search" --data-urlencode 'q=Validated the live Daily workflow' \
+  -H "$daily_headers" -b "$cookie_jar" | jq -e '.matches | any(.kind == "draft")' >/dev/null
+printf 'Compose navigation preferences and history search smoke passed after restart\n'

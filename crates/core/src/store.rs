@@ -1048,6 +1048,20 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 25 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                "CREATE TABLE dashboard_preferences (
+                    workspace_id TEXT PRIMARY KEY REFERENCES workspace_profiles(id),
+                    recent_days INTEGER NOT NULL CHECK(recent_days IN (7, 10, 14, 30))
+                );",
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (25, 'dashboard navigation preferences', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -2587,10 +2601,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 24);
+        assert_eq!(store.schema_version().expect("version reads"), 25);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 24);
+        assert_eq!(store.schema_version().expect("version remains"), 25);
     }
 
     #[test]
@@ -2658,7 +2672,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 24);
+        assert_eq!(verification.schema_version, 25);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());

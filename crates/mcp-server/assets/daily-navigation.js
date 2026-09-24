@@ -1,4 +1,4 @@
-import { $, validDate } from "./daily-helpers.js";
+import { $, validDate, isPlainLinkClick } from "./daily-helpers.js";
 // Navigation owns history and dialog lifecycle, not Daily's form structure.
 export function createNavigation({
   state,
@@ -6,10 +6,12 @@ export function createNavigation({
   loadDay,
   unsavedDayChanges,
   referenceNotes,
+  getSettings,
 }) {
   let navigationIndex = 0;
 
   let restoringHistory = false;
+  let dailyPosition = null;
 
   const dialogBaselines = new WeakMap();
 
@@ -18,8 +20,12 @@ export function createNavigation({
   function routeUrl(route) {
     const url = new URL(location.href);
     if (route.date) url.searchParams.set("date", route.date);
-    if (route.view === "knowledge") url.searchParams.set("view", "knowledge");
+    if (["knowledge", "settings"].includes(route.view))
+      url.searchParams.set("view", route.view);
     else url.searchParams.delete("view");
+    if (route.view === "settings")
+      url.searchParams.set("section", route.section || "general");
+    else url.searchParams.delete("section");
     return `${url.pathname}${url.search}${url.hash}`;
   }
 
@@ -28,6 +34,8 @@ export function createNavigation({
       date: state.date,
       view: state.view,
       dialog: document.querySelector("dialog[open]")?.id || null,
+      target: state.navigationTarget || null,
+      section: state.view === "settings" ? state.settingsSection : null,
     };
   }
 
@@ -52,20 +60,8 @@ export function createNavigation({
     dialogBaselines.set(dialog, dialogValues(dialog));
   }
 
-  function rememberDialogFields(dialog, isSavedField) {
-    const previous = new Map(
-      JSON.parse(dialogBaselines.get(dialog) || "[]").map((value) => [
-        value[0],
-        value,
-      ]),
-    );
-    const values = JSON.parse(dialogValues(dialog)).map((value) =>
-      isSavedField(value[0]) ? value : previous.get(value[0]) || value,
-    );
-    dialogBaselines.set(dialog, JSON.stringify(values));
-  }
-
   function dialogHasChanges(dialog) {
+    if (dialog.dataset.readonly === "true") return false;
     return (
       dialogBaselines.has(dialog) &&
       dialogBaselines.get(dialog) !== dialogValues(dialog)
@@ -73,35 +69,54 @@ export function createNavigation({
   }
 
   function navigationBusy() {
-    return state.saving || state.pendingWrites > 0;
+    return state.saving || state.pendingWrites > 0 || getSettings().saving;
   }
 
   function canLeave(route) {
     if (navigationBusy()) {
-      notice("Please wait for the current save to finish.", true);
+      (state.view === "settings" ? getSettings().pageNotice : notice)(
+        "Please wait for the current save to finish.",
+        true,
+      );
       return false;
     }
-    const leavingDay = route.date !== state.date;
+    const leavingDay =
+      route.date !== state.date ||
+      (route.view === "daily" &&
+        state.view === "daily" &&
+        route.target?.kind === "draft" &&
+        state.editingDraft);
     const changedDialog = [...document.querySelectorAll("dialog[open]")].some(
       (dialog) => dialog.id !== route.dialog && dialogHasChanges(dialog),
     );
+    const leavingSettings =
+      state.view === "settings" &&
+      route.view !== "settings" &&
+      getSettings().hasChanges();
     return (
-      !((leavingDay && unsavedDayChanges()) || changedDialog) ||
-      confirm("Discard unsaved changes and leave this view?")
+      !(
+        (leavingDay && unsavedDayChanges()) ||
+        changedDialog ||
+        leavingSettings
+      ) || confirm("Discard unsaved changes and leave this view?")
     );
   }
 
   function showView(view) {
-    state.view = view === "knowledge" ? "knowledge" : "daily";
+    state.view = ["knowledge", "settings"].includes(view) ? view : "daily";
     const knowledge = state.view === "knowledge";
-    $("daily-tab").setAttribute("aria-selected", String(!knowledge));
-    $("knowledge-tab").setAttribute("aria-selected", String(knowledge));
-    // Daily must remain reachable when the optional Reference notes tab is hidden.
-    $("daily-tab").tabIndex = 0;
-    $("knowledge-tab").tabIndex = knowledge ? 0 : -1;
-    $("daily-panel").hidden = knowledge;
+    const settings = state.view === "settings";
+    $("main-shell").hidden = settings;
+    $("settings-page").hidden = !settings;
+    $("home-link").href = state.date
+      ? `?date=${encodeURIComponent(state.date)}`
+      : "/";
+    if (state.view === "daily")
+      $("home-link").setAttribute("aria-current", "page");
+    else $("home-link").removeAttribute("aria-current");
+    $("daily-panel").hidden = knowledge || settings;
     $("knowledge-panel").hidden = !knowledge;
-    document.title = `Log Inbox · ${knowledge ? "Reference notes" : "Daily"}`;
+    document.title = `Log Inbox · ${settings ? "Settings" : knowledge ? "Reference notes" : "Daily"}`;
   }
 
   function closeVisibleDialogs() {
@@ -116,8 +131,12 @@ export function createNavigation({
   ) {
     route = {
       date: route.date || state.date,
-      view: route.view === "knowledge" ? "knowledge" : "daily",
+      view: ["knowledge", "settings"].includes(route.view)
+        ? route.view
+        : "daily",
       dialog: route.dialog || null,
+      target: route.target || null,
+      section: route.view === "settings" ? route.section || "general" : null,
     };
     if (route.date && !validDate(route.date)) return false;
     if (!canLeave(route)) {
@@ -126,6 +145,15 @@ export function createNavigation({
     }
     const previous = currentRoute();
     const changedDay = route.date !== state.date;
+    if (previous.view === "daily" && route.view !== "daily")
+      dailyPosition = {
+        date: state.date,
+        scroll: scrollY,
+        focus: document.activeElement,
+      };
+    if (previous.view === "settings" && route.view !== "settings")
+      getSettings().discard();
+    state.navigationTarget = route.target;
     closeVisibleDialogs();
     if (changedDay) {
       state.editingDraft = false;
@@ -133,9 +161,17 @@ export function createNavigation({
       $("day").value = route.date;
     }
     showView(route.view);
+    if (route.view === "settings") {
+      getSettings().prepare();
+      getSettings().showSection(route.section);
+      route.section = state.settingsSection;
+    }
     if (fromHistory) navigationIndex = index;
     else if (JSON.stringify(previous) !== JSON.stringify(route))
-      writeHistory(route, true);
+      writeHistory(
+        route,
+        !(previous.view === "settings" && route.view === "settings"),
+      );
     if (route.dialog) {
       const dialog = $(route.dialog);
       if (dialog instanceof HTMLDialogElement)
@@ -160,24 +196,68 @@ export function createNavigation({
       state.date === route.date
     ) {
       const heading =
-        route.view === "daily"
-          ? $("day-title")
-          : $("knowledge-panel").querySelector("h1");
-      if (!previous.dialog || changedDay || previous.view !== route.view) {
-        heading.tabIndex = -1;
-        heading.focus({ preventScroll: true });
+        route.view === "settings"
+          ? $(
+              previous.view === "settings"
+                ? `settings-${route.section}-title`
+                : "settings-title",
+            )
+          : route.view === "daily"
+            ? $("day-title")
+            : $("knowledge-panel").querySelector("h1");
+      if (
+        route.view === "daily" &&
+        previous.view !== "daily" &&
+        dailyPosition?.date === route.date
+      ) {
+        dailyPosition.focus?.focus({ preventScroll: true });
+        scrollTo({ top: dailyPosition.scroll, behavior: "instant" });
+      } else if (
+        (!route.target || route.view !== "daily") &&
+        (!previous.dialog || changedDay || previous.view !== route.view)
+      ) {
+        if (document.activeElement !== $("settings-section-select")) {
+          heading.tabIndex = -1;
+          heading.focus({ preventScroll: true });
+          if (route.view === "settings")
+            scrollTo({ top: 0, behavior: "instant" });
+        }
       }
     }
+    if (state.date === route.date && state.navigationTarget === route.target)
+      dispatchEvent(
+        new CustomEvent("daily:navigated", {
+          detail: {
+            ...route,
+            loaded,
+            restoreDaily:
+              route.view === "daily" &&
+              previous.view !== "daily" &&
+              dailyPosition?.date === route.date,
+          },
+        }),
+      );
     return loaded && state.date === route.date && state.view === route.view;
   }
 
-  async function selectDay(date) {
-    return navigateRoute({ date, view: "daily" });
+  async function selectDay(date, target = null) {
+    return navigateRoute({ date, view: "daily", target });
   }
 
-  async function selectView(view, updateUrl = true) {
-    if (updateUrl) return navigateRoute({ date: state.date, view });
+  async function selectView(view, updateUrl = true, section = null) {
+    if (updateUrl)
+      return navigateRoute({
+        date: state.date,
+        view,
+        section,
+        target: state.navigationTarget,
+      });
     showView(view);
+    if (view === "settings") {
+      getSettings().prepare();
+      getSettings().showSection(section);
+      $("settings-title").focus({ preventScroll: true });
+    }
     writeHistory(currentRoute(), false);
     if (
       state.view === "knowledge" &&
@@ -205,6 +285,13 @@ export function createNavigation({
       !confirm("Discard unsaved changes and close?")
     )
       return false;
+    if (
+      dialog.dataset.readonly === "true" &&
+      history.state?.route?.dialog === dialog.id
+    ) {
+      history.back();
+      return true;
+    }
     HTMLDialogElement.prototype.close.call(dialog);
     dialogOpeners.get(dialog)?.focus();
     if (history.state?.route?.dialog === dialog.id) {
@@ -214,6 +301,11 @@ export function createNavigation({
   }
 
   function installNavigation() {
+    $("home-link").addEventListener("click", (event) => {
+      if (!isPlainLinkClick(event) || !$("login-panel").hidden) return;
+      event.preventDefault();
+      selectView("daily");
+    });
     history.replaceState(
       { logInboxIndex: 0, route: currentRoute() },
       "",
@@ -237,6 +329,7 @@ export function createNavigation({
       const route = event.state?.route || {
         date: url.searchParams.get("date") || state.date,
         view: url.searchParams.get("view"),
+        section: url.searchParams.get("section"),
       };
       const previousIndex = navigationIndex;
       const navigation = navigateRoute(route, { fromHistory: true, index });
@@ -250,6 +343,7 @@ export function createNavigation({
     addEventListener("beforeunload", (event) => {
       if (
         unsavedDayChanges() ||
+        getSettings().hasChanges() ||
         [...document.querySelectorAll("dialog[open]")].some(dialogHasChanges) ||
         navigationBusy()
       ) {
@@ -263,7 +357,6 @@ export function createNavigation({
     selectView,
     openDialog,
     closeDialog,
-    rememberDialogFields,
     dialogHasChanges,
     navigationBusy,
     installNavigation,

@@ -86,7 +86,7 @@ Messages up to 1 MiB and metadata up to 512 KiB are accepted after secret redact
 5. Select **Review Apply** to see the current and approved managed blocks plus the exact frozen destination.
 6. Select **Confirm Apply** to write. Existing frontmatter and all content outside the Log Inbox block are preserved. Interrupted or conflicting writes remain visible and retryable.
 
-If an older date was missed, use the recent-days rail or select it directly and run the same flow. Optional scheduling prepares previous-day and catch-up candidates for review; it never auto-Applies Markdown. An explicitly saved retention policy is owned by the Daily service and never by the collector.
+If an older date was missed, select it with the date controls or find its retained work through Search history and run the same flow. Optional scheduling prepares previous-day and catch-up candidates for review; it never auto-Applies Markdown. An explicitly saved retention policy is owned by the Daily service and never by the collector.
 
 Use the [personal pilot guide](docs/pilot.md) when evaluating the workflow over real engineering days or comparing drafts with and without Knowledge context.
 

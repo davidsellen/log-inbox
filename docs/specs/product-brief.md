@@ -13,7 +13,7 @@ The initial audience is an individual engineer already using coding agents and M
 Provide a single-owner, self-hosted HTTP collector, dashboard, scheduler, MCP interface, and reviewed Markdown writer. Create one current structured daily candidate with immutable revisions; require explicit review before writing one managed block to the resolved daily note.
 
 - **Daily:** generate, edit, inspect evidence, include or omit workstreams, preview the exact diff, and apply.
-- **Knowledge:** optionally select existing Markdown context and maintain canonical mappings. A useful draft must work without any collections or mappings.
+- **Reference context:** optionally connect existing Markdown product/module notes so Daily drafts and approved agents can use consistent names, links, and bounded background. A useful draft must work without any reference setup.
 - **Settings:** configure workspace identity, dates, automation, model access, retention, security, and agent integration.
 
 Keep manual notes separate from automated summaries. Report model failures visibly. Preserve user-owned content outside the managed block, detect managed-block conflicts, and recover interrupted Apply operations without duplicating content. Document the limits of protection against independently writing editors.
@@ -25,7 +25,7 @@ Keep manual notes separate from automated summaries. Report model failures visib
 - Automatic Apply, raw-log fallback masquerading as a ready summary, or silent overwrites of edited drafts.
 - Browser filesystem write mode, per-task proposal staging, or operational proposal files inside the Markdown workspace after cutover.
 - Public multi-tenant hosting, multiple active workspaces/models, full editor-plugin emulation, or broad agent write access in the initial delivery.
-- MCP as the sole ingestion path, broad agent read/write access, mandatory agent-specific producer clients, or productivity/surveillance metrics.
+- MCP as the sole ingestion path, broad agent read/write access, mandatory agent-specific producer clients, or productivity/surveillance metrics. The shared-brain capability is read-only by default; Markdown remains authoritative and AI does not silently write knowledge.
 
 ## First Usable Refocused Release
 
@@ -39,7 +39,7 @@ Keep manual notes separate from automated summaries. Report model failures visib
 - Show the resolved daily destination and block diff; Apply through one reviewed, recoverable writer.
 - Cut over through an idempotent migration that preserves source data on failure and removes obsolete runtime paths only when the replacement is ready.
 
-Scheduling, retention-aware late-event handling, bounded Knowledge context, and blind context comparison are implemented. Remote provider management and broader integrations remain gated by the roadmap's privacy, security, and pilot requirements.
+Scheduling, retention-aware late-event handling, bounded reference context, and blind context comparison are implemented. The shared product/module brain remains a staged follow-on: first prove one useful human-note → agent-context → activity-report → Daily-draft loop, then expand read-only agent access. Remote provider management and broader integrations remain gated by the roadmap's privacy, security, and pilot requirements.
 
 ## Success Criteria
 

@@ -9,6 +9,7 @@ import {
 import { createNavigation } from "./daily-navigation.js";
 import { createReferenceNotes } from "./daily-references.js";
 import { createSettings } from "./daily-settings.js";
+import { createHistory } from "./daily-history.js";
 // Daily owns the selected day, draft edits, generation, and polling.
 const state = {
   csrf: null,
@@ -48,7 +49,14 @@ async function api(path, options = {}) {
   if (mutation && state.csrf) headers["X-CSRF-Token"] = state.csrf;
   if (mutation) state.pendingWrites = (state.pendingWrites || 0) + 1;
   try {
-    const response = await fetch(path, { ...options, headers });
+    let response;
+    try {
+      response = await fetch(path, { ...options, headers });
+    } catch (error) {
+      $("connection-warning").hidden = false;
+      throw error;
+    }
+    $("connection-warning").hidden = response.status < 500;
     const body =
       response.status === 204
         ? null
@@ -78,15 +86,19 @@ async function boot() {
   const url = new URL(location.href);
   const requested = url.searchParams.get("date");
   const requestedDate = validDate(requested) ? requested : null;
-  const requestedView =
-    url.searchParams.get("view") === "knowledge" ? "knowledge" : "daily";
+  const requestedView = ["knowledge", "settings"].includes(
+    url.searchParams.get("view"),
+  )
+    ? url.searchParams.get("view")
+    : "daily";
+  const requestedSection = url.searchParams.get("section") || "general";
   try {
     const session = await api("/api/v2/auth/session");
     state.csrf = session.csrf_token;
     $("login-panel").hidden = true;
     $("unlock").hidden = Boolean(state.csrf);
     $("settings").hidden = false;
-    $("settings").disabled = !state.csrf;
+    $("settings").disabled = false;
     await settings.loadWorkspaceSettings();
     if (
       !settings.workspaceSettings.active_profile ||
@@ -104,7 +116,7 @@ async function boot() {
           : "Review and save Daily settings before generating your first record.",
         true,
       );
-      if (state.csrf) settings.openSettings();
+      await settings.openSettings("destination");
       return;
     }
     await settings.loadAutomation();
@@ -113,7 +125,7 @@ async function boot() {
     $("day").value = state.date;
     await settings.loadMigration();
     await loadDay();
-    await selectView(requestedView, false);
+    await selectView(requestedView, false, requestedSection);
     $("daily-app").hidden = false;
     if (
       settings.migration?.cutover_status !== "completed" &&
@@ -134,6 +146,8 @@ async function boot() {
 }
 
 function showLogin() {
+  $("main-shell").hidden = false;
+  $("settings-page").hidden = true;
   $("login-panel").hidden = false;
   $("daily-app").hidden = true;
   $("unlock").hidden = true;
@@ -175,61 +189,8 @@ async function loadDay() {
   }
 }
 
-const statusLabels = {
-  missed: "Needs review",
-  not_started: "Not started",
-  notes_unreviewed: "Notes to review",
-  scheduled: "Scheduled",
-  generating: "Generating",
-  generation_failed: "Generation failed",
-  in_review: "Review",
-  update_available: "Update available",
-  applied: "Applied",
-  dismissed: "Dismissed",
-  apply_attention: "Apply needs attention",
-};
-
-function renderOverview() {
-  const overview = state.overview;
-  const root = $("recent-days");
-  root.replaceChildren();
-  if (!overview) return;
-  const summary = [];
-  if (overview.missed_count) summary.push(`${overview.missed_count} missed`);
-  if (overview.update_count)
-    summary.push(`${overview.update_count} with updates`);
-  if (overview.failed_count) summary.push(`${overview.failed_count} failed`);
-  $("missed-summary").textContent = summary.join(" · ") || overview.timezone;
-  for (const day of overview.days) {
-    const button = document.createElement("button");
-    button.className = `recent-day ${day.status}`;
-    button.setAttribute(
-      "aria-current",
-      day.local_date === state.date ? "date" : "false",
-    );
-    const date = document.createElement("span");
-    date.textContent = new Intl.DateTimeFormat(undefined, {
-      weekday: "short",
-      month: "short",
-      day: "numeric",
-      timeZone: "UTC",
-    }).format(new Date(`${day.local_date}T00:00:00Z`));
-    const status = document.createElement("span");
-    status.className = "day-state";
-    const expiry = day.expired_evidence_count
-      ? ` · ${day.expired_evidence_count} expired`
-      : "";
-    status.textContent = `${statusLabels[day.status] || day.status}${expiry}`;
-    button.append(date, status);
-    button.addEventListener("click", () => selectDay(day.local_date));
-    root.append(button);
-  }
-  $("recent").hidden = !overview.days.length;
-}
-
 function renderDaily() {
   const data = state.data;
-  renderOverview();
   $("day-title").textContent = new Date(
     `${data.local_date}T12:00:00`,
   ).toLocaleDateString(undefined, {
@@ -250,14 +211,11 @@ function renderDaily() {
   const dismissed = data.day?.review_status === "dismissed";
   $("status").textContent = data.current_revision
     ? `Revision ${data.current_revision.revision_number}${dismissed ? " · Dismissed" : ""}${freshness}${expiry}`
-    : "No candidate yet";
+    : "";
   $("dismiss").hidden = !data.current_revision;
   $("dismiss").textContent = dismissed ? "Reopen" : "Dismiss";
   $("dismiss").disabled = !state.csrf || state.saving;
-  $("generate").textContent = data.current_revision
-    ? "Regenerate"
-    : "Generate candidate";
-  $("generate").disabled = !state.csrf || state.saving || dismissed;
+  $("generate").classList.toggle("primary", !data.current_revision);
   $("add-note").disabled = !state.csrf;
   renderManual(data.manual_entries || []);
   renderCandidate(data.current_revision?.content);
@@ -270,6 +228,11 @@ function renderDaily() {
   $("preview").textContent =
     data.preview_markdown ||
     "Generate a candidate to see the exact Markdown preview.";
+  $("preview").hidden = !data.current_revision;
+  $("draft-save").hidden = !data.current_revision;
+  $("file-details-label").textContent = data.current_revision
+    ? "Preview file"
+    : "Destination";
   const apply = data.apply_status;
   const pending = apply && apply.state !== "finalized";
   const invalidContext = state.contextDetails?.status === "invalid";
@@ -298,6 +261,42 @@ function renderDaily() {
   $("review-apply").hidden = !data.current_revision || dismissed;
   $("review-apply").disabled =
     !state.csrf || state.saving || pending || invalidContext;
+}
+
+function renderDayAvailability() {
+  const data = state.data;
+  const hasActivity = Boolean(data.automated_evidence?.events?.length);
+  const empty = !(
+    data.manual_entries?.length ||
+    hasActivity ||
+    data.current_revision ||
+    data.current_snapshot_evidence?.length ||
+    data.expired_evidence_count ||
+    data.active_late_evidence_deferrals?.length ||
+    data.apply_status ||
+    data.generation_attempt ||
+    data.day?.generation_status === "failed" ||
+    activeAttempt()
+  );
+  $("empty-day").hidden = !empty;
+  $("notes-card").hidden = empty;
+  $("draft-card").hidden = empty;
+  $("activity-card").hidden = !hasActivity;
+  $("empty-add-note").disabled = !state.csrf;
+  if (!empty) return;
+  const today = state.overview?.today || localDate();
+  const isToday = state.date === today;
+  const future = state.date > today;
+  $("empty-day-title").textContent = isToday
+    ? "Your day starts here."
+    : future
+      ? "Nothing recorded yet."
+      : "Nothing recorded for this day.";
+  $("empty-day-message").textContent = isToday
+    ? "Add a note whenever you're ready. Connected activity appears here automatically."
+    : future
+      ? "This date is in the future. You can add a note ahead of time."
+      : "You can add a note or use Search history to find earlier work.";
 }
 
 // Frozen reference context belongs to the Daily revision, not reference setup.
@@ -477,6 +476,7 @@ function renderManual(entries) {
   for (const entry of entries) {
     const row = document.createElement("div");
     row.className = "manual-item";
+    row.dataset.noteId = entry.id;
     const text = document.createElement("div");
     text.textContent = entry.text;
     row.append(text);
@@ -549,7 +549,7 @@ function renderCandidateEditor(content) {
     const p = document.createElement("div");
     p.className = "empty";
     p.textContent =
-      "No generated candidate. Your notes and evidence remain available.";
+      "Create a draft from your notes and included activity. Reviewing each activity is optional.";
     root.append(p);
     return;
   }
@@ -600,6 +600,7 @@ function renderCandidateEditor(content) {
 
 // Activity browsing and optional include/omit decisions.
 function renderEvidence(events, decisions, deferrals) {
+  renderDayAvailability();
   const root = $("evidence");
   root.replaceChildren();
   const decisionsById = new Map(decisions.map((item) => [item.event_id, item]));
@@ -634,6 +635,7 @@ function renderEvidence(events, decisions, deferrals) {
   }
   for (const event of events) {
     const row = el("div", "evidence-item");
+    row.dataset.eventId = event.id;
     row.tabIndex = -1;
     row.dataset.activitySearch =
       `${event.message} ${event.source}`.toLowerCase();
@@ -729,7 +731,7 @@ function filterActivity() {
   }
   const rows = activityRows();
   $("activity-position").textContent = `${rows.length} matching items`;
-  $("activity-empty").hidden = rows.length > 0;
+  $("activity-empty").hidden = rows.length > 0 || !query;
   $("activity-previous").disabled = !rows.length;
   $("activity-next").disabled = !rows.length;
   $("evidence").scrollTop = 0;
@@ -901,7 +903,9 @@ async function generate(referenceMode) {
   state.retryError = null;
   state.saving = true;
   render();
-  notice("Starting a new preparation attempt…");
+  notice("");
+  $("generation-status").hidden = false;
+  $("generation-message").textContent = "Starting a new preparation attempt…";
   try {
     const result = await api(`/api/v2/daily/${date}/generate`, {
       method: "POST",
@@ -924,7 +928,6 @@ async function generate(referenceMode) {
         date,
         message: `New attempt could not start: ${error.message}`,
       };
-      notice(state.retryError.message, true);
     }
   } finally {
     state.saving = false;
@@ -1321,6 +1324,7 @@ function renderCandidate(content) {
       if (!entries.length) continue;
       const group = document.createElement("details");
       group.className = "workstream";
+      group.dataset.historyGroup = workstream.id;
       group.append(
         el(
           "summary",
@@ -1350,6 +1354,7 @@ function renderCandidate(content) {
   }
   for (const workstream of content.workstreams) {
     const section = el("section", "workstream");
+    section.dataset.historyGroup = workstream.id;
     section.append(el("h3", "", workstream.title));
     let count = 0;
     for (const [key, label] of Object.entries(fieldLabels)) {
@@ -1381,6 +1386,7 @@ function renderCandidate(content) {
   if (content.open_questions?.length) {
     root.append(el("h3", "", "Open questions"));
     const list = document.createElement("ul");
+    list.dataset.historyGroup = "";
     for (const question of content.open_questions)
       list.append(el("li", "", question));
     root.append(list);
@@ -1480,6 +1486,7 @@ function renderGeneration() {
     $("generate").textContent = "Create AI summary";
   }
   renderIntake(state.overview?.intake);
+  renderDayAvailability();
 }
 
 function renderAttemptMessage(attempt) {
@@ -1551,6 +1558,7 @@ function render() {
   $("copy-draft").hidden = !state.data?.current_revision;
   $("copy-draft").disabled = Boolean(state.editingDraft);
   if (state.contextDetails?.status === "none") $("context-card").hidden = true;
+  historySearch.restoreHighlight();
 }
 
 // Background refresh must not replace unsaved edits or a newer selected day.
@@ -1579,7 +1587,11 @@ async function refreshStatus() {
     ]);
     if (!current()) return;
     const changed =
-      data.current_revision?.id !== state.data.current_revision?.id;
+      data.current_revision?.id !== state.data.current_revision?.id ||
+      JSON.stringify(data.manual_entries) !==
+        JSON.stringify(state.data.manual_entries) ||
+      JSON.stringify(data.automated_evidence) !==
+        JSON.stringify(state.data.automated_evidence);
     let context;
     if (changed && !hasPendingChanges() && !navigationBusy())
       context = await api(`/api/v2/daily/${date}/context`).catch(() => ({
@@ -1595,7 +1607,6 @@ async function refreshStatus() {
       state.contextDetails = context;
       render();
     } else {
-      renderOverview();
       renderGeneration();
       if (changed)
         notice(
@@ -1611,9 +1622,6 @@ async function refreshStatus() {
       return;
     }
     refreshDelay = Math.min(30000, Math.max(4000, refreshDelay * 2));
-    $("generation-status").hidden = false;
-    $("generation-message").textContent =
-      "Connection interrupted. Checking again shortly; your edits are still here.";
   } finally {
     if (current()) scheduleRefresh();
   }
@@ -1623,7 +1631,7 @@ function setDayLoadState(loading, error = "") {
   state.dayLoadError = error;
   const panel = $("daily-panel");
   panel.setAttribute("aria-busy", String(loading));
-  const content = panel.querySelector(".grid");
+  const content = panel.querySelector(".daily-content");
   content.inert = loading || !!error;
   content.hidden =
     !!error || (loading && state.data?.local_date !== state.date);
@@ -1634,7 +1642,9 @@ function setDayLoadState(loading, error = "") {
     : `Loading ${state.date}…`;
   $("retry-day-load").hidden = !error;
   if (loading || error) {
-    for (const button of panel.querySelectorAll(".day-head button"))
+    for (const button of content.querySelectorAll(
+      "#generate, #add-note, #dismiss",
+    ))
       button.disabled = true;
     if (state.data?.local_date !== state.date) {
       $("day-title").textContent = state.date;
@@ -1685,8 +1695,6 @@ const {
   selectView,
   openDialog,
   closeDialog,
-  rememberDialogFields,
-  dialogHasChanges,
   navigationBusy,
   installNavigation,
 } = createNavigation({
@@ -1695,20 +1703,26 @@ const {
   loadDay,
   unsavedDayChanges,
   referenceNotes,
+  getSettings: () => settings,
 });
 const settings = createSettings({
   app: state,
   api,
-  notice,
-  openDialog,
-  closeDialog,
-  rememberDialogFields,
-  dialogHasChanges,
   selectDay,
   selectView,
   generate,
   loadDay,
   hasPendingChanges,
+});
+const historySearch = createHistory({
+  state,
+  api,
+  openDialog,
+  closeDialog,
+  selectDay,
+  renderEvidence,
+  renderManual,
+  renderCandidate,
 });
 async function signIn(event) {
   event.preventDefault();
@@ -1803,10 +1817,18 @@ async function cancelGeneration() {
 }
 
 function bindDailyEvents() {
+  $("retry-connection").addEventListener("click", async () => {
+    $("retry-connection").disabled = true;
+    try {
+      await api("/api/v2/auth/session");
+    } catch (error) {
+      if (error.status === 401) showLogin();
+    } finally {
+      $("retry-connection").disabled = false;
+    }
+  });
   $("login-form").addEventListener("submit", signIn);
   $("unlock").addEventListener("click", showLogin);
-  $("daily-tab").addEventListener("click", () => selectView("daily"));
-  $("knowledge-tab").addEventListener("click", () => selectView("knowledge"));
   $("previous-day").addEventListener("click", () => shiftDay(-1));
   $("next-day").addEventListener("click", () => shiftDay(1));
   $("today").addEventListener("click", () =>
@@ -1830,6 +1852,9 @@ function bindDailyEvents() {
   $("close-apply").addEventListener("click", closeApply);
   $("cancel-apply").addEventListener("click", closeApply);
   $("add-note").addEventListener("click", () => openDialog($("note-dialog")));
+  $("empty-add-note").addEventListener("click", () =>
+    openDialog($("note-dialog")),
+  );
   const closeNote = () => closeDialog($("note-dialog"));
   $("close-note").addEventListener("click", closeNote);
   $("cancel-note").addEventListener("click", closeNote);

@@ -4,6 +4,7 @@ pub use context_store::validate_context_snapshot_payload;
 pub mod daily;
 mod daily_store;
 mod generation_store;
+pub mod history;
 pub mod models;
 pub mod redaction;
 pub mod settings;

@@ -4,6 +4,10 @@ The service exposes one authenticated browser workflow at `/`, centred on Daily.
 
 ## Workflow
 
+The compact global header contains the home link and a quiet Settings action. Healthy connectivity has no badge. Network failures and server errors show a shared connection warning with Retry connection; checking connectivity does not reload the page or discard edits. Existing day-load and operation-specific recovery actions remain available.
+
+Truly empty dates use one compact, date-aware state instead of empty notes, draft and evidence cards. Past days say nothing was recorded (not that no work occurred), today explains automatic activity, and future dates allow adding a note ahead of time. Date navigation and Search history remain available. Notes or arriving activity restore the normal workflow; generation failures, saved revisions and Apply recovery must never be hidden by this empty state. Evidence controls appear only when the selected date has events, and a no-match message appears only for a search. Service-wide intake and source details live in Settings → General, not beside a selected day's evidence.
+
 1. Select a calendar date. The server resolves the day in the saved IANA timezone and returns only that interval.
 2. Add optional owner-authored notes. They are saved immediately in SQLite, remain separate under **My notes**, and are never rewritten by the model.
 3. Choose Create draft from the day's bounded automated evidence. The day itself shows generation state, elapsed time and the configured timeout, with Cancel or Retry as appropriate.
@@ -13,23 +17,39 @@ The service exposes one authenticated browser workflow at `/`, centred on Daily.
 
 The screen states whether an action is read-only, saves app state, or writes Markdown. Late evidence is shown as an update; it never silently replaces an edited candidate.
 
+Daily uses one centered reading column: a date heading and compact toolbar, then notes, draft, activity and a help disclosure. The brand returns to Daily through the existing guarded router; no lone tab row remains. Add note belongs to My notes, while generation, recovery, editing, copy and reviewed saving belong to the draft. Before a draft exists, only its explanation and Destination disclosure are shown, not an empty save panel. With a draft, Preview file contains the destination and exact Markdown. Reference-context details are collapsed; invalid-reference and interrupted-Apply recovery remain visible outside disclosures.
+
 When preparation fails without a current draft, **Use activity record** is an opt-in alternative. It replaces the empty draft area with **Activity record · not AI-summarized**, showing collapsed task groups with counts and expandable original messages. My notes stays separate. Editing, omission, Copy, and reviewed Apply use the existing controls; no evidence decision is mandatory. Previous AI failure details are collapsed inside the record. No model or Knowledge request is made, and existing drafts are never replaced. **Create AI summary** asks for replacement confirmation.
 
 Generation is server-owned and survives browser navigation. Daily polls active work and exposes failures beside the draft instead of requiring a trip to Settings. Another active day is identified explicitly; duplicate generation is disabled. Sources, exact Markdown and help remain available through disclosure controls. Activity received reports collector receipts, not a promise of continuous producer connectivity.
 
-Automated evidence opens in a bounded scrollable panel, including when preparation fails or no draft exists. Search matches message and source; Previous/Next moves focus through matching items and shows the current position. Filtering never changes inclusion. Generation status stays visible while browsing, with Browse activity, Cancel, and Retry actions as appropriate. Generated draft sections are bounded separately so long drafts do not push evidence out of reach.
+Automated evidence opens in a bounded scrollable panel, including when preparation fails or no draft exists. Search matches message and source; Previous/Next moves focus through matching items and shows the current position. Filtering never changes inclusion. Generation status is grouped with the draft, with Browse activity, Cancel, and Retry actions as appropriate; it does not float over other recovery controls. Generated draft sections are bounded separately so long drafts do not push evidence out of reach. Activity receipts and connected sources appear with activity.
 
 ## Settings
 
+Settings is a URL-addressable full page with three sections: General, Markdown destination, and Preparation & retention. Desktop uses native section links; small screens use a labelled section selector. Only one section is visible at a time. Section changes preserve edits and replace the current history entry; Back to Daily restores the selected date, scroll position and unsaved Daily draft without refreshing the page. Leaving with unsaved settings asks once for confirmation. Escape does not dismiss a page.
+
+Each form has its own explicit save, unsaved indicator and local feedback. Saving one section never marks another section's edits as saved. Optional migration details, mounted workspace information and recent preparation runs use disclosure controls. Reference notes remain optional setup, with return links to Settings and Daily.
+
+General contains optional reference-note setup and maintenance, not a recent-day count setting. Saves are disabled for invalid or unchanged values, except first-time preparation-policy activation and workspace setup. Destination still requires a matching preview. Completed migration appears under Maintenance; pending migration remains expanded.
+
 First run requires a reviewed workspace profile: timezone, relative Daily root, supported filename pattern, optional existing template, and link style. Preview validates and displays an example without saving. Save persists the profile but creates no folders or notes.
 
-After the workspace profile exists, the same dialog exposes candidate preparation and retention as a separate explicit save. Until that policy is saved, displayed defaults are inactive. Enabling preparation schedules review candidates after a day ends and shows recent run outcomes; it never writes Markdown. Saving also activates the disclosed raw-evidence, audit, and Apply-recovery retention periods even when preparation remains disabled.
-
-After setup, a compact recent-days rail keeps the Daily habit visible without becoming a calendar or vault browser. It always includes profile-local Today and adds only meaningful past dates, with one primary state such as Needs review, Update available, Review, or Applied. Evidence expiry is a secondary warning. Selecting a day opens the same single-day review surface.
+After the workspace profile exists, Preparation & retention exposes both policies together under a separate explicit save. Until that policy is saved, displayed defaults are inactive. Enabling preparation schedules review candidates after a day ends and shows recent run outcomes; it never writes Markdown. Saving also activates the disclosed raw-evidence, audit, and Apply-recovery retention periods even when preparation remains disabled.
 
 Dismiss removes the exact visible candidate from reminders without writing or deleting anything. Reopen restores that same revision and warns when raw source evidence has expired. A dismissed day must be reopened before regeneration. Evidence that arrives after a preserved revision is labeled separately; **Leave for later** explicitly defers that exact event so the older complete revision can still be reviewed and applied, and **Reopen** reverses the choice.
 
 Settings also exposes a reviewed, idempotent migration when legacy database or proposal-file state is detected. Migration mounts exist only in the Compose override and are never part of the ordinary runtime.
+
+## History search and day navigation
+
+Previous/next, the native date picker, Today and Search history are the complete Daily navigation surface. The recent-day list and its client module have been removed. Today uses the profile-local date and keeps unsaved edits when already on that day; changing dates retains the discard guard. Browser Back/Forward and returning from Settings preserve the existing navigation behavior. The backend overview still supplies profile-local Today, active generation and intake status; existing preference APIs remain compatible.
+
+Search history opens a read-only modal, not another tab. Submit a literal phrase, identifier or error string to search all retained non-deleted manual notes, automated messages/sources and readable current drafts. Applied drafts are searchable while their app content is retained. Internal metadata, superseded revisions, reference-note collections and saved Markdown files are excluded; the overview lookback does not limit search. Empty results therefore do not prove work never happened.
+
+Results are grouped newest-day-first, labelled by source and show highlighted excerpts. More results continues up to 20 matching days / 200 items per response, including continuation within a large day. A result opens the exact item, expands its section and highlights it without changing evidence decisions; activity beyond the initial 500-item day preview is fetched separately. Expired or changed targets produce a readable notice and preserve the return path.
+
+Back to results and browser Back restore the query, loaded results, position and focus. Search inputs never trigger unsaved-edit warnings; genuinely unsaved day edits still do. Escape closes the modal. Query/results are session-memory state, not persistent browser storage or address-bar parameters. Search remains available without a working model. Experimental Ask and safe Markdown-file indexing are roadmap items, not shipped controls.
 
 ## Reference notes
 

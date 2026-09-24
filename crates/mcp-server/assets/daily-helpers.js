@@ -1,5 +1,15 @@
 // Small, stateless DOM and display helpers shared by the views.
 export const $ = (id) => document.getElementById(id);
+// Let the browser own new-tab, new-window and non-primary link clicks.
+export function isPlainLinkClick(event) {
+  return (
+    !event.button &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.shiftKey &&
+    !event.altKey
+  );
+}
 export function localDate(date = new Date()) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
