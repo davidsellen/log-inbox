@@ -5,6 +5,17 @@ const dailyHtml = await readFile(
   new URL("../../crates/mcp-server/assets/daily.html", import.meta.url),
   "utf8"
 );
+const dailyAssets = Object.fromEntries(await Promise.all([
+  "daily.js",
+  "daily-navigation.js",
+  "daily-helpers.js",
+  "daily-references.js",
+  "daily-settings.js",
+  "daily.css"
+].map(async name => [
+  name,
+  await readFile(new URL(`../../crates/mcp-server/assets/${name}`, import.meta.url), "utf8")
+])));
 
 function dailyResponse(date = "2026-09-08", { revisionId = "revision_1", origin = "generated", freshness = "current", applyStatus = null, dismissed = false, lateEvidence = false, lateDeferred = false, contextSnapshot = null, evidenceDisposition = null } = {}) {
   const events = [{ id: "evt_1", source: "codex/fedora", timestamp: `${date}T09:00:00Z`, message: "Validated the Daily workflow." }];
@@ -111,6 +122,7 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
     const url = new URL(request.url());
     requests.push({ path: url.pathname, method: request.method(), body: request.postData() ? request.postDataJSON() : null });
     if (url.pathname === "/") return route.fulfill({ status: 200, contentType: "text/html", body: dailyHtml });
+    if (url.pathname.startsWith("/assets/")) return route.fulfill({ status: 200, contentType: url.pathname.endsWith(".css") ? "text/css" : "text/javascript", body: dailyAssets[url.pathname.slice(8)] });
     if (url.pathname === "/api/v2/auth/login" && request.method() === "POST") {
       loggedIn = true;
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ csrf_token: "csrf_fixture" }) });
@@ -256,6 +268,233 @@ async function openDaily(page, date = "2026-09-08") {
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.locator("#daily-app")).toBeVisible();
 }
+
+async function mockFailedAutomationRun(page) {
+  await page.route("**/api/v2/settings/automation", route => route.fulfill({ json: {
+    settings: { enabled: false, generation_time: "00:15", catch_up_days: 7, raw_retention_days: 30, audit_retention_days: 365, recovery_retention_days: 30 },
+    saved: false,
+    recent_runs: [{ local_date: "2026-09-07", state: "failed", attempts: 1, last_error: "Preparation failed" }]
+  } }));
+}
+
+test("Opening the draft editor without changes does not prompt when changing days", async ({ page }) => {
+  await mockDaily(page);
+  await openDaily(page);
+  await page.locator("#edit-draft").click();
+  const dialogs = [];
+  page.on("dialog", async dialog => { dialogs.push(dialog.message()); await dialog.dismiss(); });
+  await page.locator("#day").fill("2026-09-07");
+  await page.locator("#day").dispatchEvent("change");
+  await expect(page.locator("#day-title")).toContainText("September 7");
+  expect(dialogs).toEqual([]);
+});
+
+test("Canceling browser Back restores the URL and preserves dirty draft text", async ({ page }) => {
+  await mockDaily(page);
+  await openDaily(page);
+  await page.locator("#day").fill("2026-09-07");
+  await page.locator("#day").dispatchEvent("change");
+  await expect(page.locator("#day-title")).toContainText("September 7");
+  await page.locator("#edit-draft").click();
+  await page.locator("#candidate .title-input").fill("Unsaved work");
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.evaluate(() => history.back());
+  await expect(page).toHaveURL(/date=2026-09-07/);
+  await expect(page.locator("#candidate .title-input")).toHaveValue("Unsaved work");
+  await expect(page.locator("#day")).toHaveValue("2026-09-07");
+});
+
+test("Settings Open day closes the dialog and navigates back to Daily", async ({ page }) => {
+  await mockDaily(page);
+  await mockFailedAutomationRun(page);
+  await openDaily(page);
+  await page.locator("#settings").click();
+  await page.locator("#reference-settings").click();
+  await expect(page.locator("#knowledge-panel")).toBeVisible();
+  await page.locator("#settings").click();
+  await page.getByRole("button", { name: "Open day", exact: true }).click();
+  await expect(page.locator("#settings-dialog")).not.toBeVisible();
+  await expect(page.locator("#daily-panel")).toBeVisible();
+  await expect(page.locator("#day")).toHaveValue("2026-09-07");
+  await expect(page.locator("#day-title")).toContainText("September 7, 2026");
+  await expect(page).toHaveURL(/date=2026-09-07/);
+});
+
+test("Settings Retry now does not generate after canceled dirty navigation", async ({ page }) => {
+  const requests = await mockDaily(page);
+  await mockFailedAutomationRun(page);
+  await openDaily(page);
+  await page.locator("#edit-draft").click();
+  await page.getByLabel("Workstream 1 title").fill("Keep my draft title");
+  await page.locator("#settings").click();
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.getByRole("button", { name: "Retry now", exact: true }).click();
+  await expect(page.locator("#day")).toHaveValue("2026-09-08");
+  expect(requests.filter(request => request.method === "POST" && request.path.endsWith("/generate"))).toEqual([]);
+  await expect(page.getByLabel("Workstream 1 title")).toHaveValue("Keep my draft title");
+});
+
+test("Browser Back and Forward restore the selected Daily date without reloading", async ({ page }) => {
+  const requests = await mockDaily(page);
+  await openDaily(page);
+  const documentRequests = requests.filter(request => request.path === "/").length;
+  await page.locator("#previous-day").click();
+  await expect(page.locator("#day-title")).toContainText("September 7, 2026");
+  await page.locator("#previous-day").click();
+  await expect(page.locator("#day-title")).toContainText("September 6, 2026");
+  await page.goBack();
+  await expect(page.locator("#day")).toHaveValue("2026-09-07");
+  await expect(page.locator("#day-title")).toContainText("September 7, 2026");
+  await page.goBack();
+  await expect(page.locator("#day-title")).toContainText("September 8, 2026");
+  await page.goForward();
+  await expect(page.locator("#day-title")).toContainText("September 7, 2026");
+  expect(requests.filter(request => request.path === "/")).toHaveLength(documentRequests);
+});
+
+test("Reference notes has an explicit return to the same Daily draft and preserves edits", async ({ page }) => {
+  await mockDaily(page);
+  await openDaily(page);
+  await page.locator("#edit-draft").click();
+  await page.getByLabel("Workstream 1 title").fill("Keep while browsing references");
+  await page.locator("#settings").click();
+  await page.locator("#reference-settings").click();
+  await expect(page.locator("#knowledge-panel")).toBeVisible();
+  await page.locator("#back-to-daily").click();
+  await expect(page.locator("#daily-panel")).toBeVisible();
+  await expect(page.locator("#day")).toHaveValue("2026-09-08");
+  await expect(page.getByLabel("Workstream 1 title")).toHaveValue("Keep while browsing references");
+});
+
+test("Canceling navigation keeps Daily edits and the current URL", async ({ page }) => {
+  await mockDaily(page);
+  await openDaily(page);
+  await page.locator("#edit-draft").click();
+  await page.getByLabel("Workstream 1 title").fill("Do not lose this title");
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.locator("#previous-day").click();
+  await expect(page.locator("#day")).toHaveValue("2026-09-08");
+  await expect(page).toHaveURL(/date=2026-09-08/);
+  await expect(page.getByLabel("Workstream 1 title")).toHaveValue("Do not lose this title");
+});
+
+test("A delayed previous day response cannot replace the newly selected day", async ({ page }) => {
+  await mockDaily(page);
+  await openDaily(page);
+  let releasePrevious;
+  const previousGate = new Promise(resolve => { releasePrevious = resolve; });
+  let previousStarted;
+  const started = new Promise(resolve => { previousStarted = resolve; });
+  await page.route("**/api/v2/daily/2026-09-07", async route => {
+    previousStarted();
+    await previousGate;
+    await route.fulfill({ json: dailyResponse("2026-09-07") });
+  });
+  await page.locator("#previous-day").click();
+  await started;
+  await page.locator("#previous-day").click();
+  await expect(page.locator("#day-title")).toContainText("September 6, 2026");
+  const staleResponse = page.waitForResponse(response => new URL(response.url()).pathname === "/api/v2/daily/2026-09-07");
+  releasePrevious();
+  await staleResponse;
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await expect(page.locator("#day-title")).toContainText("September 6, 2026");
+  await expect(page.locator("#day")).toHaveValue("2026-09-06");
+  await expect(page.locator("#destination")).toContainText("2026-09-06");
+});
+
+test("A failed day load blocks mutations until retry loads that day", async ({ page }) => {
+  await mockDaily(page);
+  await openDaily(page);
+  let fail = true;
+  await page.route("**/api/v2/daily/2026-09-07", route => route.fulfill(fail
+    ? { status: 503, json: { error: "Day temporarily unavailable" } }
+    : { json: dailyResponse("2026-09-07") }));
+  await page.locator("#previous-day").click();
+  await expect(page.locator("#day-load-status")).toBeVisible();
+  await expect(page.locator("#generate")).toBeDisabled();
+  await expect(page.locator("#add-note")).toBeDisabled();
+  fail = false;
+  await page.locator("#retry-day-load").click();
+  await expect(page.locator("#day-title")).toContainText("September 7, 2026");
+  await expect(page.locator("#generate")).toBeEnabled();
+  await expect(page.locator("#add-note")).toBeEnabled();
+});
+
+test("Browser Back closes Settings and returns focus without leaving Daily", async ({ page }) => {
+  await mockDaily(page);
+  await openDaily(page);
+  await page.locator("#settings").click();
+  await expect(page.locator("#settings-dialog")).toBeVisible();
+  await page.goBack();
+  await expect(page.locator("#settings-dialog")).not.toBeVisible();
+  await expect(page.locator("#daily-panel")).toBeVisible();
+  await expect(page.locator("#day")).toHaveValue("2026-09-08");
+  await expect(page.locator("#settings")).toBeFocused();
+});
+
+test("Dirty Settings cancel Close and Escape without losing destination changes", async ({ page }) => {
+  const requests = await mockDaily(page);
+  await openDaily(page);
+  await page.locator("#settings").click();
+  await page.locator("#setting-daily-root").fill("Unsaved journal");
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.locator("#close-settings").click();
+  await expect(page.locator("#settings-dialog")).toBeVisible();
+  await expect(page.locator("#setting-daily-root")).toHaveValue("Unsaved journal");
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#settings-dialog")).toBeVisible();
+  await expect(page.locator("#setting-daily-root")).toHaveValue("Unsaved journal");
+  page.once("dialog", dialog => dialog.accept());
+  await page.locator("#close-settings").click();
+  await expect(page.locator("#settings-dialog")).not.toBeVisible();
+  await expect(page.locator("#settings")).toBeFocused();
+  expect(requests.filter(request => request.method === "PUT" && request.path === "/api/v2/settings/workspace")).toEqual([]);
+});
+
+test("Dirty collection cancel Close and Escape without losing folder choices", async ({ page }) => {
+  const requests = await mockDaily(page);
+  await openDaily(page);
+  await page.locator("#settings").click();
+  await page.locator("#reference-settings").click();
+  await page.getByText("Saved links and setup", { exact: true }).click();
+  await page.getByRole("button", { name: "New collection", exact: true }).click();
+  await page.locator("#collection-folder").fill("Products/Unsaved");
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.locator("#close-collection").click();
+  await expect(page.locator("#collection-dialog")).toBeVisible();
+  await expect(page.locator("#collection-folder")).toHaveValue("Products/Unsaved");
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#collection-dialog")).toBeVisible();
+  await expect(page.locator("#collection-folder")).toHaveValue("Products/Unsaved");
+  page.once("dialog", dialog => dialog.accept());
+  await page.locator("#cancel-collection").click();
+  await expect(page.locator("#collection-dialog")).not.toBeVisible();
+  await expect(page.locator("#knowledge-panel")).toBeVisible();
+  expect(requests.filter(request => request.method === "POST" && request.path === "/api/v2/knowledge/collections")).toEqual([]);
+});
+
+test("Saving automation settings preserves unsaved Daily draft edits", async ({ page }) => {
+  const requests = await mockDaily(page);
+  await openDaily(page);
+  await page.locator("#edit-draft").click();
+  await page.getByLabel("Workstream 1 title").fill("Keep this title while saving settings");
+  await page.locator("#settings").click();
+  await page.getByLabel("Prepare candidates automatically").check();
+  await page.getByLabel("Preparation time").fill("06:45");
+  await page.getByRole("button", { name: "Save preparation & retention" }).click();
+  await expect(page.locator("#automation-status")).toContainText("Automatic preparation is on");
+  await expect.poll(() => requests.filter(request => request.method === "PUT" && request.path === "/api/v2/settings/automation").length).toBe(1);
+  const unexpectedDialogs = [];
+  page.on("dialog", async dialog => { unexpectedDialogs.push(dialog.message()); await dialog.dismiss(); });
+  await page.locator("#close-settings").click();
+  await expect(page.locator("#settings-dialog")).not.toBeVisible();
+  await expect(page.getByLabel("Workstream 1 title")).toHaveValue("Keep this title while saving settings");
+  expect(unexpectedDialogs).toEqual([]);
+  expect(requests.filter(request => request.method === "PUT" && request.path.endsWith("/candidate"))).toEqual([]);
+});
 
 test("Stale scheduled errors do not override running or database recovery status",async({page})=>{
   await mockDaily(page);
@@ -711,7 +950,7 @@ test("refocused Daily exposes server failures", async ({ page }) => {
   await mockDaily(page, { dailyStatus: 503 });
   await openDaily(page);
 
-  await expect(page.locator("#notice")).toContainText("Daily fixture unavailable");
+  await expect(page.locator("#day-load-status")).toContainText("Daily fixture unavailable");
 });
 
 test("refocused Daily keeps interrupted Apply visible and retryable", async ({ page }) => {

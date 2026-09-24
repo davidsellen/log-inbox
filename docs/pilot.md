@@ -11,6 +11,10 @@ The pilot decides whether Log Inbox reduces the work of maintaining an accurate 
 
 ## Daily loop
 
+Navigation stays inside the page: Settings → Manage reference notes opens setup, and Back to Daily returns to the same draft. Browser Back/Forward restores the date and view; Back also closes an open dialog. Switching views keeps Daily edits in memory. Leaving an edited day or closing an edited form asks before discarding; refresh is not needed to navigate.
+
+If a day cannot load, its editing controls remain unavailable and Retry loading day retries that date. The previous day's draft is never shown as the newly selected day's content. Unsaved edits are not durable across a full page reload.
+
 For each active day:
 
 1. Open Daily and select the date. The server, not the browser, computes that date's timezone window.

@@ -3,11 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "format:client": "prettier --write \"crates/mcp-server/assets/daily*.{js,css,html}\"",
+    "check:client": "prettier --check \"crates/mcp-server/assets/daily*.{js,css,html}\"",
     "test:browser": "playwright test",
     "test:browser:chromium": "playwright test --project=chromium",
     "test:browser:firefox": "playwright test --project=firefox"
   },
   "devDependencies": {
-    "@playwright/test": "1.63.0"
+    "@playwright/test": "1.63.0",
+    "prettier": "3.9.9"
   }
 }

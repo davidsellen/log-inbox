@@ -25,6 +25,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run check:client
       - run: npx playwright install --with-deps chromium firefox
       - run: npm run test:browser
 

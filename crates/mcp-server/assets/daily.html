@@ -1,501 +1,732 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Log Inbox · Daily</title>
-  <style>
-    :root { color-scheme: light; --ink:#17211d; --muted:#63736c; --line:#d6ded9; --bg:#f5f7f6; --card:#fff; --green:#087a4b; --green-soft:#e8f4ee; --red:#a92d2d; --amber:#8a5a00; }
-    * { box-sizing:border-box; }
-    body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui,sans-serif; }
-    button,input,textarea,select { font:inherit; }
-    button { border:1px solid var(--line); border-radius:7px; background:#fff; color:var(--ink); padding:.55rem .8rem; font-weight:650; cursor:pointer; }
-    button.primary { background:var(--green); border-color:var(--green); color:#fff; }
-    button:disabled { cursor:not-allowed; opacity:.5; }
-    header { background:#0f2119; color:#fff; }
-    .bar,.shell { max-width:1080px; margin:auto; padding:0 24px; }
-    .bar { min-height:64px; display:flex; align-items:center; justify-content:space-between; gap:16px; }
-    .brand { font-weight:750; font-size:18px; }
-    .online { color:#b9d6c8; font-size:13px; }
-    main { padding:28px 0 60px; }
-    .recent { display:flex; align-items:flex-start; gap:14px; margin-bottom:18px; }
-    .recent-title { min-width:92px; padding-top:7px; font-weight:700; }
-    .recent-days { display:flex; gap:7px; flex-wrap:wrap; }
-    .recent-day { display:grid; gap:1px; min-width:92px; text-align:left; padding:.45rem .65rem; }
-    .recent-day[aria-current="date"] { border-color:var(--green); box-shadow:0 0 0 1px var(--green); }
-    .recent-day .day-state { color:var(--muted); font-size:11px; font-weight:500; }
-    .recent-day .day-error { color:var(--red); font-size:11px; font-weight:500; max-width:190px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .recent-day.missed .day-state,.recent-day.generation_failed .day-state,.recent-day.apply_attention .day-state { color:var(--red); }
-    .recent-day.update_available .day-state { color:var(--amber); }
-    .recent-day.applied .day-state { color:var(--green); }
-    .date-nav { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:22px; }
-    .date-nav input { border:1px solid var(--line); border-radius:7px; padding:.5rem .65rem; font-weight:650; }
-    h1 { margin:0; font-size:28px; }
-    h2 { font-size:19px; margin:0; }
-    h3 { font-size:16px; margin:0; }
-    .day-head { display:flex; justify-content:space-between; align-items:flex-start; gap:20px; margin-bottom:18px; }
-    .subtle { color:var(--muted); font-size:13px; }
-    .destination { margin-top:6px; overflow-wrap:anywhere; }
-    .actions { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
-    .tabs { display:flex; gap:4px; border-bottom:1px solid var(--line); margin-bottom:22px; }
-    .tab { border:0; border-bottom:3px solid transparent; border-radius:0; background:transparent; color:var(--muted); padding:10px 14px 9px; }
-    .tab[aria-selected="true"] { color:var(--ink); border-bottom-color:var(--green); }
-    .notice { border:1px solid #e3bd71; color:#684400; background:#fff8e9; border-radius:8px; padding:11px 13px; margin:0 0 16px; }
-    .notice.error { border-color:#e1aaaa; color:var(--red); background:#fff2f2; }
-    .grid { display:grid; gap:16px; grid-template-columns:minmax(0,1.25fr) minmax(300px,.75fr); }
-    .stack { display:grid; gap:16px; align-content:start; }
-    .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; min-width:0; }
-    .card-head { display:flex; justify-content:space-between; gap:12px; align-items:baseline; margin-bottom:12px; }
-    .empty { color:var(--muted); padding:8px 0; }
-    .manual-item,.workstream,.evidence-item { border-top:1px solid var(--line); padding:13px 0; }
-    .manual-item:first-child,.workstream:first-child,.evidence-item:first-child { border-top:0; padding-top:0; }
-    .workstream > summary { cursor:pointer; overflow-wrap:anywhere; }
-    .references { margin-top:5px; display:flex; gap:8px; flex-wrap:wrap; }
-    .references a { color:var(--green); }
-    .fact { display:grid; grid-template-columns:90px 1fr; gap:10px; margin-top:9px; align-items:start; }
-    .fact label { color:var(--muted); font-size:13px; padding-top:8px; }
-    .fact textarea,.title-input { width:100%; resize:vertical; border:1px solid var(--line); border-radius:6px; padding:7px 9px; color:var(--ink); background:#fff; }
-    .title-input { font-weight:700; }
-    .evidence-message { white-space:pre-wrap; overflow-wrap:anywhere; }
-    .evidence-meta { color:var(--muted); font-size:12px; margin-top:5px; }
-    .evidence-controls { display:flex; gap:7px; align-items:center; margin-top:9px; }
-    .evidence-controls select { border:1px solid var(--line); border-radius:6px; padding:.45rem; }
-    .evidence-toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:12px 0; border-bottom:1px solid var(--line); }
-    .evidence-toolbar .subtle { margin-right:auto; }
-    #generation-status { position:sticky; top:8px; z-index:2; box-shadow:0 3px 10px #17211d12; max-height:40vh; overflow:auto; }
-    .activity-navigation { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:12px 0; }
-    .activity-navigation input { flex:1 1 180px; min-width:0; padding:8px; border:1px solid var(--line); border-radius:6px; }
-    .activity-scroll { max-height: min(56vh,560px); overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable; padding:4px 10px; border:1px solid var(--line); border-radius:7px; }
-    .activity-scroll:focus-visible,.evidence-item:focus-visible { outline:2px solid var(--green); outline-offset:2px; }
-    .evidence-item[aria-current="true"] { background:var(--green-soft); box-shadow:inset 3px 0 var(--green); padding-left:10px; }
-    #readable-draft,#candidate { max-height:65vh; overflow:auto; scrollbar-gutter:stable; }
-    pre { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; font:14px/1.55 ui-monospace,SFMono-Regular,monospace; }
-    dialog { width:min(620px,calc(100% - 32px)); border:1px solid var(--line); border-radius:11px; padding:0; box-shadow:0 20px 60px #0004; }
-    dialog::backdrop { background:#12201888; }
-    .dialog-body { padding:22px; display:grid; gap:14px; }
-    .dialog-head { display:flex; justify-content:space-between; align-items:center; }
-    .field { display:grid; gap:6px; font-weight:650; }
-    .field textarea,.field input,.field select { border:1px solid var(--line); border-radius:7px; padding:9px; width:100%; background:#fff; }
-    .dialog-actions { display:flex; justify-content:flex-end; gap:8px; }
-    .migration-box { border-top:1px solid var(--line); padding-top:14px; display:grid; gap:8px; }
-    .migration-box p { margin:0; }
-    .migration-list { margin:0; padding-left:20px; color:var(--muted); font-size:13px; }
-    .settings-section { border-top:1px solid var(--line); padding-top:16px; display:grid; gap:12px; }
-    .settings-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
-    .check-field { display:flex; gap:9px; align-items:flex-start; }
-    .check-field input { margin-top:4px; }
-    .knowledge-head { display:flex; justify-content:space-between; align-items:flex-start; gap:20px; margin-bottom:18px; }
-    .knowledge-sections,.knowledge-list,.review-list { display:grid; gap:12px; }
-    .knowledge-section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; }
-    .knowledge-section > .card-head { margin-bottom:4px; }
-    .review-row { display:flex; align-items:center; justify-content:space-between; gap:16px; border-top:1px solid var(--line); padding:13px 0; }
-    .review-row:first-child { border-top:0; }
-    .review-name { font-weight:700; overflow-wrap:anywhere; }
-    .mapping-group { border-top:1px solid var(--line); padding:14px 0; }
-    .mapping-group:first-child { border-top:0; }
-    .mapping-target { font-weight:750; overflow-wrap:anywhere; }
-    .mapping-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 0 0 14px; }
-    .knowledge-details { margin-top:14px; }
-    .knowledge-details > summary { cursor:pointer; font-weight:700; padding:4px 0 12px; }
-    #knowledge-content > .knowledge-details:first-of-type > .knowledge-section { max-height:520px; overflow:auto; }
-    .diagnostics { color:var(--muted); font-size:13px; }
-    .context-workstream { border-top:1px solid var(--line); padding:10px 0; }
-    .context-workstream:first-child { border-top:0; }
-    .context-excerpt { margin:8px 0 2px; padding:9px 10px; border-left:3px solid var(--line); background:var(--soft); white-space:pre-wrap; overflow-wrap:anywhere; font-size:.9rem; }
-    #comparison-dialog { width:min(960px,calc(100% - 32px)); }
-    .comparison-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
-    .comparison-arm { border:1px solid var(--line); border-radius:9px; padding:14px; min-width:0; }
-    .comparison-arm pre { margin-top:10px; max-height:330px; overflow:auto; }
-    .comparison-questions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
-    .comparison-question { border:1px solid var(--line); border-radius:9px; padding:12px; margin:0; }
-    .comparison-question legend { font-weight:700; padding:0 4px; }
-    .choice-row { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:7px; }
-    .choice-row label { display:flex; align-items:center; gap:5px; }
-    .search-results { border:1px solid var(--line); border-radius:8px; max-height:280px; overflow:auto; }
-    .search-result { width:100%; border:0; border-bottom:1px solid var(--line); border-radius:0; text-align:left; display:grid; gap:2px; }
-    .search-result:last-child { border-bottom:0; }
-    .search-result[aria-selected="true"] { background:var(--green-soft); }
-    .collection-card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; display:grid; gap:12px; }
-    .collection-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
-    .collection-title { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-    .pill { display:inline-block; border-radius:999px; padding:2px 8px; font-size:12px; font-weight:700; color:var(--green); background:var(--green-soft); }
-    .pill.paused { color:var(--muted); background:#eef1ef; }
-    .path-section { display:grid; gap:5px; }
-    .path-list { display:flex; flex-wrap:wrap; gap:6px; }
-    .path { border:1px solid var(--line); border-radius:999px; background:#f8faf9; padding:3px 8px; font:12px/1.4 ui-monospace,SFMono-Regular,monospace; overflow-wrap:anywhere; }
-    .empty-card { text-align:center; padding:38px 22px; }
-    .empty-card p { max-width:560px; margin:10px auto 18px; }
-    .path-editor { display:grid; gap:8px; }
-    .path-add { display:flex; gap:8px; }
-    .path-add input { flex:1; min-width:0; }
-    .editable-path { display:inline-flex; align-items:center; gap:5px; }
-    .editable-path button { border:0; background:transparent; color:var(--muted); padding:0 2px; }
-    #knowledge-preview p { margin:0; }
-    #login-panel { max-width:520px; margin:80px auto; }
-    [hidden] { display:none !important; }
-    @media (max-width:780px) { .grid,.settings-fields,.comparison-grid,.comparison-questions { grid-template-columns:1fr; } .day-head,.knowledge-head,.collection-head { display:block; } .actions { justify-content:flex-start; margin-top:14px; } .bar,.shell { padding-left:16px; padding-right:16px; } }
-  </style>
-</head>
-<body>
-  <header><div class="bar"><div class="brand">Log Inbox</div><div class="actions"><button id="settings" hidden>Settings</button><button id="unlock" hidden>Unlock changes</button><div class="online">● Service online</div></div></div></header>
-  <main class="shell">
-    <section id="login-panel" class="card" hidden>
-      <h1>Open your Daily log</h1>
-      <p class="subtle">Enter the owner secret configured for this Log Inbox. It stays in this request and is never stored by the page.</p>
-      <form id="login-form" class="field"><label for="owner-secret">Owner secret</label><input id="owner-secret" type="password" autocomplete="current-password" required><label class="check-field"><input id="remember-login" type="checkbox"><span>Keep me signed in on this device for 30 days</span></label><button class="primary" type="submit">Sign in</button></form>
-    </section>
-    <section id="daily-app" hidden>
-      <nav class="tabs" role="tablist" aria-label="Dashboard views"><button id="daily-tab" class="tab" role="tab" aria-selected="true" aria-controls="daily-panel">Daily</button><button id="knowledge-tab" class="tab" role="tab" aria-selected="false" aria-controls="knowledge-panel" hidden>Reference notes</button></nav>
-      <section id="daily-panel" role="tabpanel" aria-labelledby="daily-tab">
-      <section id="recent" class="recent" aria-labelledby="recent-title"><div><div id="recent-title" class="recent-title">Recent days</div><div id="missed-summary" class="subtle"></div></div><div id="recent-days" class="recent-days"></div></section>
-      <nav class="date-nav" aria-label="Daily navigation"><button id="previous-day" aria-label="Previous day">←</button><input id="day" type="date" aria-label="Daily log date"><button id="next-day" aria-label="Next day">→</button><button id="today">Today</button></nav>
-      <div class="day-head"><div><h1 id="day-title">Daily</h1><div id="destination" class="destination subtle"></div><div id="status" class="subtle"></div></div><div class="actions"><button id="dismiss" hidden>Dismiss</button><button id="add-note">+ Add note</button><button id="generate" class="primary">Generate candidate</button></div></div>
-      <div id="notice" class="notice" hidden role="status"></div>
-      <div id="intake-status" class="subtle" aria-live="polite"></div>
-      <details id="intake-details" hidden><summary>Connected activity sources</summary><ul id="intake-sources"></ul></details>
-      <section id="generation-status" class="notice" role="status" hidden><span id="generation-message"></span> <button id="view-generation" hidden>View running day</button> <button id="cancel-generation" hidden>Cancel generation</button> <button id="retry-generation" hidden onclick="generate()">Retry preparation</button> <button id="browse-activity" onclick="document.getElementById('activity-details').open=true;document.getElementById('activity-search').focus()">Browse activity</button><details id="generation-error" hidden><summary>Error details</summary><div id="generation-error-text"></div></details></section>
-      <div id="reference-recovery" class="notice" hidden><p>Some reference notes are unavailable or no longer match this draft. Retry using only your activity and notes, or check Reference notes in Settings.</p><button id="retry-without-references">Retry without reference notes</button></div>
-      <p id="revision-reference-mode" class="subtle" hidden>Generated without reference notes · based on your activity and notes.</p>
-      <div class="grid">
-        <div class="stack">
-          <section class="card"><div class="card-head"><h2>My notes</h2><span class="subtle">Your words, never rewritten by the model</span></div><div id="manual-list"></div></section>
-          <section class="card"><div class="card-head"><h2>Daily draft</h2><button id="edit-draft" hidden>Edit draft</button><button id="save-candidate" hidden>Save edits</button></div><div id="readable-draft"></div><div id="candidate"></div></section>
-          <section class="card"><div class="card-head"><h2 id="activity-title">Evidence</h2><span id="evidence-count" class="subtle"></span></div><details id="activity-details" open><summary>Review source events and include or omit them</summary><p class="subtle">Automated activity stays available even if draft preparation fails. Reviewing individual items is optional.</p><div class="activity-navigation"><input id="activity-search" type="search" aria-label="Search automated activity" placeholder="Search activity or source" oninput="filterActivity()"><button id="activity-previous" aria-label="Previous activity" onclick="moveActivity(-1)">↑ Previous</button><button id="activity-next" aria-label="Next activity" onclick="moveActivity(1)">Next ↓</button><span id="activity-position" class="subtle" aria-live="polite"></span></div><div id="evidence" class="activity-scroll" role="region" aria-labelledby="activity-title" tabindex="0"></div><p id="activity-empty" class="subtle" hidden>No matching activity. Try another search.</p></details></section>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Log Inbox · Daily</title>
+    <link rel="stylesheet" href="/assets/daily.css" />
+  </head>
+  <body>
+    <header>
+      <div class="bar">
+        <div class="brand">Log Inbox</div>
+        <div class="actions">
+          <button id="settings" hidden>Settings</button
+          ><button id="unlock" hidden>Unlock changes</button>
+          <div class="online">● Service online</div>
         </div>
-        <aside class="stack"><section class="card"><div class="card-head"><h2>Save or share</h2><span id="write-status" class="subtle">Nothing is written yet</span></div><details><summary>Preview file</summary><pre id="preview"></pre></details><button id="copy-draft" hidden>Copy draft</button><div class="dialog-actions"><button id="review-apply" class="primary" hidden>Review &amp; save</button></div></section><section id="context-card" class="card" hidden><div class="card-head"><h2>Context used</h2><span id="context-status" class="pill"></span></div><strong id="context-kind"></strong><p id="context-message" class="subtle"></p><div id="context-list"></div><p id="context-adjustment-status" class="subtle" hidden></p><div class="dialog-actions"><button id="compare-context" hidden>Compare without Knowledge</button><button id="regenerate-context" class="primary" hidden>Regenerate with adjustments</button></div><details id="context-technical" class="diagnostics"><summary>Technical details</summary><div id="context-technical-text"></div></details><p class="subtle">This context is frozen with the candidate. Adjustments change only a newly regenerated revision; they never edit source notes or canonical links.</p></section><section id="apply-attention" class="card" hidden><h2>Apply needs attention</h2><p id="apply-attention-message"></p><p id="apply-attention-detail" class="subtle"></p><button id="retry-apply">Verify and retry</button></section><details class="card"><summary>How this works</summary><p>Choose a day, add anything you did manually, then generate. Review the structured result and evidence. Saving edits creates a new revision; it does not touch your workspace.</p><p class="subtle">Review Apply shows the exact managed block and frozen destination. Only Confirm Apply writes; content outside that block is preserved.</p></details></aside>
       </div>
+    </header>
+    <main class="shell">
+      <section id="login-panel" class="card" hidden>
+        <h1>Open your Daily log</h1>
+        <p class="subtle">
+          Enter the owner secret configured for this Log Inbox. It stays in this
+          request and is never stored by the page.
+        </p>
+        <form id="login-form" class="field">
+          <label for="owner-secret">Owner secret</label
+          ><input
+            id="owner-secret"
+            type="password"
+            autocomplete="current-password"
+            required
+          /><label class="check-field"
+            ><input id="remember-login" type="checkbox" /><span
+              >Keep me signed in on this device for 30 days</span
+            ></label
+          ><button class="primary" type="submit">Sign in</button>
+        </form>
       </section>
-      <section id="knowledge-panel" role="tabpanel" aria-labelledby="knowledge-tab" hidden>
-        <div class="knowledge-head"><div><h1>Reference notes</h1><p class="subtle">Optional background for better daily drafts. Link a product or project to an existing note; Daily works without this setup.</p><div id="knowledge-count" class="subtle"></div></div></div>
-        <div id="knowledge-notice" class="notice" role="status" hidden></div>
-        <div id="knowledge-content" class="knowledge-sections" aria-live="polite"><div class="card">Loading Knowledge…</div></div>
+      <section id="daily-app" hidden>
+        <nav class="tabs" role="tablist" aria-label="Dashboard views">
+          <button
+            id="daily-tab"
+            class="tab"
+            role="tab"
+            aria-selected="true"
+            aria-controls="daily-panel"
+          >
+            Daily</button
+          ><button
+            id="knowledge-tab"
+            class="tab"
+            role="tab"
+            aria-selected="false"
+            aria-controls="knowledge-panel"
+            hidden
+          >
+            Reference notes
+          </button>
+        </nav>
+        <section id="daily-panel" role="tabpanel" aria-labelledby="daily-tab">
+          <section id="recent" class="recent" aria-labelledby="recent-title">
+            <div>
+              <div id="recent-title" class="recent-title">Recent days</div>
+              <div id="missed-summary" class="subtle"></div>
+            </div>
+            <div id="recent-days" class="recent-days"></div>
+          </section>
+          <nav class="date-nav" aria-label="Daily navigation">
+            <button id="previous-day" aria-label="Previous day">←</button
+            ><input id="day" type="date" aria-label="Daily log date" /><button
+              id="next-day"
+              aria-label="Next day"
+            >
+              →</button
+            ><button id="today">Today</button>
+          </nav>
+          <div id="day-load-status" class="notice" role="status" hidden>
+            <span id="day-load-message"></span>
+            <button id="retry-day-load" hidden>Retry loading day</button>
+          </div>
+          <div class="day-head">
+            <div>
+              <h1 id="day-title">Daily</h1>
+              <div id="destination" class="destination subtle"></div>
+              <div id="status" class="subtle"></div>
+            </div>
+            <div class="actions">
+              <button id="dismiss" hidden>Dismiss</button
+              ><button id="add-note">+ Add note</button
+              ><button id="generate" class="primary">Generate candidate</button>
+            </div>
+          </div>
+          <div id="notice" class="notice" hidden role="status"></div>
+          <div id="intake-status" class="subtle" aria-live="polite"></div>
+          <details id="intake-details" hidden>
+            <summary>Connected activity sources</summary>
+            <ul id="intake-sources"></ul>
+          </details>
+          <section id="generation-status" class="notice" role="status" hidden>
+            <span id="generation-message"></span>
+            <button id="view-generation" hidden>View running day</button>
+            <button id="cancel-generation" hidden>Cancel generation</button>
+            <button id="retry-generation" hidden>Retry preparation</button>
+            <button id="browse-activity">Browse activity</button>
+            <details id="generation-error" hidden>
+              <summary>Error details</summary>
+              <div id="generation-error-text"></div>
+            </details>
+          </section>
+          <div id="reference-recovery" class="notice" hidden>
+            <p>
+              Some reference notes are unavailable or no longer match this
+              draft. Retry using only your activity and notes, or check
+              Reference notes in Settings.
+            </p>
+            <button id="retry-without-references">
+              Retry without reference notes
+            </button>
+          </div>
+          <p id="revision-reference-mode" class="subtle" hidden>
+            Generated without reference notes · based on your activity and
+            notes.
+          </p>
+          <div class="grid">
+            <div class="stack">
+              <section class="card">
+                <div class="card-head">
+                  <h2>My notes</h2>
+                  <span class="subtle"
+                    >Your words, never rewritten by the model</span
+                  >
+                </div>
+                <div id="manual-list"></div>
+              </section>
+              <section class="card">
+                <div class="card-head">
+                  <h2>Daily draft</h2>
+                  <button id="edit-draft" hidden>Edit draft</button
+                  ><button id="save-candidate" hidden>Save edits</button>
+                </div>
+                <div id="readable-draft"></div>
+                <div id="candidate"></div>
+              </section>
+              <section class="card">
+                <div class="card-head">
+                  <h2 id="activity-title">Evidence</h2>
+                  <span id="evidence-count" class="subtle"></span>
+                </div>
+                <details id="activity-details" open>
+                  <summary>
+                    Review source events and include or omit them
+                  </summary>
+                  <p class="subtle">
+                    Automated activity stays available even if draft preparation
+                    fails. Reviewing individual items is optional.
+                  </p>
+                  <div class="activity-navigation">
+                    <input
+                      id="activity-search"
+                      type="search"
+                      aria-label="Search automated activity"
+                      placeholder="Search activity or source"
+                    /><button
+                      id="activity-previous"
+                      aria-label="Previous activity"
+                    >
+                      ↑ Previous</button
+                    ><button id="activity-next" aria-label="Next activity">
+                      Next ↓</button
+                    ><span
+                      id="activity-position"
+                      class="subtle"
+                      aria-live="polite"
+                    ></span>
+                  </div>
+                  <div
+                    id="evidence"
+                    class="activity-scroll"
+                    role="region"
+                    aria-labelledby="activity-title"
+                    tabindex="0"
+                  ></div>
+                  <p id="activity-empty" class="subtle" hidden>
+                    No matching activity. Try another search.
+                  </p>
+                </details>
+              </section>
+            </div>
+            <aside class="stack">
+              <section class="card">
+                <div class="card-head">
+                  <h2>Save or share</h2>
+                  <span id="write-status" class="subtle"
+                    >Nothing is written yet</span
+                  >
+                </div>
+                <details>
+                  <summary>Preview file</summary>
+                  <pre id="preview"></pre>
+                </details>
+                <button id="copy-draft" hidden>Copy draft</button>
+                <div class="dialog-actions">
+                  <button id="review-apply" class="primary" hidden>
+                    Review &amp; save
+                  </button>
+                </div>
+              </section>
+              <section id="context-card" class="card" hidden>
+                <div class="card-head">
+                  <h2>Context used</h2>
+                  <span id="context-status" class="pill"></span>
+                </div>
+                <strong id="context-kind"></strong>
+                <p id="context-message" class="subtle"></p>
+                <div id="context-list"></div>
+                <p id="context-adjustment-status" class="subtle" hidden></p>
+                <div class="dialog-actions">
+                  <button id="compare-context" hidden>
+                    Compare without Knowledge</button
+                  ><button id="regenerate-context" class="primary" hidden>
+                    Regenerate with adjustments
+                  </button>
+                </div>
+                <details id="context-technical" class="diagnostics">
+                  <summary>Technical details</summary>
+                  <div id="context-technical-text"></div>
+                </details>
+                <p class="subtle">
+                  This context is frozen with the candidate. Adjustments change
+                  only a newly regenerated revision; they never edit source
+                  notes or canonical links.
+                </p>
+              </section>
+              <section id="apply-attention" class="card" hidden>
+                <h2>Apply needs attention</h2>
+                <p id="apply-attention-message"></p>
+                <p id="apply-attention-detail" class="subtle"></p>
+                <button id="retry-apply">Verify and retry</button>
+              </section>
+              <details class="card">
+                <summary>How this works</summary>
+                <p>
+                  Choose a day, add anything you did manually, then generate.
+                  Review the structured result and evidence. Saving edits
+                  creates a new revision; it does not touch your workspace.
+                </p>
+                <p class="subtle">
+                  Review Apply shows the exact managed block and frozen
+                  destination. Only Confirm Apply writes; content outside that
+                  block is preserved.
+                </p>
+              </details>
+            </aside>
+          </div>
+        </section>
+        <section
+          id="knowledge-panel"
+          role="tabpanel"
+          aria-labelledby="knowledge-tab"
+          hidden
+        >
+          <div class="knowledge-head">
+            <button id="back-to-daily">← Back to Daily</button>
+            <div>
+              <h1>Reference notes</h1>
+              <p class="subtle">
+                Optional background for better daily drafts. Link a product or
+                project to an existing note; Daily works without this setup.
+              </p>
+              <div id="knowledge-count" class="subtle"></div>
+            </div>
+          </div>
+          <div id="knowledge-notice" class="notice" role="status" hidden></div>
+          <div
+            id="knowledge-content"
+            class="knowledge-sections"
+            aria-live="polite"
+          >
+            <div class="card">Loading Knowledge…</div>
+          </div>
+        </section>
       </section>
-    </section>
-  </main>
-  <dialog id="note-dialog"><form id="note-form" class="dialog-body"><div class="dialog-head"><h2>Add a note</h2><button type="button" id="close-note" aria-label="Close">Close</button></div><label class="field">What did you work on?<textarea id="note-text" rows="5" required></textarea></label><label class="field">Links (optional, one HTTP(S) URL per line)<textarea id="note-links" rows="3"></textarea></label><div class="dialog-actions"><button type="button" id="cancel-note">Cancel</button><button class="primary" type="submit">Add to this day</button></div></form></dialog>
-  <dialog id="settings-dialog"><form id="settings-form" class="dialog-body"><div class="dialog-head"><div><h2>Daily settings</h2><div id="workspace-path" class="subtle"></div></div><button type="button" id="close-settings" aria-label="Close settings">Close</button></div><section class="settings-section"><h3>Reference notes</h3><p>Optional product and engineering notes that help explain your work.</p><button type="button" id="reference-settings">Manage reference notes</button></section><section><h3>Markdown destination</h3><p>Choose where reviewed Daily records go. Preview validates an example; Save affects new days only and creates no files.</p><label class="field">Timezone<input id="setting-timezone" required placeholder="Europe/Stockholm"></label><label class="field">Daily folder<input id="setting-daily-root" required placeholder="Work Log"></label><label class="field">File pattern<input id="setting-daily-pattern" required placeholder="{year}/{month_name}/Daily log {month_name} {day}.md"></label><div class="subtle">Supported tokens: {year}, {month}, {month_name}, {day}, {date}. Double braces produce literal braces.</div><label class="field">Template path (optional)<input id="setting-template" placeholder="Templates/Daily.md"></label><label class="field">Link style<select id="setting-link-style"><option value="markdown">Markdown links</option><option value="wikilink">Wiki links</option></select></label><div id="settings-preview" class="notice" hidden></div><div class="dialog-actions"><button type="submit">Preview destination</button><button type="button" id="save-settings" class="primary" disabled>Save destination</button></div></section><section id="automation-box" class="settings-section" hidden><div><h3>Preparation and retention</h3><p>Optional scheduling prepares candidates after a day ends. It never writes Markdown; you still review and Confirm Apply.</p></div><label class="check-field"><input id="automation-enabled" type="checkbox"><span><strong>Prepare candidates automatically</strong><br><span class="subtle">Uses the saved timezone and catches up only within the window below.</span></span></label><div class="settings-fields"><label class="field">Preparation time<input id="automation-time" type="time"></label><label class="field">Catch-up window (days)<input id="automation-catchup" type="number" min="1" max="90"></label><label class="field">Raw evidence retention (days)<input id="retention-raw" type="number" min="1" max="3650"></label><label class="field">Audit retention (days)<input id="retention-audit" type="number" min="1" max="3650"></label><label class="field">Apply recovery retention (days)<input id="retention-recovery" type="number" min="1" max="3650"></label></div><p class="subtle">Saving activates these retention periods even when automatic preparation is off. Raw expiry keeps snapshot IDs, digests, and review decisions, but removes source messages. Manual notes, active dismissals, edited candidates, and migration artifacts are preserved.</p><div id="automation-status" class="notice" hidden></div><div id="automation-runs" class="subtle"></div><div class="dialog-actions"><button type="button" id="save-automation" class="primary">Save preparation &amp; retention</button></div></section><section id="migration-box" class="migration-box" hidden><h3>Bring forward older Log Inbox data</h3><p id="migration-summary"></p><p class="subtle">This creates and verifies a database backup first. It imports old links, ignored names, and manual logs; preserves old settings and proposal bytes in app storage; and removes only unchanged, valid pending proposal files. Existing Markdown notes are never changed.</p><ul id="migration-messages" class="migration-list"></ul><div class="dialog-actions"><button type="button" id="commit-migration" class="primary">Complete migration</button></div></section></form></dialog>
-  <dialog id="apply-dialog"><div class="dialog-body"><div class="dialog-head"><div><h2>Apply to Markdown</h2><div id="apply-target" class="subtle"></div></div><button type="button" id="close-apply" aria-label="Close Apply preview">Close</button></div><p>Only the Log Inbox managed block changes. Review the exact replacement below.</p><section><h3>Current managed block</h3><pre id="apply-before"></pre></section><section><h3>Approved managed block</h3><pre id="apply-after"></pre></section><div class="dialog-actions"><button type="button" id="cancel-apply">Cancel</button><button type="button" id="confirm-apply" class="primary">Save to note</button></div></div></dialog>
-  <dialog id="comparison-dialog" aria-labelledby="comparison-title"><div class="dialog-body"><div class="dialog-head"><div><h2 id="comparison-title">Compare Daily drafts</h2><div class="subtle">One draft uses the frozen Knowledge context; one does not.</div></div><button type="button" id="close-comparison" aria-label="Close comparison">Close</button></div><p class="subtle">This creates two private comparison drafts from the same frozen Daily evidence and your notes. Neither replaces your candidate until you choose, and their identity stays hidden until you save your assessment.</p><div id="comparison-progress" class="notice" role="status">Creating two private comparison drafts…</div><div id="comparison-arms" class="comparison-grid" hidden><section class="comparison-arm" aria-labelledby="draft-a-title"><h3 id="draft-a-title">Draft A</h3><pre id="draft-a-preview"></pre></section><section class="comparison-arm" aria-labelledby="draft-b-title"><h3 id="draft-b-title">Draft B</h3><pre id="draft-b-preview"></pre></section></div><form id="comparison-form" hidden><div class="comparison-questions"><fieldset class="comparison-question"><legend>Which draft is more useful?</legend><div class="choice-row"><label><input type="radio" name="usefulness" value="a" required> Draft A</label><label><input type="radio" name="usefulness" value="b"> Draft B</label><label><input type="radio" name="usefulness" value="same"> Same</label><label><input type="radio" name="usefulness" value="neither"> Neither</label></div></fieldset><fieldset class="comparison-question"><legend>Which would take less editing?</legend><div class="choice-row"><label><input type="radio" name="less_editing" value="a" required> Draft A</label><label><input type="radio" name="less_editing" value="b"> Draft B</label><label><input type="radio" name="less_editing" value="same"> Same</label><label><input type="radio" name="less_editing" value="neither"> Neither</label></div></fieldset></div><fieldset class="comparison-question"><legend>Continue with</legend><div class="choice-row"><label><input type="radio" name="continue_with" value="a" required> Draft A</label><label><input type="radio" name="continue_with" value="b"> Draft B</label></div></fieldset><label class="field">Optional note<textarea id="comparison-note" maxlength="300" rows="2" placeholder="What made the difference?"></textarea></label><div class="dialog-actions"><button type="button" id="cancel-comparison">Cancel</button><button type="submit" id="save-comparison" class="primary">Save choice</button></div></form><div id="comparison-result" class="notice" role="status" hidden></div><div id="comparison-finished-actions" class="dialog-actions" hidden><button type="button" id="finish-comparison" class="primary">Done</button></div><div id="comparison-retry-actions" class="dialog-actions" hidden><button type="button" id="retry-comparison">Try again</button></div></div></dialog>
-  <dialog id="collection-dialog"><form id="collection-form" class="dialog-body"><div class="dialog-head"><div><h2 id="collection-dialog-title">New collection</h2><div class="subtle">Choose notes that help explain your products and engineering work.</div></div><button type="button" id="close-collection" aria-label="Close collection">Close</button></div><label class="field">Which folder holds your reference notes?<input id="collection-folder" list="knowledge-folders" placeholder="Products/My product" autocomplete="off"></label><p class="subtle">Choose one folder. We will show which notes can be used before you save.</p><details id="collection-advanced"><summary>Advanced options</summary><label class="field">Collection name<input id="collection-label" maxlength="100" required placeholder="Product context"></label><label class="field">What should this context help with?<textarea id="collection-purpose" maxlength="1000" rows="3" required placeholder="Product behavior, terminology, and decisions"></textarea></label><div class="field"><span>Include folders</span><div id="collection-roots" class="path-list"></div><div class="path-add"><input id="collection-root-input" list="knowledge-folders" placeholder="Products/My product"><button id="add-root" type="button">Add</button></div><span class="subtle">Add 1–8 paths relative to the mounted workspace. Use . for the workspace root.</span></div><div class="field"><span>Exclude folders</span><div id="collection-exclusions" class="path-list"></div><div class="path-add"><input id="collection-exclusion-input" list="knowledge-folders" placeholder="Products/My product/Archive"><button id="add-exclusion" type="button">Add</button></div><span class="subtle">Excluded folders are ignored even when they are inside an included folder.</span></div><datalist id="knowledge-folders"></datalist><label class="check-field"><input id="collection-enabled" type="checkbox" checked><span>Keep this collection ready for Daily context when enabled</span></label></details><p class="subtle">Saving changes only the collection definition. It does not create, move, edit, or delete Markdown files.</p><div id="knowledge-preview" class="notice" hidden></div><div class="dialog-actions"><button type="button" id="cancel-collection">Cancel</button><button type="submit" id="preview-collection">Review collection</button><button type="button" id="save-collection" class="primary" disabled>Create collection</button></div></form></dialog>
-  <dialog id="link-dialog"><div class="dialog-body"><div class="dialog-head"><div><h2 id="link-dialog-title">Link a name</h2><div id="link-identity" class="subtle"></div></div><button type="button" id="close-link" aria-label="Close link dialog">Close</button></div><p>Search the enabled source collections, then choose the canonical note. This changes future or regenerated candidates only.</p><label class="field">Find a Markdown note<input id="note-search" autocomplete="off" placeholder="Type a note title or path"></label><div id="note-results" class="search-results" hidden></div><div id="selected-note" class="notice" hidden></div><div class="dialog-actions"><button type="button" id="cancel-link">Cancel</button><button type="button" id="save-link" class="primary" disabled>Save link</button></div></div></dialog>
-  <script>
-    const state = { csrf: null, data: null, overview: null, contextDetails: null, contextDraft: null, comparison: null, comparisonDecision: null, comparisonRevisionId: null, date: "", view: "daily", saving: false, workspaceSettings: null, automation: null, settingsPreview: null, applyPreview: null, migration: null, knowledge: null, knowledgeReview: null, knowledgeLoading: false, editingCollection: null, collectionDraft: { roots: [], exclusions: [] }, collectionPreview: null, folderTimer: null, noteTimer: null, linkingIdentity: null, editingMapping: null, selectedNote: null };
-    const $ = id => document.getElementById(id);
-    const notice = (message, error=false) => { const el=$("notice"); el.textContent=message || ""; el.className=`notice${error?" error":""}`; el.hidden=!message; };
-    async function api(path, options={}) { const headers={"Content-Type":"application/json",...(options.headers||{})}; if(options.method && options.method!=="GET" && state.csrf) headers["X-CSRF-Token"]=state.csrf; const response=await fetch(path,{...options,headers}); const body=response.status===204?null:await response.json().catch(()=>({error:`Request failed (${response.status})`})); if(!response.ok) { const error=new Error(body?.error||`Request failed (${response.status})`); error.status=response.status; throw error; } return body; }
-    function localDate(date=new Date()) { const year=date.getFullYear(); const month=String(date.getMonth()+1).padStart(2,"0"); const day=String(date.getDate()).padStart(2,"0"); return `${year}-${month}-${day}`; }
-    function validDate(value){if(!/^\d{4}-\d{2}-\d{2}$/.test(value||""))return false;const parsed=new Date(`${value}T00:00:00Z`);return !Number.isNaN(parsed.valueOf())&&parsed.toISOString().slice(0,10)===value;}
-    function shiftDay(amount) { const date=new Date(`${state.date}T00:00:00Z`); date.setUTCDate(date.getUTCDate()+amount); selectDay(date.toISOString().slice(0,10)); }
-    function updateQuery(changes={},push=false) { const url=new URL(location.href);for(const [key,value] of Object.entries(changes)){if(value===null)url.searchParams.delete(key);else url.searchParams.set(key,value);}const target=`${url.pathname}${url.search}${url.hash}`;if(target===`${location.pathname}${location.search}${location.hash}`)return;history[push?"pushState":"replaceState"](null,"",target); }
-    async function selectDay(date) { state.editingDraft=false;state.date=date; $("day").value=date; updateQuery({date,view:null}); await loadDay(); }
-    async function selectView(view,updateUrl=true) { state.view=view==="knowledge"?"knowledge":"daily";const knowledge=state.view==="knowledge";$("daily-tab").setAttribute("aria-selected",String(!knowledge));$("knowledge-tab").setAttribute("aria-selected",String(knowledge));$("daily-tab").tabIndex=knowledge?-1:0;$("knowledge-tab").tabIndex=knowledge?0:-1;$("daily-panel").hidden=knowledge;$("knowledge-panel").hidden=!knowledge;document.title=`Log Inbox · ${knowledge?"Knowledge":"Daily"}`;if(updateUrl)updateQuery({view:knowledge?"knowledge":null},true);if(knowledge&&!state.knowledge&&!state.knowledgeLoading)await loadKnowledge(); }
-    async function boot() {
-      const url=new URL(location.href);
-      const requested=url.searchParams.get("date");
-      const requestedDate=validDate(requested)?requested:null;
-      const requestedView=url.searchParams.get("view")==="knowledge"?"knowledge":"daily";
-      try {
-        const session=await api("/api/v2/auth/session");
-        state.csrf=session.csrf_token;
-        $("login-panel").hidden=true;
-        $("unlock").hidden=Boolean(state.csrf);
-        $("settings").hidden=false;
-        $("settings").disabled=!state.csrf;
-        await loadWorkspaceSettings();
-        if(!state.workspaceSettings.active_profile||!state.workspaceSettings.binding_matches){
-          await selectView(requestedView,false);
-          $("daily-app").hidden=false;
-          const message=state.workspaceSettings.active_profile?"The mounted workspace changed. Review workspace settings before choosing Knowledge folders.":"Review and save workspace settings before choosing Knowledge folders.";
-          knowledgeNotice(message,true);
-          notice(state.workspaceSettings.active_profile?"The mounted workspace changed. Review Daily settings before continuing.":"Review and save Daily settings before generating your first record.",true);
-          if(state.csrf)openSettings();
-          return;
-        }
-        await loadAutomation();
-        state.overview=await api("/api/v2/daily/overview");
-        state.date=requestedDate||state.overview.today;
-        $("day").value=state.date;
-        await loadMigration();
-        await loadDay();
-        await selectView(requestedView,false);
-        $("daily-app").hidden=false;
-        if(state.migration?.cutover_status!=="completed"&&state.migration?.items?.length){
-          notice("Older Log Inbox data is waiting in Settings. Review the migration before relying on this Daily view.",true);
-        }
-      } catch(error) {
-        if(error.status===401)showLogin();
-        else { $("daily-app").hidden=false; notice(error.message,true); }
-      }
-    }
-    function showLogin() { $("login-panel").hidden=false; $("daily-app").hidden=true; $("unlock").hidden=true; $("owner-secret").focus(); }
-    async function loadWorkspaceSettings(){state.workspaceSettings=await api("/api/v2/settings/workspace");}
-    async function loadAutomation(){state.automation=await api("/api/v2/settings/automation");}
-    function knowledgeNotice(message,error=false){const node=$("knowledge-notice");node.textContent=message||"";node.className=`notice${error?" error":""}`;node.hidden=!message;}
-    function collectionPathLabel(path){return path==="."?"Workspace root":path;}
-    async function loadKnowledge(){const setupOpen=$("knowledge-content").querySelectorAll(":scope > .knowledge-details")[1]?.open;state.knowledgeLoading=true;$("knowledge-content").innerHTML='<div class="card">Loading Knowledge…</div>';const [collections,review]=await Promise.allSettled([api("/api/v2/knowledge/collections"),api("/api/v2/knowledge/review?limit=100")]);state.knowledge=collections.status==="fulfilled"?collections.value:null;state.knowledgeReview=review.status==="fulfilled"?review.value:null;renderKnowledge(collections.status==="rejected"?collections.reason:null,review.status==="rejected"?review.reason:null);compactKnowledge();const setup=$("knowledge-content").querySelectorAll(":scope > .knowledge-details")[1];if(setup&&setupOpen)setup.open=true;state.knowledgeLoading=false;}
-    function compactKnowledge(){const root=$("knowledge-content");if(!root||root.querySelector(":scope > .knowledge-details"))return;const intro=el("div","notice","Knowledge is optional. Daily already summarizes your logs; only link a name here when you want future candidates to use a specific canonical note.");root.prepend(intro);const sections=[...root.querySelectorAll(":scope > .knowledge-section")];if(!sections.length)return;const review=document.createElement("details");review.className="knowledge-details";review.open=true;const reviewSummary=document.createElement("summary");reviewSummary.textContent="Review names (optional)";review.append(reviewSummary);sections[0].parentNode.insertBefore(review,sections[0]);review.append(sections[0]);if(sections.length>1){const setup=document.createElement("details");setup.className="knowledge-details";const setupSummary=document.createElement("summary");setupSummary.textContent="Saved links and setup";setup.append(setupSummary);sections[1].parentNode.insertBefore(setup,sections[1]);for(const section of sections.slice(1))setup.append(section);}}
-    function el(tag,className,text){const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node;}
-    function action(label,handler,{primary=false,disabled=false}={}){const button=el("button",primary?"primary":"",label);button.type="button";button.disabled=disabled;button.addEventListener("click",handler);return button;}
-    function identityLabel(field){return({product:"Product",project:"Project",repo:"Repository",app:"Application",service:"Service",module:"Module",work_item:"Work item",pull_request:"Pull request"})[field]||field.replaceAll("_"," ");}
-    function noteTitle(path){const name=(path||"").split("/").pop()||path||"Unknown note";return name.replace(/\.md$/i,"");}
-    function simpleMapping(mapping){return mapping.selectors?.length===1&&mapping.selectors[0].operator==="exact";}
-    function renderKnowledge(collectionError=null,reviewError=null){const root=$("knowledge-content");root.replaceChildren();const collections=state.knowledge;const review=state.knowledgeReview;const collectionCount=collections?.count||0;const unresolvedCount=review?.unresolved?.total_count||0;$("knowledge-count").textContent=`${unresolvedCount} name${unresolvedCount===1?"":"s"} to review · ${review?.mappings?.length||0} saved link${review?.mappings?.length===1?"":"s"}`;if(!state.csrf)knowledgeNotice("Reviewing Knowledge read-only. Unlock changes to link or ignore names.");else if(review?.evidence?.truncated)knowledgeNotice(`Suggestions use the latest ${review.evidence.considered_count} retained events. Older evidence is not included in this review.`);else knowledgeNotice("");const unresolved=el("section","knowledge-section");const unresolvedHead=el("div","card-head");unresolvedHead.append(el("h2","","Names to review"),el("span","subtle",`${unresolvedCount}`));unresolved.append(unresolvedHead,el("p","subtle","Link durable product and engineering names to canonical notes, or ignore noise. Changes affect only new or regenerated candidates."));const unresolvedList=el("div","review-list");if(reviewError||review?.review_status==="unavailable"){const error=reviewError?.message||review?.diagnostics?.resolution_failed||"Review is temporarily unavailable.";unresolvedList.append(el("div","empty",`Names could not be reviewed: ${error}`),action("Retry",loadKnowledge));}else if(!review?.unresolved?.identities?.length)unresolvedList.append(el("div","empty",review?"Everything found is linked or ignored.":"No review data is available."));else for(const identity of review.unresolved.identities){const row=el("div","review-row");const summary=el("div");summary.append(el("div","review-name",identity.value),el("div","subtle",`${identityLabel(identity.field)} · ${identity.event_count} event${identity.event_count===1?"":"s"}`));const actions=el("div","actions");actions.append(action("Link",()=>openLink(identity),{primary:true,disabled:!state.csrf||!collectionCount}),action("Ignore",()=>ignoreIdentity(identity),{disabled:!state.csrf}));row.append(summary,actions);unresolvedList.append(row);}unresolved.append(unresolvedList);if(!collectionCount&&!collectionError)unresolved.append(el("div","notice","Add a source collection before linking names so search stays bounded to notes you trust."));root.append(unresolved);
-      const mappings=el("section","knowledge-section");const mappingsHead=el("div","card-head");mappingsHead.append(el("h2","","Saved links"),el("span","subtle",`${review?.mappings?.length||0}`));mappings.append(mappingsHead,el("p","subtle","Daily uses these links when the exact name appears. Existing reviewed candidates stay unchanged until you regenerate them."));const mappingList=el("div");const grouped=new Map();for(const item of review?.mappings||[]){const path=item.mapping.canonical_note_path;if(!grouped.has(path))grouped.set(path,[]);grouped.get(path).push(item);}if(!grouped.size)mappingList.append(el("div","empty","No saved links yet."));for(const [path,items] of grouped){const group=el("div","mapping-group");group.append(el("div","mapping-target",noteTitle(path)),el("div","subtle",path));for(const item of items){const mapping=item.mapping;const row=el("div","mapping-row");const exact=simpleMapping(mapping);const selector=exact?mapping.selectors[0]:null;const label=exact?`${identityLabel(selector.field)}: ${selector.value}`:`Imported or advanced rule · ${mapping.selectors?.length||0} conditions`;const summary=el("div","",label);if(item.target_status!=="ready")summary.append(el("span","pill paused",item.target_status==="target_missing"?"Target missing":"Paused"));const actions=el("div","actions");if(exact)actions.append(action("Change",()=>openLink({field:selector.field,value:selector.value},mapping),{disabled:!state.csrf}),action(mapping.enabled?"Pause":"Enable",()=>toggleMapping(mapping),{disabled:!state.csrf}));actions.append(action("Remove",()=>removeMapping(mapping),{disabled:!state.csrf}));row.append(summary,actions);group.append(row);}mappingList.append(group);}mappings.append(mappingList);root.append(mappings);
-      const ignored=el("section","knowledge-section");const ignoredDetails=document.createElement("details");ignoredDetails.className="knowledge-details";const ignoredSummary=document.createElement("summary");ignoredSummary.textContent=`Ignored names (${review?.ignored?.length||0})`;ignoredDetails.append(ignoredSummary);const ignoredList=el("div","review-list");if(!review?.ignored?.length)ignoredList.append(el("div","empty","No ignored names."));else for(const item of review.ignored){const row=el("div","review-row");row.append(el("div","",`${identityLabel(item.field)}: ${item.value}`),action("Review again",()=>reopenIgnored(item),{disabled:!state.csrf}));ignoredList.append(row);}ignoredDetails.append(ignoredList);ignored.append(ignoredDetails);root.append(ignored);
-      const sources=el("section","knowledge-section");const sourceDetails=document.createElement("details");sourceDetails.className="knowledge-details";if(!collectionCount||collectionError)sourceDetails.open=true;const sourceSummary=document.createElement("summary");sourceSummary.textContent=`Source collections (${collectionCount})`;sourceDetails.append(sourceSummary,el("p","subtle","Optional guardrails that limit which note titles and paths can be searched. They do not browse, create, move, or edit files."));const controls=el("div","actions");controls.append(action("New collection",()=>openCollection(),{primary:true,disabled:!state.csrf||Boolean(collections&&collections.count>=collections.limit)}));sourceDetails.append(controls);const list=el("div","knowledge-list");list.id="knowledge-list";if(collectionError){list.append(el("div","empty",`Collections could not be loaded: ${collectionError.message}`),action("Retry",loadKnowledge));}else renderCollections(list,collections);sourceDetails.append(list);sources.append(sourceDetails);root.append(sources);
-      const diagnostics=review?.diagnostics;if(diagnostics){const total=(diagnostics.missing_root_count||0)+(diagnostics.oversized_note_count||0)+(diagnostics.unreadable_note_count||0)+(diagnostics.invalid_note_count||0)+(diagnostics.invalid_mapping_count||0)+(diagnostics.ambiguous_group_count||0);if(total){const details=document.createElement("details");details.className="diagnostics";const summary=document.createElement("summary");summary.textContent=`Diagnostics (${total})`;details.append(summary,el("div","",`${diagnostics.missing_root_count||0} missing roots · ${diagnostics.oversized_note_count||0} oversized notes · ${diagnostics.unreadable_note_count||0} unreadable notes · ${diagnostics.invalid_note_count||0} invalid notes · ${diagnostics.invalid_mapping_count||0} invalid links · ${diagnostics.ambiguous_group_count||0} ambiguous groups`));root.append(details);}}}
-    function renderCollections(root,data){if(!data){root.append(el("div","empty","Collection setup is unavailable."));return;}if(!data.collections.length){root.append(el("div","empty","No source collections. Daily still works, but canonical-note search is unavailable."));return;}for(const collection of data.collections){const card=el("article","collection-card");const head=el("div","collection-head");const summary=el("div");const title=el("div","collection-title");title.append(el("h3","",collection.label),el("span",`pill${collection.enabled?"":" paused"}`,collection.enabled?"Active":"Paused"));summary.append(title,el("div","",collection.purpose));const actions=el("div","actions");actions.append(action("Edit",()=>openCollection(collection),{disabled:!state.csrf}),action(collection.enabled?"Pause":"Enable",()=>toggleCollection(collection),{disabled:!state.csrf}),action("Remove",()=>removeCollection(collection),{disabled:!state.csrf}));head.append(summary,actions);card.append(head,collectionPaths("Includes",collection.roots),collectionPaths("Excludes",collection.exclusions));root.append(card);}}
-    function collectionPaths(label,paths){const section=document.createElement("div");section.className="path-section";const heading=document.createElement("strong");heading.textContent=label;const list=document.createElement("div");list.className="path-list";if(!paths.length){const empty=document.createElement("span");empty.className="subtle";empty.textContent="No exclusions";list.append(empty);}else for(const path of paths){const item=document.createElement("span");item.className="path";item.textContent=collectionPathLabel(path);list.append(item);}section.append(heading,list);return section;}
-    function openCollection(collection=null){state.editingCollection=collection;state.collectionLabelEdited=false;$("collection-advanced").open=Boolean(collection);$("collection-folder").value=collection?.roots?.[0]||"";$("collection-folder").dataset.previous=collection?.roots?.[0]||"";state.collectionDraft={roots:[...(collection?.roots||[])],exclusions:[...(collection?.exclusions||[])]};state.collectionPreview=null;$("collection-dialog-title").textContent=collection?"Edit collection":"New collection";$("collection-label").value=collection?.label||"Reference notes";$("collection-purpose").value=collection?.purpose||"Product and engineering background for daily drafts";$("collection-enabled").checked=collection?.enabled??true;$("collection-root-input").value="";$("collection-exclusion-input").value="";$("knowledge-preview").hidden=true;$("save-collection").disabled=true;$("save-collection").textContent=collection?"Save changes":"Create collection";renderCollectionPaths();$("collection-dialog").showModal();}
-    function closeCollection(){$("collection-dialog").close();}
-    function invalidateCollectionPreview(){state.collectionPreview=null;$("knowledge-preview").hidden=true;$("save-collection").disabled=true;}
-    function renderCollectionPaths(){const first=state.collectionDraft.roots[0]||"";$("collection-folder").value=first;$("collection-folder").dataset.previous=first;if(!state.editingCollection&&!state.collectionLabelEdited)$("collection-label").value=first&&first!=="."?first.split("/").filter(Boolean).pop():"Reference notes";for(const [kind,nodeId] of [["roots","collection-roots"],["exclusions","collection-exclusions"]]){const root=$(nodeId);root.replaceChildren();for(const [index,path] of state.collectionDraft[kind].entries()){const chip=document.createElement("span");chip.className="path editable-path";const text=document.createElement("span");text.textContent=collectionPathLabel(path);const remove=document.createElement("button");remove.type="button";remove.setAttribute("aria-label",`Remove ${path}`);remove.textContent="×";remove.addEventListener("click",()=>{state.collectionDraft[kind].splice(index,1);invalidateCollectionPreview();renderCollectionPaths();});chip.append(text,remove);root.append(chip);}}}
-    function addCollectionPath(kind,inputId){const input=$(inputId);const value=input.value.trim().replace(/\/+$/,"");if(!value){knowledgePreviewError("Enter a relative folder path. Use . for the workspace root.");return;}const limit=kind==="roots"?8:32;if(state.collectionDraft[kind].length>=limit){knowledgePreviewError(`${kind==="roots"?"Include":"Exclude"} folders are limited to ${limit}.`);return;}if(state.collectionDraft[kind].includes(value)){knowledgePreviewError("That folder is already listed.");return;}state.collectionDraft[kind].push(value);input.value="";invalidateCollectionPreview();renderCollectionPaths();}
-    function collectionDraft(){return{label:$("collection-label").value,purpose:$("collection-purpose").value,roots:[...state.collectionDraft.roots],exclusions:[...state.collectionDraft.exclusions],enabled:$("collection-enabled").checked};}
-    function knowledgePreviewError(message){const node=$("knowledge-preview");node.textContent=message;node.className="notice error";node.hidden=false;$("save-collection").disabled=true;}
-    async function previewCollection(event){event.preventDefault();if(!$("collection-form").reportValidity())return;if(!state.collectionDraft.roots.length){knowledgePreviewError("Add at least one include folder.");return;}$("preview-collection").disabled=true;try{const preview=await api("/api/v2/knowledge/collections/preview",{method:"POST",body:JSON.stringify(collectionDraft())});state.collectionPreview=preview;state.collectionDraft={roots:[...preview.collection.roots],exclusions:[...preview.collection.exclusions]};$("collection-label").value=preview.collection.label;$("collection-purpose").value=preview.collection.purpose;renderCollectionPaths();const skipped=preview.oversized_note_count?` ${preview.oversized_note_count} over 1 MB will be skipped.`:"";const missing=preview.missing_roots?.length?` ${preview.missing_roots.join(", ")} does not exist yet and will not be created.`:"";const node=$("knowledge-preview");node.textContent=`Review: ${preview.matched_note_count} Markdown note${preview.matched_note_count===1?"":"s"} match; ${preview.eligible_note_count} eligible.${skipped}${missing} Nothing has been saved.`;node.className="notice";node.hidden=false;$("save-collection").disabled=false;}catch(error){knowledgePreviewError(error.message);}finally{$("preview-collection").disabled=false;}}
-    async function saveCollection(){const preview=state.collectionPreview;if(!preview)return;const current=state.editingCollection;const path=current?`/api/v2/knowledge/collections/${encodeURIComponent(current.id)}`:"/api/v2/knowledge/collections";$("save-collection").disabled=true;$("preview-collection").disabled=true;try{await api(path,{method:current?"PUT":"POST",body:JSON.stringify({collection:preview.collection,preview_digest:preview.preview_digest,expected_updated_at:current?.updated_at||null})});closeCollection();await loadKnowledge();if(state.referenceIdentity){openLink(state.referenceIdentity);$("note-search").value=state.referenceIdentity.value;searchKnowledgeNotes();}knowledgeNotice(current?`Changes to “${preview.collection.label}” were saved.`:`“${preview.collection.label}” was created.`);}catch(error){if(error.status===409&&current){await loadKnowledge();state.editingCollection=state.knowledge?.collections.find(item=>item.id===current.id)||current;invalidateCollectionPreview();knowledgePreviewError("This collection changed in another session. Your edits are still here; review them against the latest saved version and try again.");}else knowledgePreviewError(error.message);}finally{$("preview-collection").disabled=false;}}
-    async function toggleCollection(collection){const draft={label:collection.label,purpose:collection.purpose,roots:collection.roots,exclusions:collection.exclusions,enabled:!collection.enabled};try{const preview=await api("/api/v2/knowledge/collections/preview",{method:"POST",body:JSON.stringify(draft)});await api(`/api/v2/knowledge/collections/${encodeURIComponent(collection.id)}`,{method:"PUT",body:JSON.stringify({collection:preview.collection,preview_digest:preview.preview_digest,expected_updated_at:collection.updated_at})});await loadKnowledge();knowledgeNotice(preview.collection.enabled?`“${collection.label}” will be used for exact Daily note links.`:`“${collection.label}” is paused and will not be used by Daily.`);}catch(error){await loadKnowledge();knowledgeNotice(error.status===409?"This collection changed in another session. The latest version was loaded; try again.":error.message,true);}}
-    async function removeCollection(collection){if(!confirm(`Remove “${collection.label}”? This removes the collection definition only. Markdown files will not be changed.`))return;try{await api(`/api/v2/knowledge/collections/${encodeURIComponent(collection.id)}`,{method:"DELETE",body:JSON.stringify({expected_updated_at:collection.updated_at})});await loadKnowledge();knowledgeNotice(`“${collection.label}” was removed. Markdown files were not changed.`);}catch(error){await loadKnowledge();knowledgeNotice(error.status===409?"This collection changed in another session. The latest version was loaded; try again.":error.message,true);}}
-    function searchKnowledgeFolders(input){clearTimeout(state.folderTimer);const query=input.value.trim();if(query.length<2)return;state.folderTimer=setTimeout(async()=>{try{const data=await api(`/api/v2/knowledge/folders?query=${encodeURIComponent(query)}&limit=20`);const list=$("knowledge-folders");list.replaceChildren();for(const folder of data.folders){const option=document.createElement("option");option.value=folder;list.append(option);}}catch(_){/* Validation remains server-authoritative at preview. */}},180);}
-    function openLink(identity,mapping=null){state.linkingIdentity=identity;state.editingMapping=mapping;state.selectedNote=mapping?{path:mapping.canonical_note_path,title:noteTitle(mapping.canonical_note_path)}:null;$("link-dialog-title").textContent=mapping?"Change saved link":"Link a name";$("link-identity").textContent=`${identityLabel(identity.field)}: ${identity.value}`;$("note-search").value="";$("note-results").replaceChildren();$("note-results").hidden=true;renderSelectedNote();$("link-dialog").showModal();$("note-search").focus();}
-    function closeLink(){clearTimeout(state.noteTimer);$("link-dialog").close();$("link-identity").textContent="";$("note-results").replaceChildren();$("note-results").hidden=true;state.linkingIdentity=null;state.editingMapping=null;state.selectedNote=null;}
-    function renderSelectedNote(){const node=$("selected-note");if(!state.selectedNote){node.hidden=true;node.textContent="";$("save-link").disabled=true;return;}node.hidden=false;node.className="notice";node.textContent=`Selected: ${state.selectedNote.title} · ${state.selectedNote.path}`;$("save-link").disabled=!state.csrf;}
-    function searchKnowledgeNotes(){clearTimeout(state.noteTimer);const query=$("note-search").value.trim();const root=$("note-results");state.selectedNote=null;renderSelectedNote();root.replaceChildren();if(query.length<2){root.hidden=true;return;}root.hidden=false;root.append(el("div","empty","Searching…"));state.noteTimer=setTimeout(async()=>{try{const data=await api(`/api/v2/knowledge/notes?query=${encodeURIComponent(query)}&limit=20`);root.replaceChildren();if(!data.notes.length){root.append(el("div","empty","No matching note in enabled source collections."));return;}for(const note of data.notes){const button=el("button","search-result");button.type="button";button.setAttribute("aria-selected","false");button.append(el("strong","",note.title),el("span","subtle",note.path));button.addEventListener("click",()=>{root.querySelectorAll("button").forEach(item=>item.setAttribute("aria-selected","false"));button.setAttribute("aria-selected","true");state.selectedNote=note;renderSelectedNote();});root.append(button);}}catch(error){root.replaceChildren(el("div","empty",`Note search failed: ${error.message}`));}},180);}
-    async function saveLink(){const identity=state.linkingIdentity;const note=state.selectedNote;if(!identity||!note)return;const mapping={field:identity.field,value:identity.value,canonical_note_path:note.path,enabled:true};const current=state.editingMapping;$("save-link").disabled=true;try{await api(current?`/api/v2/knowledge/mappings/${encodeURIComponent(current.id)}`:"/api/v2/knowledge/mappings",{method:current?"PUT":"POST",body:JSON.stringify(current?{mapping,expected_updated_at:current.updated_at}:{mapping})});closeLink();await loadKnowledge();const setup=$("knowledge-content").querySelectorAll(":scope > .knowledge-details")[1];if(setup)setup.open=true;knowledgeNotice(`Saved ${identity.value} → ${note.title}. Regenerate a Daily candidate to use the link.`);if(state.referenceIdentity){state.referenceIdentity=null;notice(`Reference linked to ${note.title}. Update the draft when ready.`);$("notice").append(action("Update draft",generate,{primary:true,disabled:Boolean(activeAttempt())}));}}catch(error){$("save-link").disabled=false;const node=$("selected-note");node.hidden=false;node.className="notice error";node.textContent=error.status===409?"This link changed in another session. Close and review the latest saved links.":error.message;}}
-    async function toggleMapping(mapping){if(!simpleMapping(mapping))return;const selector=mapping.selectors[0];try{await api(`/api/v2/knowledge/mappings/${encodeURIComponent(mapping.id)}`,{method:"PUT",body:JSON.stringify({mapping:{field:selector.field,value:selector.value,canonical_note_path:mapping.canonical_note_path,enabled:!mapping.enabled},expected_updated_at:mapping.updated_at})});await loadKnowledge();knowledgeNotice(`${selector.value} is ${mapping.enabled?"paused":"enabled"}. Existing candidates were not changed.`);}catch(error){await loadKnowledge();knowledgeNotice(error.status===409?"This link changed in another session. The latest links were loaded.":error.message,true);}}
-    async function removeMapping(mapping){if(!confirm(`Remove the saved link to “${noteTitle(mapping.canonical_note_path)}”? Existing candidates will not be changed.`))return;try{await api(`/api/v2/knowledge/mappings/${encodeURIComponent(mapping.id)}`,{method:"DELETE",body:JSON.stringify({expected_updated_at:mapping.updated_at})});await loadKnowledge();knowledgeNotice("Saved link removed. Existing candidates were not changed.");}catch(error){await loadKnowledge();knowledgeNotice(error.status===409?"This link changed in another session. The latest links were loaded.":error.message,true);}}
-    async function ignoreIdentity(identity){try{await api("/api/v2/knowledge/ignored",{method:"POST",body:JSON.stringify({field:identity.field,value:identity.value})});await loadKnowledge();knowledgeNotice(`Ignored ${identity.value}. You can restore it under Ignored names.`);}catch(error){await loadKnowledge();knowledgeNotice(error.message,true);}}
-    async function reopenIgnored(item){try{await api(`/api/v2/knowledge/ignored/${encodeURIComponent(item.id)}`,{method:"DELETE"});await loadKnowledge();knowledgeNotice(`${item.value} is back in review when it appears in retained evidence.`);}catch(error){await loadKnowledge();knowledgeNotice(error.message,true);}}
-    function renderAutomationSettings(){const box=$("automation-box");const profile=state.workspaceSettings?.active_profile;const fields=[$("automation-time"),$("automation-catchup"),$("retention-raw"),$("retention-audit"),$("retention-recovery")];for(const field of fields)field.required=Boolean(profile&&state.automation);if(!profile||!state.automation){box.hidden=true;return;}box.hidden=false;const automation=state.automation;const settings=automation.settings;$("automation-enabled").checked=settings.enabled;$("automation-time").value=settings.generation_time;$("automation-catchup").value=settings.catch_up_days;$("retention-raw").value=settings.raw_retention_days;$("retention-audit").value=settings.audit_retention_days;$("retention-recovery").value=settings.recovery_retention_days;const status=$("automation-status");status.hidden=false;status.className="notice";status.textContent=automation.saved?`Saved. Automatic preparation is ${settings.enabled?"on":"off"}. Retention maintenance is active; no Markdown is written automatically.`:"Defaults shown. Scheduling and retention are inactive until you choose Save preparation & retention.";const runs=$("automation-runs");runs.replaceChildren();const recent=(automation.recent_runs||[]).slice(0,5);if(!recent.length){runs.textContent="No automatic preparation runs yet.";return;}const heading=document.createElement("strong");heading.textContent="Recent preparation runs";runs.append(heading);for(const run of recent){const row=document.createElement("div");row.textContent=`${run.local_date}: ${run.state}${run.attempts>1?` (${run.attempts} attempts)`:""}${run.last_error?` — ${run.last_error}`:""}`;runs.append(row);}}
-    function enhanceAutomationRuns(){const runs=$("automation-runs");if(!runs||!state.automation?.recent_runs?.length)return;const recent=(state.automation.recent_runs||[]).slice(0,5);runs.replaceChildren(el("strong","","Recent preparation runs"));for(const run of recent){const row=el("div","preparation-run");const failed=run.state==="failed";const summary=el("div","",`${run.local_date}: ${run.state}${run.attempts>1?` (${run.attempts} attempts)`:""}`);row.append(summary);if(failed){const detail=document.createElement("details");const title=document.createElement("summary");title.textContent="What this means";const message=run.last_error||"The model did not produce a usable candidate.";const guidance=message.includes("omitted evidence")?"The model left out evidence links. Retry the day after checking that the source events are still available.":message.includes("structured schema")?"The model returned the wrong shape. Retry once; if it repeats, disable automatic preparation and check the configured local model.":"Preparation could not complete. Retry the day manually to see the full error.";detail.append(el("p","",guidance));if(run.last_error){const raw=document.createElement("details");const rawTitle=document.createElement("summary");rawTitle.textContent="Show technical details";raw.append(rawTitle,el("div","subtle",run.last_error));detail.append(raw);}row.append(detail);const actions=el("div","actions");actions.append(action("Open day",()=>selectDay(run.local_date)),action("Retry now",async()=>{await selectDay(run.local_date);await generate();},{primary:true,disabled:!state.csrf}));row.append(actions);}else if(run.state==="claimed")row.append(el("div","subtle","Preparation is currently running; refresh this dialog in a moment."));runs.append(row);}}
-    function openSettings(){const profile=state.workspaceSettings?.active_profile;$("workspace-path").textContent=`Mounted workspace: ${state.workspaceSettings?.workspace_path||"Unavailable"}`;$("setting-timezone").value=profile?.timezone||Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC";$("setting-daily-root").value=profile?.daily_root||"Work Log";$("setting-daily-pattern").value=profile?.daily_pattern||"{year}/{month_name}/Daily log {month_name} {day}.md";$("setting-template").value=profile?.template_path||"";$("setting-link-style").value=profile?.link_style||"markdown";state.settingsPreview=null;$("settings-preview").hidden=true;$("save-settings").disabled=true;renderAutomationSettings();enhanceAutomationRuns();renderMigration();$("settings-dialog").showModal();}
-    async function loadMigration(){state.migration=await api("/api/v2/migration/cutover");renderMigration();}
-    function renderMigration(){const box=$("migration-box");if(!state.migration){box.hidden=true;return;}const migration=state.migration;const completed=migration.cutover_status==="completed";box.hidden=!completed&&!migration.items.length;if(box.hidden)return;$("migration-summary").textContent=completed?`Migration completed (${migration.completed_operation_id}). Preserved items remain available in app storage.`:`${migration.items.length} older item${migration.items.length===1?"":"s"} found. ${migration.ready?"Ready for reviewed migration.":"Resolve the blockers below before migration."}`;const list=$("migration-messages");list.replaceChildren();for(const message of [...migration.blockers,...migration.warnings]){const item=document.createElement("li");item.textContent=message;list.append(item);}$("commit-migration").hidden=completed;$("commit-migration").disabled=!state.csrf||!migration.ready;}
-    async function commitMigration(){const migration=state.migration;if(!migration||!migration.ready)return;if(!confirm("Create a verified backup and migrate the listed legacy data? Existing Markdown notes will not be changed."))return;$("commit-migration").disabled=true;try{const result=await api("/api/v2/migration/cutover",{method:"POST",body:JSON.stringify({operation_id:migration.operation_id,report_digest:migration.report_digest})});await Promise.all([loadMigration(),loadAutomation()]);renderAutomationSettings();notice(`Migration completed. ${result.imported_items} items preserved or imported; ${result.cleaned_files} unchanged pending files cleaned. ${result.retried_preparation_runs||0} blocked preparation run${result.retried_preparation_runs===1?" was":"s were"} queued again. Backup: ${result.backup_file}.`);}catch(error){notice(error.message,true);$("commit-migration").disabled=false;}}
-    function workspaceDraft(){return{timezone:$("setting-timezone").value,daily_root:$("setting-daily-root").value,daily_pattern:$("setting-daily-pattern").value,template_path:$("setting-template").value||null,link_style:$("setting-link-style").value};}
-    async function previewSettings(event){event.preventDefault();try{state.settingsPreview=await api("/api/v2/settings/workspace/preview",{method:"POST",body:JSON.stringify(workspaceDraft())});$("settings-preview").textContent=`Example: ${state.settingsPreview.destination_example}. Nothing has been saved or created.`;$("settings-preview").className="notice";$("settings-preview").hidden=false;$("save-settings").disabled=false;}catch(error){$("settings-preview").textContent=error.message;$("settings-preview").className="notice error";$("settings-preview").hidden=false;$("save-settings").disabled=true;}}
-    async function saveSettings(){if(!state.settingsPreview)return;const active=state.workspaceSettings?.active_profile;try{await api("/api/v2/settings/workspace",{method:"PUT",body:JSON.stringify({settings:state.settingsPreview.settings,preview_digest:state.settingsPreview.preview_digest,expected_profile_id:active?.id||null,expected_updated_at:active?.updated_at||null})});$("settings-dialog").close();await loadWorkspaceSettings();await loadAutomation();await loadMigration();if(!state.date){state.overview=await api("/api/v2/daily/overview");state.date=state.overview.today;$("day").value=state.date;}await loadDay();notice("Daily settings saved. Existing days keep their previous destinations.");}catch(error){$("settings-preview").textContent=error.message;$("settings-preview").className="notice error";$("settings-preview").hidden=false;}}
-    async function saveAutomation(){const fields=[$("automation-time"),$("automation-catchup"),$("retention-raw"),$("retention-audit"),$("retention-recovery")];const invalid=fields.find(field=>!field.checkValidity());if(invalid){invalid.reportValidity();return;}const button=$("save-automation");button.disabled=true;const status=$("automation-status");try{const result=await api("/api/v2/settings/automation",{method:"PUT",body:JSON.stringify({enabled:$("automation-enabled").checked,generation_time:$("automation-time").value,catch_up_days:Number($("automation-catchup").value),raw_retention_days:Number($("retention-raw").value),audit_retention_days:Number($("retention-audit").value),recovery_retention_days:Number($("retention-recovery").value),expected_updated_at:state.automation?.saved?state.automation.settings.updated_at:null})});await loadAutomation();renderAutomationSettings();enhanceAutomationRuns();if(result.requeued_failed_runs)status.textContent=`Saved. Requeued ${result.requeued_failed_runs} failed preparation run${result.requeued_failed_runs===1?"":"s"}; they will retry automatically. No Markdown is written automatically.`;await loadDay();}catch(error){status.textContent=error.message;status.className="notice error";status.hidden=false;}finally{button.disabled=false;}}
-    async function loadDay() { notice(""); state.applyPreview=null;state.contextDraft=null; try { [state.data,state.overview,state.contextDetails]=await Promise.all([api(`/api/v2/daily/${state.date}`),api("/api/v2/daily/overview"),api(`/api/v2/daily/${state.date}/context`).catch(error=>({status:"unavailable",message:`Knowledge details could not be loaded: ${error.message}`,workstreams:[]}))]); render(); scheduleRefresh(); } catch(error) { notice(error.message,true); } }
-    const statusLabels={missed:"Needs review",not_started:"Not started",notes_unreviewed:"Notes to review",scheduled:"Scheduled",generating:"Generating",generation_failed:"Generation failed",in_review:"Review",update_available:"Update available",applied:"Applied",dismissed:"Dismissed",apply_attention:"Apply needs attention"};
-    function renderOverview(){const overview=state.overview;const root=$("recent-days");root.replaceChildren();if(!overview)return;const summary=[];if(overview.missed_count)summary.push(`${overview.missed_count} missed`);if(overview.update_count)summary.push(`${overview.update_count} with updates`);if(overview.failed_count)summary.push(`${overview.failed_count} failed`);$("missed-summary").textContent=summary.join(" · ")||overview.timezone;for(const day of overview.days){const button=document.createElement("button");button.className=`recent-day ${day.status}`;button.setAttribute("aria-current",day.local_date===state.date?"date":"false");const date=document.createElement("span");date.textContent=new Intl.DateTimeFormat(undefined,{weekday:"short",month:"short",day:"numeric",timeZone:"UTC"}).format(new Date(`${day.local_date}T00:00:00Z`));const status=document.createElement("span");status.className="day-state";const expiry=day.expired_evidence_count?` · ${day.expired_evidence_count} expired`:"";status.textContent=`${statusLabels[day.status]||day.status}${expiry}`;button.append(date,status);button.addEventListener("click",()=>selectDay(day.local_date));root.append(button);}$("recent").hidden=!overview.days.length;}
-    function renderDaily() { const data=state.data; renderOverview(); $("day-title").textContent=new Date(`${data.local_date}T12:00:00`).toLocaleDateString(undefined,{weekday:"long",year:"numeric",month:"long",day:"numeric"}); $("destination").textContent=`Markdown destination: ${data.destination_path}`; const freshness=data.candidate_freshness==="update_available"?" · New evidence is available":""; const expiry=data.expired_evidence_count?` · ${data.expired_evidence_count} source event${data.expired_evidence_count===1?" has":"s have"} expired`:""; const dismissed=data.day?.review_status==="dismissed"; $("status").textContent=data.current_revision?`Revision ${data.current_revision.revision_number}${dismissed?" · Dismissed":""}${freshness}${expiry}`:"No candidate yet"; $("dismiss").hidden=!data.current_revision;$("dismiss").textContent=dismissed?"Reopen":"Dismiss";$("dismiss").disabled=!state.csrf||state.saving; $("generate").textContent=data.current_revision?"Regenerate":"Generate candidate"; $("generate").disabled=!state.csrf || state.saving || dismissed; $("add-note").disabled=!state.csrf; renderManual(data.manual_entries||[]); renderCandidate(data.current_revision?.content); renderEvidence(data.automated_evidence?.events||[],data.current_snapshot_evidence||[],data.active_late_evidence_deferrals||[]);renderContext(); $("preview").textContent=data.preview_markdown||"Generate a candidate to see the exact Markdown preview."; const apply=data.apply_status;const pending=apply&&apply.state!=="finalized";const invalidContext=state.contextDetails?.status==="invalid";$("write-status").textContent=apply?.state==="finalized"?"Applied to Markdown":pending?"Apply needs attention":dismissed?"Dismissed — nothing will be written":"Nothing is written yet";$("apply-attention").hidden=!pending;if(pending){$("apply-attention-message").textContent=apply.state==="failed"?"The write stopped before Log Inbox could replace the note.":apply.state==="reconciliation_required"?"The note no longer matches the exact state approved for Apply.":"An interrupted Apply is waiting to be verified.";$("apply-attention-detail").textContent=apply.failure_reason||"Log Inbox will verify the journal, destination, and owned temporary file before doing anything.";$("retry-apply").hidden=!apply.can_retry;$("retry-apply").disabled=!state.csrf||state.saving;}$("review-apply").hidden=!data.current_revision||dismissed; $("review-apply").disabled=!state.csrf||state.saving||pending||invalidContext; }
-    function contextReason(note){if(note.attached===false)return"Removed from the current candidate";const fields=(note.matched_fields||[]).map(identityLabel).join(", ");if(note.reason==="saved_mapping"||note.reason==="mapping")return fields?`Saved link for ${fields}`:"Saved link";return fields?`Exact note match for ${fields}`:"Exact note match";}
-    function contextKey(workstreamId,notePath){return JSON.stringify([workstreamId,notePath]);}
-    function initContextDraft(){const revisionId=state.data?.current_revision?.id;if(state.contextDraft?.revisionId===revisionId)return;const excluded=new Set();for(const workstream of state.contextDetails?.workstreams||[])for(const note of workstream.notes||[])if(note.excluded)excluded.add(contextKey(workstream.id,note.path));state.contextDraft={revisionId,baseline:new Set(excluded),excluded};}
-    function contextDraftChanged(){const draft=state.contextDraft;if(!draft||draft.baseline.size!==draft.excluded.size)return Boolean(draft);for(const key of draft.baseline)if(!draft.excluded.has(key))return true;return false;}
-    function contextComparisonEligible(){const revision=state.data?.current_revision;const status=state.contextDetails?.status;return Boolean(state.csrf&&revision&&["generated","regenerated"].includes(revision.origin)&&state.data?.current_context_snapshot?.used_note_count&&["current","changed"].includes(status)&&state.data?.day?.review_status==="in_review"&&!state.data?.apply_status&&!contextDraftChanged()&&$("save-candidate").hidden);}
-    function updateContextAdjustmentControls(){const changed=contextDraftChanged();const button=$("regenerate-context");button.hidden=!changed;button.disabled=!state.csrf||state.saving;const dismissed=state.data?.day?.review_status==="dismissed";$("generate").disabled=!state.csrf||state.saving||dismissed||changed;const status=$("context-adjustment-status");status.hidden=!changed;status.textContent=changed?"Pending choices are not saved yet. Regenerate to create a new candidate with them.":"";const compare=$("compare-context");compare.hidden=!contextComparisonEligible();compare.disabled=state.saving;}
-    function toggleContextExcerpt(workstreamId,notePath,include){const key=contextKey(workstreamId,notePath);if(include)state.contextDraft.excluded.delete(key);else state.contextDraft.excluded.add(key);updateContextAdjustmentControls();}
-    function renderContext(){const card=$("context-card");const details=state.contextDetails;const snapshot=state.data?.current_context_snapshot;if(!state.data?.current_revision){card.hidden=true;return;}card.hidden=false;initContextDraft();const status=details?.status||"unavailable";const badge=$("context-status");badge.textContent=status==="current"?"Up to date":status==="changed"?"Setup changed":status==="invalid"?"Source unavailable":status==="none"?"No Knowledge":"Check unavailable";badge.className=`pill${status==="current"||status==="none"?"":" paused"}`;$("context-kind").textContent=details?.mode==="bounded_knowledge"?"Canonical links and bounded note excerpts informed this revision.":"Canonical links only · no note text was used.";$("context-message").textContent=details?.message||"Current Knowledge could not be checked; the candidate keeps its frozen context.";const root=$("context-list");root.replaceChildren();for(const workstream of details?.workstreams||[]){const section=el("div","context-workstream");const title=state.data.current_revision.content?.workstreams?.find(item=>item.id===workstream.id)?.title||"Workstream";section.append(el("strong","",title));for(const note of workstream.notes||[]){section.append(el("div","",note.title),el("div","subtle",`${note.path} · ${contextReason(note)}`));if(details.mode==="bounded_knowledge"){const choice=el("label","check-field");const input=document.createElement("input");input.type="checkbox";input.checked=!state.contextDraft.excluded.has(contextKey(workstream.id,note.path));input.disabled=!state.csrf||state.saving;input.addEventListener("change",()=>toggleContextExcerpt(workstream.id,note.path,input.checked));choice.append(input,el("span","","Use this note in the next generation"));section.append(choice);}if(note.excerpt?.text){const excerpt=document.createElement("details");const summary=document.createElement("summary");summary.textContent="Excerpt sent to the model";excerpt.append(summary,el("div","context-excerpt",note.excerpt.text));section.append(excerpt);}else if(note.excluded)section.append(el("div","subtle","Not sent for this revision."));}root.append(section);}if(!root.children.length)root.append(el("div","empty",snapshot?.diagnostics?.resolution_failed?"Knowledge matching was unavailable; Daily evidence still produced this candidate.":"This revision used Daily evidence and your notes only."));updateContextAdjustmentControls();$("context-technical").hidden=!snapshot;$("context-technical-text").textContent=snapshot?`Frozen with revision ${state.data.current_revision.revision_number} · resolver ${snapshot.resolver_version||"unknown"} · ${snapshot.excerpt_count||0} excerpt${snapshot.excerpt_count===1?"":"s"} · snapshot ${snapshot.snapshot_digest.slice(0,12)}`:"";}
-    function renderManual(entries) { const root=$("manual-list"); root.replaceChildren(); if(!entries.length){const p=document.createElement("div");p.className="empty";p.textContent="No manual notes for this day.";root.append(p);return;} for(const entry of entries){const row=document.createElement("div");row.className="manual-item";const text=document.createElement("div");text.textContent=entry.text;row.append(text);if(entry.references.length){const refs=document.createElement("div");refs.className="references";for(const url of entry.references){const a=document.createElement("a");a.href=url;a.target="_blank";a.rel="noreferrer";a.textContent=url;refs.append(a);}row.append(refs);}const actions=document.createElement("div");actions.className="dialog-actions";actions.append(action("Delete",()=>deleteManual(entry),{disabled:!state.csrf||state.saving}));row.append(actions);root.append(row);} }
-    async function deleteManual(entry){if(!confirm("Delete this manual note? Existing candidate history is preserved, and a candidate using it will need to be regenerated."))return;state.saving=true;render();try{await api(`/api/v2/daily/${state.date}/manual/${encodeURIComponent(entry.id)}`,{method:"DELETE"});await loadDay();notice("Manual note deleted. Regenerate the candidate if it included this note.");}catch(error){notice(error.message,true);}finally{state.saving=false;if(state.data)render();}}
-    const fieldLabels={outcome:"Outcome",decision:"Decision",trade_off:"Trade-off",validation:"Validation",blocker:"Blocker",follow_up:"Follow-up",activity:"Activity"};
-    function renderCandidateEditor(content) { const root=$("candidate");root.replaceChildren();$("save-candidate").hidden=true;if(!content){const p=document.createElement("div");p.className="empty";p.textContent="No generated candidate. Your notes and evidence remain available.";root.append(p);return;} if(!content.workstreams.length){const p=document.createElement("div");p.className="empty";p.textContent="This candidate contains only your notes.";root.append(p);return;} content.workstreams.forEach((workstream,index)=>{const section=document.createElement("section");section.className="workstream";const title=document.createElement("input");title.className="title-input";title.value=workstream.title;title.disabled=!state.csrf;title.setAttribute("aria-label",`Workstream ${index+1} title`);title.addEventListener("input",()=>{$("save-candidate").hidden=false;updateContextAdjustmentControls();});section.append(title);for(const [key,label] of Object.entries(fieldLabels)){for(const fact of workstream[key]||[]){const row=document.createElement("div");row.className="fact";const lab=document.createElement("label");lab.textContent=label;const input=document.createElement("textarea");input.rows=2;input.value=fact.text;input.disabled=!state.csrf;input.dataset.workstream=String(index);input.dataset.field=key;input.dataset.fact=String((workstream[key]||[]).indexOf(fact));input.addEventListener("input",()=>{$("save-candidate").hidden=false;updateContextAdjustmentControls();});row.append(lab,input);section.append(row);}}root.append(section);}); }
-    function renderEvidence(events,decisions,deferrals) {
-      const root=$("evidence");root.replaceChildren();
-      const decisionsById=new Map(decisions.map(item=>[item.event_id,item]));
-      const deferralsById=new Map(deferrals.map(item=>[item.event_id,item]));
-      const deferredCount=deferrals.length;
-      $("evidence-count").textContent=`${events.length} events${deferredCount?` · ${deferredCount} left for later`:""}`;
-      if(!events.length){root.append(el("div","empty","No automated evidence for this day."));filterActivity();return;}
-      if(decisions.length){
-        const toolbar=el("div","evidence-toolbar");
-        const status=el("span","subtle");status.dataset.evidencePending="";
-        const includeAll=action("Include all",()=>stageAllEvidence("include"),{disabled:!state.csrf});
-        const omitAll=action("Omit all",()=>stageAllEvidence("omit"),{disabled:!state.csrf});
-        const applyAll=action("Apply all",applyAllEvidence,{primary:true,disabled:!state.csrf});applyAll.dataset.applyAllEvidence="";
-        toolbar.append(status,includeAll,omitAll,applyAll);root.append(toolbar);
-      }
-      for(const event of events){
-        const row=el("div","evidence-item");
-        row.tabIndex=-1;row.dataset.activitySearch=`${event.message} ${event.source}`.toLowerCase();
-        const message=el("div","evidence-message",event.message);
-        const meta=el("div","evidence-meta",`${event.source} · ${new Date(event.timestamp).toLocaleTimeString()}`);
-        row.append(message,meta);
-        const controls=el("div","evidence-controls");
-        if(deferralsById.has(event.id)){
-          const reopen=action("Reopen",()=>toggleLateEvidence(event.id,true),{disabled:!state.csrf});
-          controls.append(el("span","subtle","Left for later — not part of this revision"),reopen);row.append(controls);
-        }else if(decisionsById.has(event.id)){
-          const decision=decisionsById.get(event.id);
-          const select=document.createElement("select");
-          select.disabled=!state.csrf;select.dataset.evidenceId=event.id;select.dataset.savedDisposition=decision?.disposition||"include";
-          select.setAttribute("aria-label",`Evidence decision: ${event.message.slice(0,80)}`);
-          for(const [value,label] of [["include","Include"],["omit","Omit"]]){const option=document.createElement("option");option.value=value;option.textContent=label;select.append(option);}
-          if(decision?.disposition&&!["include","omit"].includes(decision.disposition)){const option=document.createElement("option");option.value=decision.disposition;option.textContent=`${decision.disposition.replaceAll("_"," ")} (saved)`;select.append(option);}
-          select.value=decision?.disposition||"include";
-          const apply=action("Update",()=>decideEvidence(event.id,select.value),{disabled:true});
-          select.addEventListener("change",()=>{apply.disabled=!state.csrf||select.value===select.dataset.savedDisposition;refreshEvidenceToolbar();});
-          controls.append(select,apply);row.append(controls);
-        }else if(state.data.current_revision){
-          const defer=action("Leave for later",()=>toggleLateEvidence(event.id,false),{disabled:!state.csrf});
-          controls.append(el("span","subtle","Arrived after this revision"),defer);row.append(controls);
-        }
-        root.append(row);
-      }
-      refreshEvidenceToolbar();
-      filterActivity();
-    }
-    function activityRows(){return [...document.querySelectorAll("#evidence .evidence-item")].filter(row=>!row.hidden);}
-    function filterActivity(){const query=$("activity-search").value.trim().toLowerCase();for(const row of document.querySelectorAll("#evidence .evidence-item")){row.hidden=!row.dataset.activitySearch.includes(query);row.removeAttribute("aria-current");}const rows=activityRows();$("activity-position").textContent=`${rows.length} matching items`;$("activity-empty").hidden=rows.length>0;$("activity-previous").disabled=!rows.length;$("activity-next").disabled=!rows.length;$("evidence").scrollTop=0;}
-    function moveActivity(direction){const rows=activityRows();if(!rows.length)return;const current=rows.findIndex(row=>row.getAttribute("aria-current")==="true");const index=current<0?(direction>0?0:rows.length-1):Math.max(0,Math.min(rows.length-1,current+direction));rows.forEach(row=>row.removeAttribute("aria-current"));const row=rows[index];row.setAttribute("aria-current","true");const panel=$("evidence");panel.scrollTop+=row.getBoundingClientRect().top-panel.getBoundingClientRect().top-5;row.focus({preventScroll:true});$("activity-position").textContent=`Item ${index+1} of ${rows.length}`;}
-    function evidenceDecisionSelects(){return [...document.querySelectorAll("#evidence select[data-evidence-id]")];}
-    function refreshEvidenceToolbar(){const status=document.querySelector("[data-evidence-pending]");const apply=document.querySelector("[data-apply-all-evidence]");if(!status||!apply)return;const pending=evidenceDecisionSelects().filter(select=>select.value!==select.dataset.savedDisposition).length;status.textContent=pending?`${pending} change${pending===1?"":"s"} will be used when saving`:"All activity is included unless you omit it. No item-by-item review required.";apply.disabled=!state.csrf||state.saving||pending===0;}
-    function stageAllEvidence(disposition){for(const select of evidenceDecisionSelects()){select.value=disposition;select.dispatchEvent(new Event("change"));}refreshEvidenceToolbar();}
-    async function saveEvidenceChanges(){const decisions=evidenceDecisionSelects().filter(select=>select.value!==select.dataset.savedDisposition).map(select=>({event_id:select.dataset.evidenceId,disposition:select.value}));if(!decisions.length)return 0;await api(`/api/v2/daily/${state.date}/evidence`,{method:"PUT",body:JSON.stringify({expected_revision_id:state.data.current_revision.id,decisions})});await loadDay();return decisions.length;}
-    async function applyAllEvidence(){state.saving=true;refreshEvidenceToolbar();try{const count=await saveEvidenceChanges();if(count)notice(`Applied ${count} evidence decision${count===1?"":"s"}.`);}catch(error){notice(error.message,true);}finally{state.saving=false;refreshEvidenceToolbar();}}
-    async function decideEvidence(eventId,disposition) { if(!disposition) return reopenEvidence(eventId); try { await api(`/api/v2/daily/${state.date}/evidence/${encodeURIComponent(eventId)}`,{method:"PUT",body:JSON.stringify({expected_revision_id:state.data.current_revision.id,disposition})}); await loadDay(); } catch(error){notice(error.message,true);} }
-    async function reopenEvidence(eventId) { try { await api(`/api/v2/daily/${state.date}/evidence/${encodeURIComponent(eventId)}`,{method:"DELETE",body:JSON.stringify({expected_revision_id:state.data.current_revision.id})}); await loadDay(); } catch(error){notice(error.message,true);} }
-    async function toggleLateEvidence(eventId,reopen){try{await api(`/api/v2/daily/${state.date}/late-evidence/${encodeURIComponent(eventId)}`,{method:reopen?"DELETE":"POST",body:JSON.stringify({expected_revision_id:state.data.current_revision.id})});await loadDay();notice(reopen?"Late evidence reopened. Regenerate after restoring any expired source evidence.":"Late evidence left for later. The preserved revision can now be reviewed and applied.");}catch(error){notice(error.message,true);}}
-    async function generate(referenceMode) {
-      if(state.saving)return;
-      if(hasPendingChanges()){notice("Save or cancel your pending edits and choices before preparing a new draft.",true);return;}
-      const withoutReferences=referenceMode==="none";
-      const editedWithNewEvidence=state.data?.current_revision?.origin==="structured_edit"&&(state.data?.current_revision?.content?.schema_version===2||state.data?.candidate_freshness==="update_available"||withoutReferences);
-      if(editedWithNewEvidence&&!confirm("Regenerating will replace your structured edits with a new draft. Continue?"))return;
-      const date=state.date;state.retryError=null;state.saving=true;render();notice("Starting a new preparation attempt…");
-      try{
-        const result=await api(`/api/v2/daily/${date}/generate`,{method:"POST",body:JSON.stringify({replace_edited:editedWithNewEvidence,...(withoutReferences?{reference_mode:"none"}:{})})});
-        if(state.date!==date)return;
-        if(result.attempt){state.data.generation_attempt=result.attempt;state.overview.active_generation=result.attempt;renderGeneration();}
-        await loadDay();
-        if(!result.attempt)notice("Draft ready. Review it before saving.");
-      }catch(error){if(state.date===date){state.retryError={date,message:`New attempt could not start: ${error.message}`};notice(state.retryError.message,true);}}
-      finally{state.saving=false;if(state.data)render();}
-    }
-    async function regenerateWithContext(){if(!contextDraftChanged())return;const replacesEdits=state.data?.current_revision?.origin==="structured_edit";if(replacesEdits&&!confirm("Regenerating with these context choices will replace your structured edits with a new candidate. Continue?"))return;const context_exclusions=[...state.contextDraft.excluded].map(key=>{const [workstream_id,note_path]=JSON.parse(key);return{workstream_id,note_path};});state.saving=true;render();notice("");try{await api(`/api/v2/daily/${state.date}/generate`,{method:"POST",body:JSON.stringify({replace_edited:replacesEdits,expected_revision_id:state.contextDraft.revisionId,context_exclusions})});await loadDay();}catch(error){notice(error.message,true);}finally{state.saving=false;if(state.data)render();}}
-    function resetComparisonDialog(){state.comparison=null;state.comparisonDecision=null;$("comparison-form").reset();$("comparison-note").value="";$("comparison-progress").textContent="Creating two private comparison drafts…";$("comparison-progress").className="notice";$("comparison-progress").hidden=false;$("comparison-arms").hidden=true;$("comparison-form").hidden=true;$("comparison-result").hidden=true;$("comparison-finished-actions").hidden=true;$("comparison-retry-actions").hidden=true;}
-    function comparisonArm(id){return(state.comparison?.arms||[]).find(arm=>String(arm.id||arm.label||"").toLowerCase()===id);}
-    function renderComparison(){const a=comparisonArm("a");const b=comparisonArm("b");if(!state.comparison?.id||!a||!b)throw new Error("The comparison response is incomplete.");$("draft-a-preview").textContent=a.preview_markdown||"No preview was returned.";$("draft-b-preview").textContent=b.preview_markdown||"No preview was returned.";$("comparison-progress").hidden=true;$("comparison-arms").hidden=false;$("comparison-form").hidden=false;$("comparison-form").querySelector("input").focus();}
-    async function startComparison(){if(!contextComparisonEligible())return;const revisionId=state.data.current_revision.id;resetComparisonDialog();state.comparisonRevisionId=revisionId;if(!$("comparison-dialog").open)$("comparison-dialog").showModal();$("compare-context").disabled=true;try{const result=await api(`/api/v2/daily/${state.date}/context-comparisons`,{method:"POST",body:JSON.stringify({expected_revision_id:revisionId})});state.comparison=result.comparison||result;renderComparison();}catch(error){$("comparison-progress").textContent=`Comparison could not be created: ${error.message}`;$("comparison-progress").className="notice error";$("comparison-retry-actions").hidden=false;}finally{$("compare-context").disabled=false;}}
-    function comparisonAssignment(result){return result.assignment||result.arm_assignment||state.comparison?.assignment||{};}
-    async function submitComparison(event){event.preventDefault();if(!state.comparison||!$("comparison-form").reportValidity())return;const form=new FormData($("comparison-form"));const body={expected_revision_id:state.comparisonRevisionId,usefulness:form.get("usefulness"),less_editing:form.get("less_editing"),continue_with:form.get("continue_with"),note:$("comparison-note").value.trim()};$("save-comparison").disabled=true;$("comparison-result").hidden=true;try{const result=await api(`/api/v2/daily/${state.date}/context-comparisons/${encodeURIComponent(state.comparison.id)}/decision`,{method:"POST",body:JSON.stringify(body)});state.comparisonDecision=result;const assignment=comparisonAssignment(result);const withContext=["a","b"].find(id=>assignment[id]==="with_context"||assignment[id]==="knowledge");const withoutContext=["a","b"].find(id=>assignment[id]==="without_context"||assignment[id]==="no_knowledge");const reveal=withContext&&withoutContext?`Draft ${withContext.toUpperCase()} used Knowledge; Draft ${withoutContext.toUpperCase()} did not. `:"";$("comparison-result").textContent=`${reveal}Draft ${String(body.continue_with).toUpperCase()} is now your current candidate.`;$("comparison-result").className="notice";$("comparison-result").hidden=false;$("comparison-form").hidden=true;$("comparison-finished-actions").hidden=false;await loadDay();}catch(error){$("comparison-result").textContent=`Your choice could not be saved: ${error.message}`;$("comparison-result").className="notice error";$("comparison-result").hidden=false;}finally{$("save-comparison").disabled=false;}}
-    function closeComparison(){if($("comparison-dialog").open)$("comparison-dialog").close();if(state.comparisonDecision)notice("Comparison saved. Review the selected candidate before Apply.");}
-    async function saveCandidate() { const content=structuredClone(state.data.current_revision.content);document.querySelectorAll("#candidate .title-input").forEach((input,index)=>{content.workstreams[index].title=input.value;});document.querySelectorAll("#candidate textarea").forEach(input=>{content.workstreams[Number(input.dataset.workstream)][input.dataset.field][Number(input.dataset.fact)].text=input.value;});try{await api(`/api/v2/daily/${state.date}/candidate`,{method:"PUT",body:JSON.stringify({expected_revision_id:state.data.current_revision.id,content})});state.editingDraft=false;await loadDay();notice("Edits saved as a new revision.");}catch(error){notice(error.message,true);} }
-    async function reviewApply(){if(state.saving)return;if(!$("save-candidate").hidden){notice("Save your candidate edits before reviewing Apply.",true);return;}state.saving=true;$("review-apply").disabled=true;try{await saveEvidenceChanges();state.applyPreview=await api(`/api/v2/daily/${state.date}/apply-preview`);$("apply-target").textContent=`Destination: ${state.applyPreview.destination_path}${state.applyPreview.will_create_note?" · new note":""}`;$("apply-before").textContent=state.applyPreview.previous_block||"(No managed block yet)";$("apply-after").textContent=state.applyPreview.next_block;$("apply-dialog").showModal();}catch(error){notice(error.message,true);}finally{state.saving=false;$("review-apply").disabled=!state.csrf;}}
-    async function confirmApply(){if(!state.applyPreview)return;const preview=state.applyPreview;$("confirm-apply").disabled=true;try{const result=await api(`/api/v2/daily/${state.date}/apply`,{method:"POST",body:JSON.stringify({expected_revision_id:preview.revision_id,expected_revision_content_hash:preview.revision_content_hash,destination_path:preview.destination_path,expected_old_block_hash:preview.expected_old_block_hash,intended_new_block_hash:preview.intended_new_block_hash,expected_target_exists:preview.expected_target_exists,expected_original_content_hash:preview.expected_original_content_hash,expected_updated_content_hash:preview.updated_content_hash})});$("apply-dialog").close();await loadDay();notice(`${result.idempotent?"Already applied":"Applied"} to ${result.destination_path}.`);}catch(error){notice(error.message,true);}finally{$("confirm-apply").disabled=false;}}
-    async function retryApply(){const operation=state.data?.apply_status;if(!operation)return;$("retry-apply").disabled=true;try{const result=await api(`/api/v2/daily/${state.date}/apply/${encodeURIComponent(operation.id)}/retry`,{method:"POST",body:"{}"});await loadDay();const next=result.operation.state;notice(next==="finalized"?"Apply verified and finalized.":next==="reconciliation_required"?"The destination differs from the approved state. Nothing was overwritten; review the details before trying a new Apply.":`Apply is ${next}.`,next!=="finalized");}catch(error){await loadDay();notice(error.message,true);}}
-    async function toggleDismiss(){const dismissed=state.data?.day?.review_status==="dismissed";const action=dismissed?"reopen":"dismiss";if(!dismissed&&!confirm("Dismiss this exact candidate? It will leave the review queue without writing or deleting anything."))return;try{const result=await api(`/api/v2/daily/${state.date}/dismiss`,{method:dismissed?"DELETE":"POST",body:JSON.stringify({expected_revision_id:state.data.current_revision.id})});await loadDay();const expired=result.expired_evidence_count?` ${result.expired_evidence_count} source event(s) have expired; the surviving summary is not the raw evidence.`:"";notice(dismissed?`Day reopened.${expired}`:"Day dismissed. Nothing was written or deleted.");}catch(error){notice(error.message,true);}}
-    $("login-form").addEventListener("submit",async event=>{event.preventDefault();try{const result=await api("/api/v2/auth/login",{method:"POST",body:JSON.stringify({owner_secret:$("owner-secret").value,remember_me:$("remember-login").checked})});state.csrf=result.csrf_token;$("owner-secret").value="";$("remember-login").checked=false;await boot();}catch(error){notice(error.message,true);}});
-    $("unlock").addEventListener("click",showLogin);
-    $("daily-tab").addEventListener("click",()=>selectView("daily"));$("knowledge-tab").addEventListener("click",()=>selectView("knowledge"));
-    addEventListener("popstate",()=>selectView(new URL(location.href).searchParams.get("view")==="knowledge"?"knowledge":"daily",false));
-    $("close-collection").addEventListener("click",closeCollection);$("cancel-collection").addEventListener("click",closeCollection);$("collection-form").addEventListener("submit",previewCollection);$("save-collection").addEventListener("click",saveCollection);$("add-root").addEventListener("click",()=>addCollectionPath("roots","collection-root-input"));$("add-exclusion").addEventListener("click",()=>addCollectionPath("exclusions","collection-exclusion-input"));for(const id of ["collection-label","collection-purpose","collection-enabled"]){$(id).addEventListener("input",invalidateCollectionPreview);}for(const id of ["collection-root-input","collection-exclusion-input"]){$(id).addEventListener("input",event=>searchKnowledgeFolders(event.target));$(id).addEventListener("keydown",event=>{if(event.key!=="Enter")return;event.preventDefault();addCollectionPath(id==="collection-root-input"?"roots":"exclusions",id);});}
-    $("note-search").addEventListener("input",searchKnowledgeNotes);$("save-link").addEventListener("click",saveLink);$("close-link").addEventListener("click",closeLink);$("cancel-link").addEventListener("click",closeLink);
-    $("settings").addEventListener("click",openSettings);$("close-settings").addEventListener("click",()=>$("settings-dialog").close());$("settings-form").addEventListener("submit",previewSettings);$("save-settings").addEventListener("click",saveSettings);$("save-automation").addEventListener("click",saveAutomation);$("commit-migration").addEventListener("click",commitMigration);
-    $("previous-day").addEventListener("click",()=>shiftDay(-1)); $("next-day").addEventListener("click",()=>shiftDay(1)); $("today").addEventListener("click",()=>selectDay(state.overview?.today||localDate())); $("day").addEventListener("change",event=>selectDay(event.target.value)); $("dismiss").addEventListener("click",toggleDismiss); $("generate").addEventListener("click",generate); $("regenerate-context").addEventListener("click",regenerateWithContext); $("compare-context").addEventListener("click",startComparison); $("comparison-form").addEventListener("submit",submitComparison); $("retry-comparison").addEventListener("click",startComparison); $("close-comparison").addEventListener("click",closeComparison); $("cancel-comparison").addEventListener("click",closeComparison); $("finish-comparison").addEventListener("click",closeComparison); $("save-candidate").addEventListener("click",saveCandidate); $("review-apply").addEventListener("click",reviewApply); $("confirm-apply").addEventListener("click",confirmApply); $("retry-apply").addEventListener("click",retryApply); const closeApply=()=>$("apply-dialog").close(); $("close-apply").addEventListener("click",closeApply); $("cancel-apply").addEventListener("click",closeApply);
-    $("add-note").addEventListener("click",()=>$("note-dialog").showModal()); const closeNote=()=>$("note-dialog").close(); $("close-note").addEventListener("click",closeNote); $("cancel-note").addEventListener("click",closeNote);
-    $("note-form").addEventListener("submit",async event=>{event.preventDefault();const references=$("note-links").value.split("\n").map(value=>value.trim()).filter(Boolean);try{await api(`/api/v2/daily/${state.date}/manual`,{method:"POST",body:JSON.stringify({text:$("note-text").value,references})});$("note-text").value="";$("note-links").value="";closeNote();await loadDay();notice("Note added to this day. Generate or regenerate when ready.");}catch(error){notice(error.message,true);}});
-    let refreshTimer;
-    let refreshDelay=2000;
-    function runningAttempt(attempt){return attempt&&["running","queued"].includes(attempt.state);}
-    function activeAttempt(){return state.overview?.active_generation||(runningAttempt(state.data?.generation_attempt)?state.data.generation_attempt:null);}
-    function hasPendingChanges(){return state.editingDraft||!$("save-candidate").hidden||contextDraftChanged()||evidenceDecisionSelects().some(input=>input.dataset.userChanged&&input.value!==input.dataset.savedDisposition);}
-    $("evidence").addEventListener("change",event=>{if(event.target.matches("select[data-evidence-id]"))event.target.dataset.userChanged="true";});
-    async function useActivityRecord(){
-      if(state.saving||hasPendingChanges())return;
-      state.saving=true;render();
-      try{await api(`/api/v2/daily/${state.date}/activity-record`,{method:"POST"});state.retryError=null;await loadDay();notice("Activity record ready. Review and save when ready; nothing has been written to your note.");}
-      catch(error){notice(`Could not create an activity record: ${error.message}`,true);}
-      finally{state.saving=false;if(state.data)render();}
-    }
-    function renderCandidate(content){
-      renderCandidateEditor(content);
-      $("candidate").closest("section.card").querySelector("h2").textContent=content?.schema_version===2?"Activity record · not AI-summarized":"Daily draft";
-      $("candidate").hidden=Boolean(content)&&!state.editingDraft;
-      const root=$("readable-draft");root.replaceChildren();root.hidden=!content||Boolean(state.editingDraft);
-      $("edit-draft").hidden=!content;$("edit-draft").textContent=state.editingDraft?"Cancel editing":"Edit draft";
-      $("edit-draft").disabled=!state.csrf;
-      if(!content)return;
-      if(!content.workstreams.length)root.append(el("p","subtle","Your draft contains your notes above."));
-      const excluded=new Set((state.data.current_snapshot_evidence||[]).filter(item=>["omit","duplicate_of","superseded_by"].includes(item.disposition)).map(item=>item.event_id));
-      if(content.schema_version===2){
-        for(const workstream of content.workstreams){
-          const entries=(workstream.activity||[]).filter(entry=>entry.evidence_event_ids.some(id=>!excluded.has(id)));
-          if(!entries.length)continue;
-          const group=document.createElement("details");group.className="workstream";
-          group.append(el("summary","",`${workstream.title} · ${entries.length} activit${entries.length===1?"y":"ies"}`));
-          for(const entry of entries)group.append(el("p","evidence-message",entry.text));
-          root.append(group);
-        }
-        const attempt=state.data.generation_attempt;
-        if(attempt?.error){const details=document.createElement("details");details.className="diagnostics";details.append(el("summary","","Previous AI attempt"),el("p","",`${attempt.finished_at?new Date(attempt.finished_at).toLocaleString()+" · ":""}${attempt.error}`));root.append(details);}
-        return;
-      }
-      for(const workstream of content.workstreams){const section=el("section","workstream");section.append(el("h3","",workstream.title));let count=0;for(const [key,label] of Object.entries(fieldLabels)){const facts=(workstream[key]||[]).filter(fact=>(fact.evidence_event_ids||[]).some(id=>!excluded.has(id)));if(!facts.length)continue;count+=facts.length;section.append(el("strong","",label));const list=document.createElement("ul");for(const fact of facts)list.append(el("li","",fact.text));section.append(list);}if(!count)continue;for(const link of workstream.canonical_links||[])section.append(el("p","subtle",`Reference: ${link}`));if(!workstream.canonical_links?.length)section.append(action("Add a reference note",()=>linkWorkstream(workstream),{disabled:!state.csrf}));root.append(section);}
-      if(content.open_questions?.length){root.append(el("h3","","Open questions"));const list=document.createElement("ul");for(const question of content.open_questions)list.append(el("li","",question));root.append(list);}
-    }
-    async function linkWorkstream(workstream){
-      await loadKnowledge();
-      const ids=new Set(workstream.evidence_event_ids||[]);
-      const events=(state.data.automated_evidence?.events||[]).filter(event=>ids.has(event.id));
-      const identities=(state.knowledgeReview?.unresolved?.identities||[]).filter(identity=>events.some(event=>{const value=event.metadata?.[identity.field];return Array.isArray(value)?value.includes(identity.value):value===identity.value;}));
-      if(!identities.length){notice("No unlinked product or project name was found in this draft's sources. Manage reference notes in Settings.");return;}
-      const begin=identity=>{state.referenceIdentity=identity;if(!state.knowledge?.count){openCollection();}else{openLink(identity);$("note-search").value=identity.value;searchKnowledgeNotes();}};
-      if(identities.length===1){begin(identities[0]);return;}
-      notice("Choose the name to link to a reference note:");for(const identity of identities.slice(0,8))$("notice").append(action(`${identityLabel(identity.field)}: ${identity.value}`,()=>begin(identity)));
-    }
-    function renderGeneration(){
-      const active=activeAttempt();const attempt=active||state.data?.generation_attempt;
-      const legacyFailure=!attempt&&state.data?.day?.generation_status==="failed";
-      $("generation-status").hidden=!attempt&&!legacyFailure;
-      $("retry-generation").hidden=!!active||!(legacyFailure||["failed","timed_out","interrupted","canceled"].includes(attempt?.state));$("retry-generation").disabled=!state.csrf||state.saving;
-      if(legacyFailure)$("generation-message").textContent="Previous preparation did not finish. Your notes are safe. Try again when ready.";
-      $("cancel-generation").hidden=!runningAttempt(attempt);$("cancel-generation").disabled=!state.csrf;
-      $("view-generation").hidden=!active||active.local_date===state.date;
-      $("generation-error").hidden=!attempt?.error;$("generation-error-text").textContent=attempt?.error||"";
-      if(attempt){
-        const elapsed=Math.max(0,Math.floor((Date.now()-Date.parse(attempt.started_at))/1000));
-        const other=attempt.local_date!==state.date?` for ${attempt.local_date}`:"";
-        const stage=({queued:"Waiting to start",preparing:"Preparing sources",requesting_model:"Writing draft",requesting_model_fallback:"Retrying smaller groups one at a time",saving:"Saving prepared draft",validating:"Checking draft"})[attempt.stage]||"Preparing draft";
-        const groups=Number.isInteger(attempt.total_groups)&&attempt.total_groups>0?` · ${attempt.completed_groups||0} of ${attempt.total_groups} groups complete`:"";
-        const references=attempt.reference_mode==="none"?" Without reference notes.":"";
-        const failed=attempt.failure_code==="reference_context_invalid"?"Reference notes need attention":attempt.state==="canceled"?"Preparation cancelled":attempt.state==="interrupted"?"Preparation was interrupted":attempt.state==="timed_out"?"Preparation took too long":"Preparation failed";
-        $("generation-message").textContent=runningAttempt(attempt)?`${stage}${other}${groups} · ${elapsed}s elapsed${attempt.timeout_seconds?` · ${attempt.timeout_seconds}s limit`:""}.${references} You can leave and return.`:attempt.state==="succeeded"?"Draft ready to review. Nothing has been written.":`${failed}. Your notes are safe.`;
-        if(!runningAttempt(attempt)&&attempt.failure_code==="database_busy")$("generation-message").textContent="The database was busy. Retry preparation; your notes and previous draft are unchanged.";
-        if(!runningAttempt(attempt)&&attempt.finished_at)$("generation-message").textContent+=` Last attempt: ${new Date(attempt.finished_at).toLocaleString()}.`;
-      }
-      const needsReferenceRecovery=!active&&(state.data?.generation_attempt?.recovery_actions?.includes("retry_without_references")||state.contextDetails?.status==="invalid");
-      $("reference-recovery").hidden=!needsReferenceRecovery;
-      $("retry-without-references").disabled=!state.csrf||state.saving||Boolean(active);
-      $("revision-reference-mode").hidden=!state.data?.current_revision||state.data?.revision_reference_mode!=="none";
-      $("generate").disabled=!state.csrf||state.saving||Boolean(active)||state.data?.day?.review_status==="dismissed";
-      $("generate").textContent=active?"Preparing draft…":legacyFailure||(attempt&&!["succeeded","completed"].includes(attempt.state))?"Try again":state.data?.current_revision?"Regenerate":"Create draft";
-      if(active){$("regenerate-context").disabled=true;$("compare-context").disabled=true;}
-      let retryError=$("generation-retry-error");if(!retryError){retryError=el("p","");retryError.id="generation-retry-error";retryError.setAttribute("role","alert");$("generation-status").append(retryError);}retryError.hidden=state.retryError?.date!==state.date;if(!retryError.hidden){retryError.textContent=state.retryError.message;$("generation-status").hidden=false;}
-      const intake=state.overview?.intake;
-      let activityAction=$("use-activity-record");if(!activityAction){activityAction=action("Use activity record",useActivityRecord);activityAction.id="use-activity-record";$("generation-status").insertBefore(activityAction,$("generation-error"));}
-      activityAction.hidden=!!active||!!state.data?.current_revision||!(legacyFailure||["failed","timed_out","interrupted"].includes(attempt?.state)||state.retryError?.date===state.date);
-      activityAction.disabled=!state.csrf||state.saving;
-      if(state.data?.current_revision?.content?.schema_version===2&&!active){const older=!attempt?.started_at||!state.data.current_revision.created_at||Date.parse(attempt.started_at)<Date.parse(state.data.current_revision.created_at);if(older){$("generation-status").hidden=state.retryError?.date!==state.date;$("reference-recovery").hidden=true;}$("generate").textContent="Create AI summary";}
-      $("intake-status").textContent=intake?`${intake.today_count} activities received today${intake.latest_received_at?` · Latest ${new Date(intake.latest_received_at).toLocaleTimeString()}`:" · Waiting for your agents"}`:"";
-      $("intake-details").hidden=!intake?.sources?.length;$("intake-sources").replaceChildren();for(const source of intake?.sources||[])$("intake-sources").append(el("li","subtle",`${source.source} · Last received ${new Date(source.latest_received_at).toLocaleString()}`));
-    }
-    function render(){renderDaily();renderGeneration();$("copy-draft").hidden=!state.data?.current_revision;$("copy-draft").disabled=Boolean(state.editingDraft);if(state.contextDetails?.status==="none")$("context-card").hidden=true;}
-    function scheduleRefresh(){clearTimeout(refreshTimer);if(document.hidden||!state.data||!state.csrf)return;refreshTimer=setTimeout(refreshStatus,activeAttempt()?refreshDelay:Math.max(10000,refreshDelay));}
-    async function refreshStatus(){
-      const date=state.date;const previous=state.data?.generation_attempt;
-      try{const [overview,data]=await Promise.all([api("/api/v2/daily/overview"),api(`/api/v2/daily/${date}`)]);if(date!==state.date)return;state.overview=overview;state.data.generation_attempt=data.generation_attempt;renderOverview();renderGeneration();refreshDelay=2000;
-        const changed=data.current_revision?.id!==state.data.current_revision?.id;
-        if(changed&&!hasPendingChanges()&&!state.saving){state.data=data;state.contextDetails=await api(`/api/v2/daily/${date}/context`).catch(()=>({status:"unavailable",workstreams:[]}));if(date===state.date)render();}
-        else if(changed)notice("A new draft is ready. Save or finish your edits before reloading this day.");
-        else if(runningAttempt(previous)&&!runningAttempt(data.generation_attempt))renderGeneration();
-      }catch(error){if(error.status===401){state.csrf=null;clearTimeout(refreshTimer);showLogin();return;}refreshDelay=Math.min(30000,Math.max(4000,refreshDelay*2));$("generation-status").hidden=false;$("generation-message").textContent="Connection interrupted. Checking again shortly; your edits are still here.";}
-      finally{scheduleRefresh();}
-    }
-    document.addEventListener("visibilitychange",()=>{if(document.hidden)clearTimeout(refreshTimer);else refreshStatus();});
-    $("edit-draft").addEventListener("click",()=>{if(state.editingDraft&&!$("save-candidate").hidden&&!confirm("Discard unsaved draft edits?"))return;state.editingDraft=!state.editingDraft;renderCandidate(state.data.current_revision.content);$("copy-draft").disabled=Boolean(state.editingDraft);});
-    $("copy-draft").addEventListener("click",async()=>{if(hasPendingChanges()){notice("Save or cancel your pending choices before copying the draft.",true);return;}try{await navigator.clipboard.writeText(state.data.preview_markdown||"");notice("Draft copied. Nothing has been written to your note.");}catch{notice("Copy unavailable. Open Preview file and select the text to copy.",true);}});
-    $("reference-settings").addEventListener("click",()=>{$("settings-dialog").close();selectView("knowledge");});
-    $("cancel-generation").addEventListener("click",async()=>{const attempt=activeAttempt();if(!attempt)return;$("cancel-generation").disabled=true;try{const result=await api(`/api/v2/daily/${attempt.local_date}/generation/${encodeURIComponent(attempt.id)}/cancel`,{method:"POST",body:"{}"});await refreshStatus();if(result.cancel_requested===false)notice("This draft is finishing or already finished. Checking its latest state.");}catch(error){notice(error.message,true);}finally{$("cancel-generation").disabled=false;}});
-    $("collection-label").addEventListener("input",()=>{state.collectionLabelEdited=true;});
-    $("collection-advanced").addEventListener("toggle",()=>{if($("collection-advanced").open)renderCollectionPaths();});
-    $("collection-folder").addEventListener("input",event=>{const input=event.target;const value=input.value.trim().replace(/\/+$/,"");const previous=input.dataset.previous;state.collectionDraft.roots=state.collectionDraft.roots.filter(path=>path!==previous&&path!==value);if(value)state.collectionDraft.roots.unshift(value);input.dataset.previous=value;if(!state.editingCollection&&!state.collectionLabelEdited)$("collection-label").value=value&&value!=="."?value.split("/").filter(Boolean).pop():"Reference notes";invalidateCollectionPreview();searchKnowledgeFolders(input);});
-    $("view-generation").addEventListener("click",()=>{const attempt=activeAttempt();if(attempt)selectDay(attempt.local_date);});
-    $("retry-without-references").addEventListener("click",()=>generate("none"));
-    boot();
-  </script>
-</body>
+    </main>
+    <dialog id="note-dialog">
+      <form id="note-form" class="dialog-body">
+        <div class="dialog-head">
+          <h2>Add a note</h2>
+          <button type="button" id="close-note" aria-label="Close">
+            Close
+          </button>
+        </div>
+        <label class="field"
+          >What did you work on?<textarea
+            id="note-text"
+            rows="5"
+            required
+          ></textarea></label
+        ><label class="field"
+          >Links (optional, one HTTP(S) URL per line)<textarea
+            id="note-links"
+            rows="3"
+          ></textarea>
+        </label>
+        <div class="dialog-actions">
+          <button type="button" id="cancel-note">Cancel</button
+          ><button class="primary" type="submit">Add to this day</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="settings-dialog">
+      <form id="settings-form" class="dialog-body">
+        <div class="dialog-head">
+          <div>
+            <h2>Daily settings</h2>
+            <div id="workspace-path" class="subtle"></div>
+          </div>
+          <button type="button" id="close-settings" aria-label="Close settings">
+            Close
+          </button>
+        </div>
+        <section class="settings-section">
+          <h3>Reference notes</h3>
+          <p>
+            Optional product and engineering notes that help explain your work.
+          </p>
+          <button type="button" id="reference-settings">
+            Manage reference notes
+          </button>
+        </section>
+        <section>
+          <h3>Markdown destination</h3>
+          <p>
+            Choose where reviewed Daily records go. Preview validates an
+            example; Save affects new days only and creates no files.
+          </p>
+          <label class="field"
+            >Timezone<input
+              id="setting-timezone"
+              required
+              placeholder="Europe/Stockholm" /></label
+          ><label class="field"
+            >Daily folder<input
+              id="setting-daily-root"
+              required
+              placeholder="Work Log" /></label
+          ><label class="field"
+            >File pattern<input
+              id="setting-daily-pattern"
+              required
+              placeholder="{year}/{month_name}/Daily log {month_name} {day}.md"
+          /></label>
+          <div class="subtle">
+            Supported tokens: {year}, {month}, {month_name}, {day}, {date}.
+            Double braces produce literal braces.
+          </div>
+          <label class="field"
+            >Template path (optional)<input
+              id="setting-template"
+              placeholder="Templates/Daily.md" /></label
+          ><label class="field"
+            >Link style<select id="setting-link-style">
+              <option value="markdown">Markdown links</option>
+              <option value="wikilink">Wiki links</option>
+            </select></label
+          >
+          <div id="settings-preview" class="notice" hidden></div>
+          <div class="dialog-actions">
+            <button type="submit">Preview destination</button
+            ><button type="button" id="save-settings" class="primary" disabled>
+              Save destination
+            </button>
+          </div>
+        </section>
+        <section id="automation-box" class="settings-section" hidden>
+          <div>
+            <h3>Preparation and retention</h3>
+            <!-- Keep this safety statement's text node intact. -->
+            <!-- prettier-ignore -->
+            <p>Optional scheduling prepares candidates after a day ends. It never writes Markdown; you still review and Confirm Apply.</p>
+          </div>
+          <label class="check-field"
+            ><input id="automation-enabled" type="checkbox" /><span
+              ><strong>Prepare candidates automatically</strong><br /><span
+                class="subtle"
+                >Uses the saved timezone and catches up only within the window
+                below.</span
+              ></span
+            ></label
+          >
+          <div class="settings-fields">
+            <label class="field"
+              >Preparation time<input id="automation-time" type="time" /></label
+            ><label class="field"
+              >Catch-up window (days)<input
+                id="automation-catchup"
+                type="number"
+                min="1"
+                max="90" /></label
+            ><label class="field"
+              >Raw evidence retention (days)<input
+                id="retention-raw"
+                type="number"
+                min="1"
+                max="3650" /></label
+            ><label class="field"
+              >Audit retention (days)<input
+                id="retention-audit"
+                type="number"
+                min="1"
+                max="3650" /></label
+            ><label class="field"
+              >Apply recovery retention (days)<input
+                id="retention-recovery"
+                type="number"
+                min="1"
+                max="3650"
+            /></label>
+          </div>
+          <p class="subtle">
+            Saving activates these retention periods even when automatic
+            preparation is off. Raw expiry keeps snapshot IDs, digests, and
+            review decisions, but removes source messages. Manual notes, active
+            dismissals, edited candidates, and migration artifacts are
+            preserved.
+          </p>
+          <div id="automation-status" class="notice" hidden></div>
+          <div id="automation-runs" class="subtle"></div>
+          <div class="dialog-actions">
+            <button type="button" id="save-automation" class="primary">
+              Save preparation &amp; retention
+            </button>
+          </div>
+        </section>
+        <section id="migration-box" class="migration-box" hidden>
+          <h3>Bring forward older Log Inbox data</h3>
+          <p id="migration-summary"></p>
+          <p class="subtle">
+            This creates and verifies a database backup first. It imports old
+            links, ignored names, and manual logs; preserves old settings and
+            proposal bytes in app storage; and removes only unchanged, valid
+            pending proposal files. Existing Markdown notes are never changed.
+          </p>
+          <ul id="migration-messages" class="migration-list"></ul>
+          <div class="dialog-actions">
+            <button type="button" id="commit-migration" class="primary">
+              Complete migration
+            </button>
+          </div>
+        </section>
+      </form>
+    </dialog>
+    <dialog id="apply-dialog">
+      <div class="dialog-body">
+        <div class="dialog-head">
+          <div>
+            <h2>Apply to Markdown</h2>
+            <div id="apply-target" class="subtle"></div>
+          </div>
+          <button
+            type="button"
+            id="close-apply"
+            aria-label="Close Apply preview"
+          >
+            Close
+          </button>
+        </div>
+        <p>
+          Only the Log Inbox managed block changes. Review the exact replacement
+          below.
+        </p>
+        <section>
+          <h3>Current managed block</h3>
+          <pre id="apply-before"></pre>
+        </section>
+        <section>
+          <h3>Approved managed block</h3>
+          <pre id="apply-after"></pre>
+        </section>
+        <div class="dialog-actions">
+          <button type="button" id="cancel-apply">Cancel</button
+          ><button type="button" id="confirm-apply" class="primary">
+            Save to note
+          </button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="comparison-dialog" aria-labelledby="comparison-title">
+      <div class="dialog-body">
+        <div class="dialog-head">
+          <div>
+            <h2 id="comparison-title">Compare Daily drafts</h2>
+            <div class="subtle">
+              One draft uses the frozen Knowledge context; one does not.
+            </div>
+          </div>
+          <button
+            type="button"
+            id="close-comparison"
+            aria-label="Close comparison"
+          >
+            Close
+          </button>
+        </div>
+        <p class="subtle">
+          This creates two private comparison drafts from the same frozen Daily
+          evidence and your notes. Neither replaces your candidate until you
+          choose, and their identity stays hidden until you save your
+          assessment.
+        </p>
+        <div id="comparison-progress" class="notice" role="status">
+          Creating two private comparison drafts…
+        </div>
+        <div id="comparison-arms" class="comparison-grid" hidden>
+          <section class="comparison-arm" aria-labelledby="draft-a-title">
+            <h3 id="draft-a-title">Draft A</h3>
+            <pre id="draft-a-preview"></pre>
+          </section>
+          <section class="comparison-arm" aria-labelledby="draft-b-title">
+            <h3 id="draft-b-title">Draft B</h3>
+            <pre id="draft-b-preview"></pre>
+          </section>
+        </div>
+        <form id="comparison-form" hidden>
+          <div class="comparison-questions">
+            <fieldset class="comparison-question">
+              <legend>Which draft is more useful?</legend>
+              <div class="choice-row">
+                <label
+                  ><input type="radio" name="usefulness" value="a" required />
+                  Draft A</label
+                ><label
+                  ><input type="radio" name="usefulness" value="b" /> Draft
+                  B</label
+                ><label
+                  ><input type="radio" name="usefulness" value="same" />
+                  Same</label
+                ><label
+                  ><input type="radio" name="usefulness" value="neither" />
+                  Neither</label
+                >
+              </div>
+            </fieldset>
+            <fieldset class="comparison-question">
+              <legend>Which would take less editing?</legend>
+              <div class="choice-row">
+                <label
+                  ><input type="radio" name="less_editing" value="a" required />
+                  Draft A</label
+                ><label
+                  ><input type="radio" name="less_editing" value="b" /> Draft
+                  B</label
+                ><label
+                  ><input type="radio" name="less_editing" value="same" />
+                  Same</label
+                ><label
+                  ><input type="radio" name="less_editing" value="neither" />
+                  Neither</label
+                >
+              </div>
+            </fieldset>
+          </div>
+          <fieldset class="comparison-question">
+            <legend>Continue with</legend>
+            <div class="choice-row">
+              <label
+                ><input type="radio" name="continue_with" value="a" required />
+                Draft A</label
+              ><label
+                ><input type="radio" name="continue_with" value="b" /> Draft
+                B</label
+              >
+            </div>
+          </fieldset>
+          <label class="field"
+            >Optional note<textarea
+              id="comparison-note"
+              maxlength="300"
+              rows="2"
+              placeholder="What made the difference?"
+            ></textarea>
+          </label>
+          <div class="dialog-actions">
+            <button type="button" id="cancel-comparison">Cancel</button
+            ><button type="submit" id="save-comparison" class="primary">
+              Save choice
+            </button>
+          </div>
+        </form>
+        <div id="comparison-result" class="notice" role="status" hidden></div>
+        <div id="comparison-finished-actions" class="dialog-actions" hidden>
+          <button type="button" id="finish-comparison" class="primary">
+            Done
+          </button>
+        </div>
+        <div id="comparison-retry-actions" class="dialog-actions" hidden>
+          <button type="button" id="retry-comparison">Try again</button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="collection-dialog">
+      <form id="collection-form" class="dialog-body">
+        <div class="dialog-head">
+          <div>
+            <h2 id="collection-dialog-title">New collection</h2>
+            <div class="subtle">
+              Choose notes that help explain your products and engineering work.
+            </div>
+          </div>
+          <button
+            type="button"
+            id="close-collection"
+            aria-label="Close collection"
+          >
+            Close
+          </button>
+        </div>
+        <label class="field"
+          >Which folder holds your reference notes?<input
+            id="collection-folder"
+            list="knowledge-folders"
+            placeholder="Products/My product"
+            autocomplete="off"
+        /></label>
+        <p class="subtle">
+          Choose one folder. We will show which notes can be used before you
+          save.
+        </p>
+        <details id="collection-advanced">
+          <summary>Advanced options</summary>
+          <label class="field"
+            >Collection name<input
+              id="collection-label"
+              maxlength="100"
+              required
+              placeholder="Product context" /></label
+          ><label class="field"
+            >What should this context help with?<textarea
+              id="collection-purpose"
+              maxlength="1000"
+              rows="3"
+              required
+              placeholder="Product behavior, terminology, and decisions"
+            ></textarea>
+          </label>
+          <div class="field">
+            <span>Include folders</span>
+            <div id="collection-roots" class="path-list"></div>
+            <div class="path-add">
+              <input
+                id="collection-root-input"
+                list="knowledge-folders"
+                placeholder="Products/My product"
+              /><button id="add-root" type="button">Add</button>
+            </div>
+            <span class="subtle"
+              >Add 1–8 paths relative to the mounted workspace. Use . for the
+              workspace root.</span
+            >
+          </div>
+          <div class="field">
+            <span>Exclude folders</span>
+            <div id="collection-exclusions" class="path-list"></div>
+            <div class="path-add">
+              <input
+                id="collection-exclusion-input"
+                list="knowledge-folders"
+                placeholder="Products/My product/Archive"
+              /><button id="add-exclusion" type="button">Add</button>
+            </div>
+            <span class="subtle"
+              >Excluded folders are ignored even when they are inside an
+              included folder.</span
+            >
+          </div>
+          <datalist id="knowledge-folders"></datalist
+          ><label class="check-field"
+            ><input id="collection-enabled" type="checkbox" checked /><span
+              >Keep this collection ready for Daily context when enabled</span
+            ></label
+          >
+        </details>
+        <p class="subtle">
+          Saving changes only the collection definition. It does not create,
+          move, edit, or delete Markdown files.
+        </p>
+        <div id="knowledge-preview" class="notice" hidden></div>
+        <div class="dialog-actions">
+          <button type="button" id="cancel-collection">Cancel</button
+          ><button type="submit" id="preview-collection">
+            Review collection</button
+          ><button type="button" id="save-collection" class="primary" disabled>
+            Create collection
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="link-dialog">
+      <div class="dialog-body">
+        <div class="dialog-head">
+          <div>
+            <h2 id="link-dialog-title">Link a name</h2>
+            <div id="link-identity" class="subtle"></div>
+          </div>
+          <button type="button" id="close-link" aria-label="Close link dialog">
+            Close
+          </button>
+        </div>
+        <p>
+          Search the enabled source collections, then choose the canonical note.
+          This changes future or regenerated candidates only.
+        </p>
+        <label class="field"
+          >Find a Markdown note<input
+            id="note-search"
+            autocomplete="off"
+            placeholder="Type a note title or path"
+        /></label>
+        <div id="note-results" class="search-results" hidden></div>
+        <div id="selected-note" class="notice" hidden></div>
+        <div class="dialog-actions">
+          <button type="button" id="cancel-link">Cancel</button
+          ><button type="button" id="save-link" class="primary" disabled>
+            Save link
+          </button>
+        </div>
+      </div>
+    </dialog>
+    <script type="module" src="/assets/daily.js"></script>
+  </body>
 </html>

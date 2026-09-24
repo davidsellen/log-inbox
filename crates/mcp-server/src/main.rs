@@ -394,6 +394,7 @@ async fn main() -> anyhow::Result<()> {
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(dashboard_page))
+        .route("/assets/{name}", get(dashboard_asset))
         .route("/favicon.ico", get(favicon))
         .route("/health", get(health))
         .route("/api/v2/auth/login", post(refocus_login))
@@ -4725,6 +4726,38 @@ async fn dashboard_page() -> Html<&'static str> {
     Html(include_str!("../assets/daily.html"))
 }
 
+async fn dashboard_asset(AxumPath(name): AxumPath<String>) -> Response {
+    let (content_type, body) = match name.as_str() {
+        "daily.js" => ("text/javascript", include_str!("../assets/daily.js")),
+        "daily-helpers.js" => (
+            "text/javascript",
+            include_str!("../assets/daily-helpers.js"),
+        ),
+        "daily-references.js" => (
+            "text/javascript",
+            include_str!("../assets/daily-references.js"),
+        ),
+        "daily-settings.js" => (
+            "text/javascript",
+            include_str!("../assets/daily-settings.js"),
+        ),
+        "daily-navigation.js" => (
+            "text/javascript",
+            include_str!("../assets/daily-navigation.js"),
+        ),
+        "daily.css" => ("text/css", include_str!("../assets/daily.css")),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 async fn favicon() -> impl IntoResponse {
     (
         [
@@ -4833,6 +4866,37 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod knowledge_destination_tests {
+    #[tokio::test]
+    async fn dashboard_assets_are_embedded_and_explicitly_allowlisted() {
+        for (name, content_type) in [
+            ("daily.js", "text/javascript"),
+            ("daily-navigation.js", "text/javascript"),
+            ("daily-helpers.js", "text/javascript"),
+            ("daily-references.js", "text/javascript"),
+            ("daily-settings.js", "text/javascript"),
+            ("daily.css", "text/css"),
+        ] {
+            let response = super::dashboard_asset(axum::extract::Path(name.to_owned())).await;
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            assert_eq!(
+                response.headers()[axum::http::header::CONTENT_TYPE],
+                content_type
+            );
+            assert_eq!(
+                response.headers()[axum::http::header::CACHE_CONTROL],
+                "no-cache"
+            );
+            assert!(
+                !axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let response =
+            super::dashboard_asset(axum::extract::Path("../Cargo.toml".to_owned())).await;
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    }
     use super::*;
     use tower::ServiceExt;
 
