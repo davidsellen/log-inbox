@@ -35,6 +35,7 @@ use std::{
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod daily_writer;
+mod generation;
 pub mod knowledge;
 mod llm;
 mod migration;
@@ -48,6 +49,7 @@ struct AppState {
     apply_lock: Arc<Mutex<()>>,
     knowledge_write_lock: Arc<Mutex<()>>,
     daily_generation_lock: Arc<tokio::sync::Mutex<()>>,
+    generation_cancel: generation::CancelState,
     refocus: RefocusConfig,
     workspace: InspectedWorkspace,
 }
@@ -159,6 +161,8 @@ struct KnowledgeExcerptExclusionRequest {
 struct GenerateDailyRequest {
     #[serde(default)]
     replace_edited: bool,
+    #[serde(default)]
+    reference_mode: generation::ReferenceMode,
     expected_revision_id: Option<String>,
     context_exclusions: Option<Vec<KnowledgeExcerptExclusionRequest>>,
 }
@@ -355,9 +359,11 @@ async fn main() -> anyhow::Result<()> {
         apply_lock: Arc::new(Mutex::new(())),
         knowledge_write_lock: Arc::new(Mutex::new(())),
         daily_generation_lock: Arc::new(tokio::sync::Mutex::new(())),
+        generation_cancel: Arc::new(Mutex::new(None)),
         refocus,
         workspace,
     };
+    state.store.interrupt_generation_attempts(Utc::now())?;
     recover_daily_applies(&state);
     match state
         .store
@@ -455,6 +461,14 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/v2/daily/{date}/generate",
             post(refocus_generate_daily),
+        )
+        .route(
+            "/api/v2/daily/{date}/activity-record",
+            post(refocus_create_activity_record),
+        )
+        .route(
+            "/api/v2/daily/{date}/generation/{attempt_id}/cancel",
+            post(generation::cancel),
         )
         .route(
             "/api/v2/daily/{date}/context-comparisons",
@@ -1624,6 +1638,7 @@ async fn refocus_daily_day(
         "end_utc": window.end_utc,
         "destination_path": window.destination_path,
         "day": frozen_day,
+        "generation_attempt": state.store.latest_generation_attempt(&profile.id, local_date).map_err(|e| ApiError::internal(e.to_string()))?,
         "automated_evidence": {
             "events": evidence.events,
             "returned_count": event_count,
@@ -1632,6 +1647,7 @@ async fn refocus_daily_day(
         },
         "manual_entries": manual_entries,
         "current_revision": current_revision,
+        "revision_reference_mode": current_context_snapshot.as_ref().and_then(|snapshot| snapshot.payload.get("reference_mode")).and_then(Value::as_str).unwrap_or("configured"),
         "current_snapshot": current_snapshot,
         "current_context_snapshot": current_context_snapshot.as_ref().map(public_context_snapshot),
         "current_snapshot_evidence": current_snapshot_evidence,
@@ -1685,6 +1701,16 @@ async fn refocus_daily_context(
         })));
     };
     let diagnostics = context_snapshot.payload.get("diagnostics");
+    if context_snapshot
+        .payload
+        .get("reference_mode")
+        .and_then(Value::as_str)
+        == Some("none")
+    {
+        return Ok(Json(
+            json!({"workspace_id":profile.id,"local_date":local_date,"revision_id":revision.id,"status":"none","mode":"none","reference_mode":"none","workstreams":[],"message":"Generated without reference notes."}),
+        ));
+    }
     let generated_unavailable = diagnostics
         .and_then(|value| value.get("resolution_error_code"))
         .is_some();
@@ -1832,6 +1858,14 @@ fn current_context_freshness(
     revision: &ProposalRevision,
     context_snapshot: &log_inbox_core::models::ContextSnapshot,
 ) -> Result<(&'static str, &'static str), ApiError> {
+    if context_snapshot
+        .payload
+        .get("reference_mode")
+        .and_then(Value::as_str)
+        == Some("none")
+    {
+        return Ok(("none", "Generated without reference notes."));
+    }
     let used_note_paths = context_relevant_note_paths(revision, &context_snapshot.payload);
     let collections = state
         .store
@@ -1841,6 +1875,25 @@ fn current_context_freshness(
         .store
         .list_context_mappings(&profile.id)
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    if context_snapshot
+        .payload
+        .get("resolver_version")
+        .and_then(Value::as_str)
+        == Some("none")
+    {
+        return Ok(
+            if collections.iter().any(|collection| collection.enabled)
+                || mappings.iter().any(|mapping| mapping.enabled)
+            {
+                (
+                    "changed",
+                    "Reference notes are now configured. Regenerate to use them.",
+                )
+            } else {
+                ("none", "This draft did not use reference notes.")
+            },
+        );
+    }
     let fingerprints = match knowledge::current_fingerprints(workspace, &collections, &mappings) {
         Ok(fingerprints) => fingerprints,
         Err(_) => {
@@ -2114,6 +2167,12 @@ async fn refocus_daily_overview(
         .iter()
         .filter(|day| day["status"] == "generation_failed")
         .count();
+    let intake_window =
+        resolve_day(today, &profile.timezone).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let intake = state
+        .store
+        .intake_summary(intake_window.start_utc, intake_window.end_utc)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(Json(json!({
         "workspace_id": profile.id,
         "server_now": Utc::now(),
@@ -2122,6 +2181,8 @@ async fn refocus_daily_overview(
         "missed_count": missed_count,
         "update_count": update_count,
         "failed_count": failed_count,
+        "active_generation": state.store.active_generation_attempt().map_err(|e| ApiError::internal(e.to_string()))?,
+        "intake": intake,
         "window_start": today - Duration::days((scan_days - 1) as i64),
         "days": days,
     })))
@@ -2873,14 +2934,6 @@ fn daily_apply_material(
             .map_err(|error| ApiError::internal(error.to_string()))?,
         None => Vec::new(),
     };
-    if snapshot_evidence
-        .iter()
-        .any(|item| item.disposition.is_none())
-    {
-        return Err(ApiError::conflict(
-            "review every automated evidence item before previewing Apply",
-        ));
-    }
     let live = state
         .store
         .get_events_between(day.start_utc, day.end_utc, 500)
@@ -3009,7 +3062,7 @@ fn ensure_refocus_daily_day(
     state
         .store
         .ensure_daily_day(local_date, destination_path, None)
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        .map_err(generation::database_error)?;
     let template = match profile.template_path.as_deref() {
         Some(path) => {
             workspace
@@ -3033,7 +3086,7 @@ fn ensure_refocus_daily_day(
                 .as_ref()
                 .map(|(path, content)| (*path, content.as_slice())),
         )
-        .map_err(|error| ApiError::conflict(error.to_string()))
+        .map_err(generation::database_error)
 }
 
 async fn refocus_create_manual_entry(
@@ -3082,16 +3135,129 @@ async fn refocus_delete_manual_entry(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn refocus_create_activity_record(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(date): AxumPath<String>,
+) -> Result<(StatusCode, Json<ProposalRevision>), ApiError> {
+    authorize_refocus(&state, &headers, "draft:generate", true)?;
+    let date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
+    let _guard = state
+        .daily_generation_lock
+        .try_lock()
+        .map_err(|_| ApiError::conflict("A draft is being prepared. Wait or cancel it first."))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(create_activity_record(&state, date)?),
+    ))
+}
+
+fn create_activity_record(state: &AppState, date: NaiveDate) -> Result<ProposalRevision, ApiError> {
+    require_cutover_for_daily_mutation(state)?;
+    let (profile, workspace) = active_refocus_context(state)?;
+    if state
+        .store
+        .current_proposal_revision(&profile.id, date)
+        .map_err(generation::database_error)?
+        .is_some()
+    {
+        return Err(ApiError::conflict(
+            "This day already has a draft. It has not been replaced.",
+        ));
+    }
+    let day = state
+        .store
+        .daily_day(&profile.id, date)
+        .map_err(generation::database_error)?;
+    if state
+        .store
+        .day_has_expired_snapshot_evidence(&profile.id, date)
+        .map_err(generation::database_error)?
+    {
+        return Err(ApiError::conflict(
+            "Some activity from a previous attempt has expired. A partial activity record cannot replace it.",
+        ));
+    }
+    if day
+        .as_ref()
+        .is_some_and(|day| day.review_status == "dismissed")
+    {
+        return Err(ApiError::conflict(
+            "Reopen this day before creating an activity record.",
+        ));
+    }
+    let window =
+        effective_daily_window(date, &profile, day.as_ref()).map_err(ApiError::bad_request)?;
+    ensure_refocus_daily_day(state, &profile, &workspace, date, &window.destination_path)?;
+    let evidence = state
+        .store
+        .get_events_between(window.start_utc, window.end_utc, 500)
+        .map_err(generation::database_error)?;
+    if evidence.truncated {
+        return Err(ApiError::unprocessable(
+            "This day exceeds the 500-event limit. No partial activity record was created.",
+        ));
+    }
+    let manual = state
+        .store
+        .manual_daily_entries(&profile.id, date)
+        .map_err(generation::database_error)?;
+    if evidence.events.is_empty() && manual.is_empty() {
+        return Err(ApiError::conflict(
+            "This day has no activity or manual notes.",
+        ));
+    }
+    let ids = evidence
+        .events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>();
+    let snapshot = if ids.is_empty() {
+        None
+    } else {
+        Some(
+            state
+                .store
+                .create_evidence_snapshot(&profile.id, date, &ids)
+                .map_err(generation::database_error)?,
+        )
+    };
+    let content = serde_json::to_value(llm::activity_record(
+        &evidence.events,
+        manual.into_iter().map(|entry| entry.id).collect(),
+    ))
+    .map_err(|error| ApiError::internal(error.to_string()))?;
+    state
+        .store
+        .create_generated_revision_if_current(
+            &profile.id,
+            date,
+            snapshot.as_ref().map(|snapshot| snapshot.id.as_str()),
+            None,
+            "structured_edit",
+            &content,
+            None,
+        )
+        .map_err(generation::database_error)
+}
+
 async fn refocus_generate_daily(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(date): AxumPath<String>,
     input: Option<Json<GenerateDailyRequest>>,
-) -> Result<Json<ProposalRevision>, ApiError> {
+) -> Result<(StatusCode, Json<Value>), ApiError> {
     authorize_refocus(&state, &headers, "draft:generate", true)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
     let input = input.map(|Json(input)| input).unwrap_or_default();
+    if input.reference_mode == generation::ReferenceMode::None && input.context_exclusions.is_some()
+    {
+        return Err(ApiError::bad_request(
+            "Reference exclusions cannot be combined with reference_mode none.",
+        ));
+    }
     let context_adjustments = match (input.expected_revision_id, input.context_exclusions) {
         (Some(expected_revision_id), Some(exclusions)) => Some((
             expected_revision_id,
@@ -3104,14 +3270,32 @@ async fn refocus_generate_daily(
             ));
         }
     };
-    generate_daily_candidate(
-        &state,
-        local_date,
-        input.replace_edited,
-        context_adjustments,
-    )
-    .await
-    .map(Json)
+    let guard = state
+        .daily_generation_lock
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| {
+            ApiError::conflict(
+                "generation_busy: Another draft is being prepared. Wait or cancel it first.",
+            )
+        })?;
+    let (attempt, value) =
+        generation::begin_with_references(&state, local_date, "manual", input.reference_mode)?;
+    tokio::spawn(async move {
+        if let Err(error) = generation::run(
+            &state,
+            local_date,
+            input.replace_edited,
+            context_adjustments,
+            attempt,
+            guard,
+        )
+        .await
+        {
+            tracing::warn!(status = %error.status, "Daily generation ended without a candidate");
+        }
+    });
+    Ok((StatusCode::ACCEPTED, Json(json!({"attempt": value}))))
 }
 
 async fn generate_context_comparison_arms(
@@ -3121,6 +3305,7 @@ async fn generate_context_comparison_arms(
     events: Vec<log_inbox_core::models::StoredLogEvent>,
     manual_entry_ids: Vec<String>,
 ) -> Result<(DailyRevisionContent, DailyRevisionContent), ApiError> {
+    preflight_reference_context(&context_snapshot.payload)?;
     let mut with_context = knowledge::vault_context_from_snapshot(&context_snapshot.payload)
         .map_err(ApiError::conflict)?;
     if context_snapshot
@@ -3251,7 +3436,10 @@ async fn refocus_start_context_comparison(
     require_cutover_for_daily_mutation(&state)?;
     let local_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must use YYYY-MM-DD"))?;
-    let _generation_guard = state.daily_generation_lock.lock().await;
+    let _generation_guard = state
+        .daily_generation_lock
+        .try_lock()
+        .map_err(|_| ApiError::conflict("generation_busy: Another draft is being prepared."))?;
     let profile = active_refocus_workspace(&state)?;
     let day = state
         .store
@@ -3326,14 +3514,22 @@ async fn refocus_start_context_comparison(
         .llm_config
         .as_ref()
         .ok_or_else(|| ApiError::unprocessable("Daily comparison requires a configured LLM"))?;
-    let (context_content, without_context_content) = generate_context_comparison_arms(
+    let (mut attempt, _) = generation::begin(&state, local_date, "comparison")?;
+    attempt.stage("requesting_model")?;
+    let result = async {
+    let (context_content, without_context_content) = tokio::select! {
+        biased;
+        _ = attempt.cancel.changed() => Err(ApiError::unprocessable("Generation canceled.")),
+        _ = tokio::time::sleep_until(attempt.deadline) => Err(ApiError::unprocessable("Generation timed out.")),
+        result = generate_context_comparison_arms(
         Some(config),
         &context_snapshot,
         &day.destination_path,
         events,
         source_content.manual_entry_ids,
-    )
-    .await?;
+        ) => result,
+    }?;
+    attempt.stage("saving")?;
     let comparison = state
         .store
         .create_context_comparison(
@@ -3347,6 +3543,9 @@ async fn refocus_start_context_comparison(
         )
         .map_err(|error| ApiError::conflict(error.to_string()))?;
     public_context_comparison(&state, &comparison).map(Json)
+    }.await;
+    attempt.finish(&result)?;
+    result
 }
 
 async fn refocus_decide_context_comparison(
@@ -3429,15 +3628,55 @@ fn frozen_context_exclusions(
         .collect()
 }
 
+fn without_references_payload(workspace: &InspectedWorkspace) -> Value {
+    json!({"schema_version":1,"resolver_version":"none","reference_mode":"none","root_binding":workspace.root_binding(),"workstream_links":{},"workstream_evidence":{},"diagnostics":{}})
+}
+
+fn preflight_reference_context(payload: &Value) -> Result<(), ApiError> {
+    log_inbox_core::validate_context_snapshot_payload(payload)
+        .map_err(|_| ApiError::invalid_references())?;
+    knowledge::context_snapshot_digest(payload).map_err(|_| ApiError::invalid_references())?;
+    Ok(())
+}
+
+#[cfg(test)]
 async fn generate_daily_candidate(
     state: &AppState,
     local_date: NaiveDate,
     replace_edited: bool,
     requested_context_adjustments: Option<(String, BTreeSet<(String, String)>)>,
 ) -> Result<ProposalRevision, ApiError> {
+    let guard = state
+        .daily_generation_lock
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| ApiError::conflict("generation_busy: Another draft is being prepared."))?;
+    let (attempt, _) = generation::begin(state, local_date, "scheduled")?;
+    generation::run(
+        state,
+        local_date,
+        replace_edited,
+        requested_context_adjustments,
+        attempt,
+        guard,
+    )
+    .await
+}
+
+async fn generate_daily_candidate_inner(
+    state: &AppState,
+    local_date: NaiveDate,
+    replace_edited: bool,
+    requested_context_adjustments: Option<(String, BTreeSet<(String, String)>)>,
+    attempt: &mut generation::Attempt,
+) -> Result<ProposalRevision, ApiError> {
     require_cutover_for_daily_mutation(state)?;
-    let _generation_guard = state.daily_generation_lock.lock().await;
     let (profile, workspace) = active_refocus_context(state)?;
+    if profile.id != attempt.workspace_id {
+        return Err(ApiError::conflict(
+            "The active workspace changed before generation started.",
+        ));
+    }
     let frozen_day = state
         .store
         .daily_day(&profile.id, local_date)
@@ -3488,6 +3727,17 @@ async fn generate_daily_candidate(
         ));
     }
     if let Some(current) = current.as_ref() {
+        if current
+            .content
+            .get("schema_version")
+            .and_then(Value::as_u64)
+            == Some(2)
+            && !replace_edited
+        {
+            return Err(ApiError::conflict(
+                "Confirm replacement before generating an AI summary of this activity record.",
+            ));
+        }
         let deferred_event_ids = state
             .store
             .active_daily_evidence_deferrals(&profile.id, local_date, &current.id)
@@ -3513,7 +3763,9 @@ async fn generate_daily_candidate(
             .snapshot_evidence(snapshot_id)
             .map_err(|error| ApiError::internal(error.to_string()))?;
         if snapshot_evidence.iter().any(|item| !item.available) {
-            if requested_context_adjustments.is_some() {
+            if requested_context_adjustments.is_some()
+                || attempt.reference_mode == generation::ReferenceMode::None
+            {
                 return Err(ApiError::conflict(
                     "Source evidence for this candidate has expired, so its Knowledge context cannot be regenerated safely. The current revision is preserved.",
                 ));
@@ -3528,6 +3780,7 @@ async fn generate_daily_candidate(
                 .collect::<Vec<_>>();
             let has_new_evidence = has_new_automated_evidence(&live_event_ids, &snapshot.event_ids);
             if !has_new_evidence && content.manual_entry_ids == manual_entry_ids {
+                attempt.stage("saving")?;
                 return Ok(current.clone());
             }
             if !has_new_evidence {
@@ -3538,29 +3791,20 @@ async fn generate_daily_candidate(
                     .store
                     .proposal_context_snapshot(&current.id)
                     .map_err(|error| ApiError::internal(error.to_string()))?;
-                let revision = if let Some(context_snapshot) = context_snapshot.as_ref() {
-                    state
-                        .store
-                        .create_proposal_revision_if_current_with_context(
-                            &profile.id,
-                            local_date,
-                            Some(snapshot_id),
-                            &context_snapshot.id,
-                            "structured_edit",
-                            &content,
-                            &current.id,
-                        )
-                } else {
-                    state.store.create_proposal_revision_if_current(
+                attempt.stage("saving")?;
+                return attempt.save(|| {
+                    state.store.create_generated_revision_if_current(
                         &profile.id,
                         local_date,
                         Some(snapshot_id),
+                        context_snapshot
+                            .as_ref()
+                            .map(|snapshot| snapshot.id.as_str()),
                         "structured_edit",
                         &content,
-                        &current.id,
+                        Some(&current.id),
                     )
-                };
-                return revision.map_err(|error| ApiError::conflict(error.to_string()));
+                });
             }
             return Err(ApiError::conflict(
                 "Some source evidence for this candidate has expired. Log Inbox will not replace a complete reviewed record from partial evidence. The existing revision is preserved; restore the missing source evidence before regenerating.",
@@ -3590,12 +3834,43 @@ async fn generate_daily_candidate(
             .as_ref()
             .filter(|current| current.snapshot_id.is_none() && current.content == content)
         {
-            return Ok(current.clone());
+            let snapshot = state
+                .store
+                .proposal_context_snapshot(&current.id)
+                .map_err(|e| ApiError::internal(e.to_string()))?;
+            let saved_mode = snapshot
+                .as_ref()
+                .and_then(|s| s.payload.get("reference_mode"))
+                .and_then(Value::as_str)
+                .unwrap_or("configured");
+            if saved_mode == attempt.reference_mode.as_str() {
+                attempt.stage("saving")?;
+                return Ok(current.clone());
+            }
         }
-        let revision = state
-            .store
-            .create_proposal_revision(&profile.id, local_date, None, "manual", &content)
-            .map_err(|error| ApiError::internal(error.to_string()))?;
+        attempt.stage("saving")?;
+        let context = if attempt.reference_mode == generation::ReferenceMode::None {
+            Some(attempt.save(|| {
+                state.store.create_context_snapshot(
+                    &profile.id,
+                    local_date,
+                    &without_references_payload(&workspace),
+                )
+            })?)
+        } else {
+            None
+        };
+        let revision = attempt.save(|| {
+            state.store.create_generated_revision_if_current(
+                &profile.id,
+                local_date,
+                None,
+                context.as_ref().map(|snapshot| snapshot.id.as_str()),
+                "manual",
+                &content,
+                current.as_ref().map(|r| r.id.as_str()),
+            )
+        })?;
         return Ok(revision);
     }
 
@@ -3604,18 +3879,27 @@ async fn generate_daily_candidate(
         .iter()
         .map(|event| event.id.clone())
         .collect::<Vec<_>>();
-    let snapshot = state
-        .store
-        .create_evidence_snapshot(&profile.id, local_date, &event_ids)
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let collections = state
-        .store
-        .list_knowledge_collections(&profile.id)
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let mappings = state
-        .store
-        .list_context_mappings(&profile.id)
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let snapshot = attempt.save(|| {
+        state
+            .store
+            .create_evidence_snapshot(&profile.id, local_date, &event_ids)
+    })?;
+    let collections = if attempt.reference_mode == generation::ReferenceMode::None {
+        Vec::new()
+    } else {
+        state
+            .store
+            .list_knowledge_collections(&profile.id)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+    };
+    let mappings = if attempt.reference_mode == generation::ReferenceMode::None {
+        Vec::new()
+    } else {
+        state
+            .store
+            .list_context_mappings(&profile.id)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+    };
     let current_context_snapshot = match current.as_ref() {
         Some(revision) => state
             .store
@@ -3624,13 +3908,21 @@ async fn generate_daily_candidate(
         None => None,
     };
     let context_adjustment_requested = requested_context_adjustments.is_some();
-    let context_exclusions = requested_context_adjustments
-        .map(|(_, exclusions)| exclusions)
-        .unwrap_or_else(|| frozen_context_exclusions(current_context_snapshot.as_ref()));
-    let knowledge_configuration_digest =
-        knowledge::configuration_digest(&workspace, &collections, &mappings)
-            .map_err(ApiError::internal)?;
-    let (desired_context_payload, mut vault_context) =
+    let context_exclusions = if attempt.reference_mode == generation::ReferenceMode::None {
+        BTreeSet::new()
+    } else {
+        requested_context_adjustments
+            .map(|(_, exclusions)| exclusions)
+            .unwrap_or_else(|| frozen_context_exclusions(current_context_snapshot.as_ref()))
+    };
+    let (mut desired_context_payload, mut vault_context) = if attempt.reference_mode
+        == generation::ReferenceMode::None
+    {
+        (
+            Some(without_references_payload(&workspace)),
+            json!({"candidate_notes":[],"workstream_links":{},"group_aliases":{}}),
+        )
+    } else {
         match knowledge::resolve_knowledge_with_adjustments(
             &workspace,
             &collections,
@@ -3655,30 +3947,15 @@ async fn generate_daily_candidate(
                     "workstream_links": {}
                 }),
             ),
-            Err(error) if context_adjustment_requested => {
-                return Err(ApiError::conflict(error));
-            }
-            Err(_) => (
-                Some(json!({
-                    "schema_version": 1,
-                    "resolver_version": "exact-v1",
-                    "root_binding": workspace.root_binding(),
-                    "configuration_digest": knowledge_configuration_digest,
-                    "workstream_links": {},
-                    "workstream_evidence": {},
-                    "diagnostics": { "resolution_error_code": "resolution_failed" }
-                })),
-                json!({
-                    "candidate_notes": [],
-                    "workstream_links": {},
-                    "knowledge": {
-                        "resolver_version": "exact-v1",
-                        "context_is_background_only": true,
-                        "excerpts": []
-                    }
-                }),
-            ),
-        };
+            Err(_) => return Err(ApiError::invalid_references()),
+        }
+    };
+    let payload = desired_context_payload.get_or_insert_with(|| json!({"schema_version":1,"resolver_version":"none","root_binding":workspace.root_binding(),"workstream_links":{},"workstream_evidence":{},"diagnostics":{}}));
+    payload["generation_contract"] = Value::String(llm::daily_generation_contract_digest());
+    payload["reference_mode"] = Value::String(attempt.reference_mode.as_str().to_owned());
+    if let Some(payload) = desired_context_payload.as_ref() {
+        preflight_reference_context(payload)?;
+    }
     let desired_context_digest = desired_context_payload
         .as_ref()
         .map(knowledge::context_snapshot_digest)
@@ -3692,6 +3969,7 @@ async fn generate_daily_candidate(
         && current.snapshot_id.as_deref() == Some(snapshot.id.as_str())
         && context_is_current
     {
+        attempt.stage("saving")?;
         let mut content = serde_json::from_value::<DailyRevisionContent>(current.content.clone())
             .map_err(|error| ApiError::internal(error.to_string()))?;
         if content.manual_entry_ids == manual_entry_ids {
@@ -3700,30 +3978,19 @@ async fn generate_daily_candidate(
         content.manual_entry_ids = manual_entry_ids;
         let content =
             serde_json::to_value(content).map_err(|error| ApiError::internal(error.to_string()))?;
-        let revised = if let Some(context_snapshot) = current_context_snapshot.as_ref() {
-            state
-                .store
-                .create_proposal_revision_if_current_with_context(
-                    &profile.id,
-                    local_date,
-                    Some(&snapshot.id),
-                    &context_snapshot.id,
-                    "structured_edit",
-                    &content,
-                    &current.id,
-                )
-        } else {
-            state.store.create_proposal_revision_if_current(
+        return attempt.save(|| {
+            state.store.create_generated_revision_if_current(
                 &profile.id,
                 local_date,
                 Some(&snapshot.id),
+                current_context_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.id.as_str()),
                 "structured_edit",
                 &content,
-                &current.id,
+                Some(&current.id),
             )
-        }
-        .map_err(|error| ApiError::conflict(error.to_string()))?;
-        return Ok(revised);
+        });
     }
     if current
         .as_ref()
@@ -3759,22 +4026,50 @@ async fn generate_daily_candidate(
                 .to_owned(),
         ),
     };
-    let proposal = match llm::generate_automated_daily_summary(
+    attempt.stage("requesting_model")?;
+    let progress_store = state.store.clone();
+    let progress_id = attempt.id.clone();
+    let progress_retries = attempt.save_retries.clone();
+    let progress_deadline = attempt.deadline;
+    let generation_result = tokio::select! {
+        biased;
+        _ = attempt.cancel.changed() => Err("Generation canceled.".to_owned()),
+        _ = tokio::time::sleep_until(attempt.deadline) => Err("Generation timed out.".to_owned()),
+        result = llm::generate_automated_daily_summary_with_progress(
         state.llm_config.as_ref(),
         args.clone(),
         evidence.events,
-    )
-    .await
-    {
+        move |completed, total, fallback| generation::save_with_retries(&progress_id, progress_deadline, &progress_retries, || progress_store.update_generation_attempt_progress(&progress_id, completed, total, fallback)).map(|_| ()).map_err(|error| if error.failure_code == Some("database_busy") { "database_busy".to_owned() } else { error.message }),
+        ) => result,
+    };
+    let proposal = match generation_result {
         Ok(proposal) => proposal,
         Err(error) => {
             state
                 .store
                 .set_daily_generation_status(&profile.id, local_date, "failed")
                 .map_err(|store_error| ApiError::internal(store_error.to_string()))?;
-            return Err(ApiError::unprocessable(error));
+            let code = if error == "Generation canceled." {
+                "canceled"
+            } else if error == "Generation timed out." {
+                "timed_out"
+            } else if error == "database_busy"
+                || error.contains("database is locked")
+                || error.contains("database is busy")
+            {
+                "database_busy"
+            } else {
+                "model_failed"
+            };
+            let error = if error == "database_busy" {
+                "Database remained busy while recording progress. Retry this draft.".to_owned()
+            } else {
+                error
+            };
+            return Err(ApiError::unprocessable(error).with_code(code));
         }
     };
+    attempt.stage("saving")?;
     let draft = proposal
         .structured_draft
         .ok_or_else(|| ApiError::internal("daily generator omitted structured content"))?;
@@ -3786,28 +4081,35 @@ async fn generate_daily_candidate(
         "generated"
     };
     let revision = if let Some(payload) = desired_context_payload.as_ref() {
-        let context_snapshot = state
-            .store
-            .create_context_snapshot(&profile.id, local_date, payload)
-            .map_err(|error| ApiError::internal(error.to_string()))?;
-        state.store.create_proposal_revision_with_context(
-            &profile.id,
-            local_date,
-            Some(&snapshot.id),
-            &context_snapshot.id,
-            origin,
-            &content,
-        )
+        let context_snapshot = attempt.save(|| {
+            state
+                .store
+                .create_context_snapshot(&profile.id, local_date, payload)
+        })?;
+        attempt.save(|| {
+            state.store.create_generated_revision_if_current(
+                &profile.id,
+                local_date,
+                Some(&snapshot.id),
+                Some(&context_snapshot.id),
+                origin,
+                &content,
+                current.as_ref().map(|revision| revision.id.as_str()),
+            )
+        })
     } else {
-        state.store.create_proposal_revision(
-            &profile.id,
-            local_date,
-            Some(&snapshot.id),
-            origin,
-            &content,
-        )
-    }
-    .map_err(|error| ApiError::internal(error.to_string()))?;
+        attempt.save(|| {
+            state.store.create_generated_revision_if_current(
+                &profile.id,
+                local_date,
+                Some(&snapshot.id),
+                None,
+                origin,
+                &content,
+                current.as_ref().map(|revision| revision.id.as_str()),
+            )
+        })
+    }?;
     Ok(revision)
 }
 
@@ -4033,6 +4335,16 @@ async fn refocus_edit_daily_candidate(
             "the Daily candidate changed; reload and try again",
         ));
     }
+    if current
+        .content
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        != Some(input.content.schema_version)
+    {
+        return Err(ApiError::bad_request(
+            "Editing cannot change the draft format.",
+        ));
+    }
     let content = serde_json::to_value(input.content)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let context_snapshot = state
@@ -4167,6 +4479,9 @@ fn reconcile_retention(state: &AppState, now: DateTime<Utc>) -> Result<(), ApiEr
 }
 
 async fn reconcile_daily_schedule(state: &AppState, now: DateTime<Utc>) -> Result<(), ApiError> {
+    let Ok(guard) = state.daily_generation_lock.clone().try_lock_owned() else {
+        return Ok(());
+    };
     let (profile, workspace) = match active_refocus_context(state) {
         Ok(context) => context,
         Err(error) if error.status == StatusCode::CONFLICT => return Ok(()),
@@ -4266,7 +4581,8 @@ async fn reconcile_daily_schedule(state: &AppState, now: DateTime<Utc>) -> Resul
             .store
             .set_daily_generation_status(&profile.id, local_date, "queued")
             .map_err(|error| ApiError::internal(error.to_string()))?;
-        match generate_daily_candidate(state, local_date, false, None).await {
+        let (attempt, _) = generation::begin(state, local_date, "scheduled")?;
+        match generation::run(state, local_date, false, None, attempt, guard).await {
             Ok(_) => {
                 state
                     .store
@@ -4279,6 +4595,7 @@ async fn reconcile_daily_schedule(state: &AppState, now: DateTime<Utc>) -> Resul
                     )
                     .map_err(|error| ApiError::internal(error.to_string()))?;
             }
+            Err(error) if error.message == "Generation canceled." => {}
             Err(error)
                 if error.status == StatusCode::CONFLICT
                     && error.message.contains("current candidate has edits") =>
@@ -4422,12 +4739,22 @@ async fn favicon() -> impl IntoResponse {
 struct ApiError {
     status: StatusCode,
     message: String,
+    failure_code: Option<&'static str>,
 }
 
 impl ApiError {
+    fn with_code(mut self, code: &'static str) -> Self {
+        self.failure_code = Some(code);
+        self
+    }
+
+    fn invalid_references() -> Self {
+        Self::unprocessable("Reference notes could not be prepared. Retry without references; your notes and evidence are preserved.").with_code("reference_context_invalid")
+    }
     fn unauthorized(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
+            failure_code: None,
             message: message.into(),
         }
     }
@@ -4435,6 +4762,7 @@ impl ApiError {
     fn forbidden(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
+            failure_code: None,
             message: message.into(),
         }
     }
@@ -4442,20 +4770,30 @@ impl ApiError {
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            failure_code: None,
             message: message.into(),
         }
     }
 
     fn internal(message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: message.into(),
+            failure_code: if message.contains("database is locked")
+                || message.contains("database is busy")
+            {
+                Some("database_busy")
+            } else {
+                None
+            },
+            message,
         }
     }
 
     fn conflict(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
+            failure_code: None,
             message: message.into(),
         }
     }
@@ -4463,6 +4801,7 @@ impl ApiError {
     fn unprocessable(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNPROCESSABLE_ENTITY,
+            failure_code: None,
             message: message.into(),
         }
     }
@@ -4470,6 +4809,7 @@ impl ApiError {
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            failure_code: None,
             message: message.into(),
         }
     }
@@ -4477,6 +4817,16 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let Some(code) = self.failure_code {
+            return (self.status, Json(json!({"error":self.message,"code":code}))).into_response();
+        }
+        if let Some(message) = self.message.strip_prefix("generation_busy: ") {
+            return (
+                self.status,
+                Json(json!({"error": message, "code": "generation_busy"})),
+            )
+                .into_response();
+        }
         (self.status, Json(json!({ "error": self.message }))).into_response()
     }
 }
@@ -4599,11 +4949,843 @@ mod knowledge_destination_tests {
             apply_lock: Arc::new(Mutex::new(())),
             knowledge_write_lock: Arc::new(Mutex::new(())),
             daily_generation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            generation_cancel: Arc::new(Mutex::new(None)),
             refocus: RefocusConfig {
                 allowed_hosts: HashSet::from(["localhost:8788".to_owned()]),
                 allowed_origins: HashSet::from(["http://localhost:8788".to_owned()]),
             },
             workspace: InspectedWorkspace::inspect(&workspace_root).expect("workspace inspects"),
+        }
+    }
+
+    fn generation_test_state() -> (AppState, WorkspaceProfile, NaiveDate) {
+        let state = test_state();
+        let profile = state
+            .store
+            .save_active_workspace_profile(
+                state.workspace.root_binding(),
+                "UTC",
+                "Work Log",
+                "{date}.md",
+                None,
+                "markdown",
+                None,
+            )
+            .unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+        state
+            .store
+            .ensure_daily_day(date, "Work Log/2026-09-09.md", None)
+            .unwrap();
+        state
+            .store
+            .insert_event(log_inbox_core::models::LogEventInput {
+                timestamp: Some("2026-09-09T10:00:00Z".parse().unwrap()),
+                source: "codex/test".to_owned(),
+                level: None,
+                message: "Validated the generation lifecycle.".to_owned(),
+                metadata: Some(serde_json::from_value(json!({"repo":"alpha"})).unwrap()),
+                fingerprint: None,
+            })
+            .unwrap();
+        (state, profile, date)
+    }
+
+    #[tokio::test]
+    async fn activity_record_works_without_model_and_uses_reviewed_apply() {
+        let (state, profile, date) = generation_test_state();
+        let manual = state
+            .store
+            .create_manual_daily_entry(&profile.id, date, "My own words.", &[])
+            .unwrap();
+        let credentials = generate_session_credentials();
+        state
+            .store
+            .create_dashboard_session(
+                &credentials,
+                &[
+                    "draft:generate".into(),
+                    "logs:read".into(),
+                    "review:write".into(),
+                    "vault:write".into(),
+                ],
+                Utc::now(),
+                Duration::hours(1),
+                Duration::hours(1),
+            )
+            .unwrap();
+        let cookie = format!("log_inbox_session={}", credentials.session_token);
+        let app = build_router(state.clone());
+        let uri = format!("/api/v2/daily/{date}/activity-record");
+        let no_csrf =
+            json_response(app.clone(), "POST", &uri, json!({}), Some(&cookie), None).await;
+        assert_ne!(no_csrf.status(), StatusCode::CREATED);
+        let guard = state.daily_generation_lock.lock().await;
+        let busy = json_response(
+            app.clone(),
+            "POST",
+            &uri,
+            json!({}),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(busy.status(), StatusCode::CONFLICT);
+        drop(guard);
+        let created = json_response(
+            app.clone(),
+            "POST",
+            &uri,
+            json!({}),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        let status = created.status();
+        let revision = response_json(created).await;
+        assert_eq!(status, StatusCode::CREATED, "{revision}");
+        assert_eq!(revision["content"]["schema_version"], 2);
+        assert_eq!(revision["content"]["manual_entry_ids"], json!([manual.id]));
+        assert_eq!(
+            revision["content"]["workstreams"][0]["activity"][0]["text"],
+            "Validated the generation lifecycle."
+        );
+        assert!(!state.workspace.canonical_root().join("Work Log").exists());
+        assert!(
+            state
+                .store
+                .latest_generation_attempt(&profile.id, date)
+                .unwrap()
+                .is_none()
+        );
+        let duplicate = json_response(
+            app.clone(),
+            "POST",
+            &uri,
+            json!({}),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+        let preview = json_response(
+            app.clone(),
+            "GET",
+            &format!("/api/v2/daily/{date}/apply-preview"),
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(preview.status(), StatusCode::OK);
+        let preview = response_json(preview).await;
+        assert!(
+            preview["next_block"]
+                .as_str()
+                .unwrap()
+                .contains("Activity record · not AI-summarized")
+        );
+        let approval = json!({"expected_revision_id":preview["revision_id"],"expected_revision_content_hash":preview["revision_content_hash"],"destination_path":preview["destination_path"],"expected_old_block_hash":preview["expected_old_block_hash"],"intended_new_block_hash":preview["intended_new_block_hash"],"expected_target_exists":preview["expected_target_exists"],"expected_original_content_hash":preview["expected_original_content_hash"],"expected_updated_content_hash":preview["updated_content_hash"]});
+        let applied = json_response(
+            app.clone(),
+            "POST",
+            &format!("/api/v2/daily/{date}/apply"),
+            approval.clone(),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(applied.status(), StatusCode::OK);
+        let written = std::fs::read_to_string(
+            state
+                .workspace
+                .canonical_root()
+                .join(preview["destination_path"].as_str().unwrap()),
+        )
+        .unwrap();
+        assert!(written.contains("My own words."));
+        assert!(written.contains("Validated the generation lifecycle."));
+        let reapplied = json_response(
+            app,
+            "POST",
+            &format!("/api/v2/daily/{date}/apply"),
+            approval,
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(response_json(reapplied).await["idempotent"], true);
+    }
+
+    #[test]
+    fn activity_record_preserves_groups_and_rejects_inferred_fields() {
+        let (state, profile, date) = generation_test_state();
+        let mut events = state.store.all_events().unwrap();
+        events[0].metadata.insert("task_id".into(), json!("task-a"));
+        let mut earlier = events[0].clone();
+        earlier.id = "earlier".into();
+        earlier.timestamp -= Duration::minutes(1);
+        earlier.message = "Earlier decision must remain.".into();
+        events.push(earlier);
+        let content = llm::activity_record(&events, vec![]);
+        assert_eq!(content.workstreams.len(), 1);
+        assert_eq!(
+            content.workstreams[0].activity[0].text,
+            "Earlier decision must remain."
+        );
+        assert_eq!(content.workstreams[0].activity.len(), 2);
+        events[1]
+            .metadata
+            .insert("repo".into(), json!("another-repo"));
+        assert_eq!(llm::activity_record(&events, vec![]).workstreams.len(), 2);
+        let revision = create_activity_record(&state, date).unwrap();
+        let snapshot = revision.snapshot_id.as_deref().unwrap();
+        let mut invalid = revision.content.clone();
+        invalid["workstreams"][0]["outcome"] = invalid["workstreams"][0]["activity"].clone();
+        assert!(
+            state
+                .store
+                .create_proposal_revision_if_current(
+                    &profile.id,
+                    date,
+                    Some(snapshot),
+                    "structured_edit",
+                    &invalid,
+                    &revision.id
+                )
+                .is_err()
+        );
+        let mut missing = revision.content.clone();
+        missing["workstreams"][0]["activity"] = json!([]);
+        assert!(
+            state
+                .store
+                .create_proposal_revision_if_current(
+                    &profile.id,
+                    date,
+                    Some(snapshot),
+                    "structured_edit",
+                    &missing,
+                    &revision.id
+                )
+                .is_err()
+        );
+        let id = state.store.snapshot_evidence(snapshot).unwrap()[0]
+            .event_id
+            .clone();
+        state
+            .store
+            .decide_snapshot_evidence(snapshot, &id, "omit", None, "owner", None)
+            .unwrap();
+        assert!(
+            !daily_apply_material(&state, date)
+                .unwrap()
+                .plan
+                .next_block
+                .contains("Validated the generation lifecycle.")
+        );
+    }
+
+    #[test]
+    fn activity_record_refuses_expired_evidence_and_over_limit_days() {
+        let (state, profile, date) = generation_test_state();
+        let ids = state
+            .store
+            .all_events()
+            .unwrap()
+            .into_iter()
+            .map(|event| event.id)
+            .collect::<Vec<_>>();
+        state
+            .store
+            .create_evidence_snapshot(&profile.id, date, &ids)
+            .unwrap();
+        let settings = state
+            .store
+            .save_daily_automation_settings(&profile.id, false, "00:15", 7, 1, 30, 30, None)
+            .unwrap();
+        state
+            .store
+            .run_retention_maintenance(&settings, Utc::now() + Duration::days(2))
+            .unwrap();
+        assert!(
+            create_activity_record(&state, date)
+                .unwrap_err()
+                .message
+                .contains("expired")
+        );
+        let (state, profile, date) = generation_test_state();
+        for index in 0..500 {
+            state
+                .store
+                .insert_event(log_inbox_core::models::LogEventInput {
+                    timestamp: Some("2026-09-09T10:00:00Z".parse().unwrap()),
+                    source: "codex/test".into(),
+                    level: None,
+                    message: format!("Activity {index}"),
+                    metadata: None,
+                    fingerprint: None,
+                })
+                .unwrap();
+        }
+        assert!(
+            create_activity_record(&state, date)
+                .unwrap_err()
+                .message
+                .contains("500-event")
+        );
+        assert!(
+            state
+                .store
+                .current_proposal_revision(&profile.id, date)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_cancellation_and_timeout_are_terminal_without_a_revision() {
+        for canceled in [true, false] {
+            let (state, profile, date) = generation_test_state();
+            let guard = state
+                .daily_generation_lock
+                .clone()
+                .try_lock_owned()
+                .unwrap();
+            let (mut attempt, _) = generation::begin(&state, date, "manual").unwrap();
+            if canceled {
+                state
+                    .generation_cancel
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .1
+                    .send_replace(true);
+            } else {
+                attempt.deadline = tokio::time::Instant::now();
+            }
+            assert!(
+                generation::run(&state, date, false, None, attempt, guard)
+                    .await
+                    .is_err()
+            );
+            let saved = state
+                .store
+                .latest_generation_attempt(&profile.id, date)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                saved["state"],
+                if canceled { "canceled" } else { "timed_out" }
+            );
+            assert!(
+                state
+                    .store
+                    .current_proposal_revision(&profile.id, date)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(state.store.active_generation_attempt().unwrap().is_none());
+            assert!(state.daily_generation_lock.try_lock().is_ok());
+        }
+    }
+
+    #[test]
+    fn apply_preview_includes_untouched_evidence_and_honors_omissions() {
+        let (state, profile, date) = generation_test_state();
+        state
+            .store
+            .freeze_daily_template(&profile.id, date, None)
+            .unwrap();
+        let ids = state
+            .store
+            .all_events()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect::<Vec<_>>();
+        let snapshot = state
+            .store
+            .create_evidence_snapshot(&profile.id, date, &ids)
+            .unwrap();
+        state.store.create_proposal_revision(&profile.id,date,Some(&snapshot.id),"generated",&json!({
+            "schema_version":1,"manual_entry_ids":[],"open_questions":[],
+            "workstreams":[{"id":"work","title":"Work","evidence_event_ids":ids,
+                "outcome":[{"text":"Validated the generation lifecycle.","evidence_event_ids":ids}]}]
+        })).unwrap();
+        let included = daily_apply_material(&state, date).unwrap();
+        assert!(
+            included
+                .plan
+                .next_block
+                .contains("Validated the generation lifecycle.")
+        );
+        assert!(
+            state.store.snapshot_evidence(&snapshot.id).unwrap()[0]
+                .disposition
+                .is_none()
+        );
+        state
+            .store
+            .decide_snapshot_evidence(&snapshot.id, &ids[0], "omit", None, "owner", None)
+            .unwrap();
+        let omitted = daily_apply_material(&state, date).unwrap();
+        assert!(
+            !omitted
+                .plan
+                .next_block
+                .contains("Validated the generation lifecycle.")
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_gate_skips_scheduler_without_creating_attempts() {
+        let (state, _, date) = generation_test_state();
+        let _guard = state.daily_generation_lock.lock().await;
+        assert_eq!(
+            generate_daily_candidate(&state, date, false, None)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::CONFLICT
+        );
+        reconcile_daily_schedule(&state, Utc::now()).await.unwrap();
+        assert!(state.store.active_generation_attempt().unwrap().is_none());
+    }
+
+    #[test]
+    fn dropped_generation_marks_day_interrupted_and_saving_rejects_pending_cancel() {
+        let (state, profile, date) = generation_test_state();
+        let (attempt, _) = generation::begin(&state, date, "manual").unwrap();
+        state
+            .store
+            .set_daily_generation_status(&profile.id, date, "running")
+            .unwrap();
+        state
+            .generation_cancel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .1
+            .send_replace(true);
+        assert!(attempt.stage("saving").is_err());
+        drop(attempt);
+        assert_eq!(
+            state
+                .store
+                .latest_generation_attempt(&profile.id, date)
+                .unwrap()
+                .unwrap()["state"],
+            "interrupted"
+        );
+        assert_eq!(
+            state
+                .store
+                .daily_day(&profile.id, date)
+                .unwrap()
+                .unwrap()
+                .generation_status,
+            "failed"
+        );
+    }
+
+    #[test]
+    fn malformed_reference_snapshot_is_rejected_before_model_work_and_exposes_recovery() {
+        let (state, profile, date) = generation_test_state();
+        let (attempt, _) = generation::begin(&state, date, "manual").unwrap();
+        let result = preflight_reference_context(
+            &json!({"schema_version":1,"workstream_links":{"repo:alpha":["not a canonical wikilink"]}}),
+        );
+        assert!(result.is_err());
+        assert_eq!(attempt.finish(&result).unwrap(), "failed");
+        let saved = state
+            .store
+            .latest_generation_attempt(&profile.id, date)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved["failure_code"], "reference_context_invalid");
+        assert_eq!(
+            saved["recovery_actions"],
+            json!(["retry_without_references"])
+        );
+        assert_eq!(saved["completed_groups"], 0);
+        assert!(
+            state
+                .store
+                .current_proposal_revision(&profile.id, date)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn generation_database_retry_budget_is_shared_and_stops_on_deadline_or_nonbusy_errors() {
+        let busy = || {
+            anyhow::Error::from(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                None,
+            ))
+        };
+        let budget = Mutex::new(0);
+        assert_eq!(
+            generation::database_error(busy()).failure_code,
+            Some("database_busy")
+        );
+        assert_eq!(
+            generation::database_error(anyhow::anyhow!("template changed")).failure_code,
+            None
+        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut calls = 0;
+        let value = generation::save_with_retries("test", deadline, &budget, || {
+            calls += 1;
+            if calls < 3 { Err(busy()) } else { Ok(42) }
+        })
+        .unwrap();
+        assert_eq!(value, 42);
+        assert_eq!(calls, 3);
+        let mut exhausted_calls = 0;
+        let error = generation::save_with_retries::<()>("test", deadline, &budget, || {
+            exhausted_calls += 1;
+            Err(busy())
+        })
+        .unwrap_err();
+        assert_eq!(error.failure_code, Some("database_busy"));
+        assert_eq!(exhausted_calls, 1);
+        let mut expired_calls = 0;
+        assert!(
+            generation::save_with_retries::<()>(
+                "test",
+                tokio::time::Instant::now(),
+                &Mutex::new(0),
+                || {
+                    expired_calls += 1;
+                    Err(busy())
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(expired_calls, 1);
+        let mut invalid_calls = 0;
+        assert!(
+            generation::save_with_retries::<()>("test", deadline, &Mutex::new(0), || {
+                invalid_calls += 1;
+                anyhow::bail!("invalid snapshot")
+            })
+            .is_err()
+        );
+        assert_eq!(invalid_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn cancel_endpoint_requires_csrf_and_refuses_cancellation_after_saving_starts() {
+        let (state, _, date) = generation_test_state();
+        let credentials = generate_session_credentials();
+        state
+            .store
+            .create_dashboard_session(
+                &credentials,
+                &["draft:generate".to_owned(), "logs:read".to_owned()],
+                Utc::now(),
+                Duration::hours(1),
+                Duration::hours(1),
+            )
+            .unwrap();
+        let cookie = format!("log_inbox_session={}", credentials.session_token);
+        let app = build_router(state.clone());
+        for saving in [false, true] {
+            let (attempt, value) = generation::begin(&state, date, "manual").unwrap();
+            if saving {
+                attempt.stage("saving").unwrap();
+            }
+            let uri = format!(
+                "/api/v2/daily/{date}/generation/{}/cancel",
+                value["id"].as_str().unwrap()
+            );
+            let unauthorized =
+                json_response(app.clone(), "POST", &uri, json!({}), Some(&cookie), None).await;
+            assert_ne!(unauthorized.status(), StatusCode::OK);
+            let response = json_response(
+                app.clone(),
+                "POST",
+                &uri,
+                json!({}),
+                Some(&cookie),
+                Some(&credentials.csrf_token),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response_json(response).await["cancel_requested"], !saving);
+            assert_eq!(*attempt.cancel.borrow(), !saving);
+            drop(attempt);
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_model_cancellation_timeout_and_concurrent_edit_preserve_existing_revision() {
+        for scenario in ["cancel", "timeout", "edit", "without_references"] {
+            let (mut state, profile, date) = generation_test_state();
+            let captured = Arc::new(Mutex::new(None::<Value>));
+            let collection = state
+                .store
+                .save_knowledge_collection(
+                    None,
+                    &profile.id,
+                    "Product notes",
+                    "Reference context",
+                    &["notes".to_owned()],
+                    &[],
+                    true,
+                    None,
+                )
+                .unwrap();
+            std::fs::create_dir_all(state.workspace.canonical_root().join("notes")).unwrap();
+            std::fs::write(
+                state.workspace.canonical_root().join("notes/alpha.md"),
+                "# Alpha\nReference excerpt must not leak into evidence-only generation.\n",
+            )
+            .unwrap();
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let model = Router::new().route("/chat/completions", post({
+                let entered = entered.clone();
+                let release = release.clone();
+                let captured = captured.clone();
+                move |Json(body): Json<Value>| {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    let captured = captured.clone();
+                    async move {
+                        *captured.lock().unwrap() = Some(body);
+                        entered.notify_one();
+                        release.notified().await;
+                        Json(json!({"choices":[{"message":{"content":json!({"title":"Generation lifecycle", "outcome":["Validated generation lifecycle handling."],"decision":[],"trade_off":[],"validation":[],"blocker":[],"follow_up":[],"open_questions":[]}).to_string()}}]}))
+                    }
+                }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            state.llm_config = Some(llm::LlmConfig::for_test(&format!(
+                "http://{}",
+                listener.local_addr().unwrap()
+            )));
+            let server = tokio::spawn(async move {
+                axum::serve(listener, model).await.unwrap();
+            });
+            let note = state
+                .store
+                .create_manual_daily_entry(
+                    &profile.id,
+                    date,
+                    "Owner note preserved during generation.",
+                    &[],
+                )
+                .unwrap();
+            let content = json!({"schema_version":1,"workstreams":[],"manual_entry_ids":[note.id],"open_questions":[]});
+            let original = state
+                .store
+                .create_proposal_revision(&profile.id, date, None, "generated", &content)
+                .unwrap();
+            let mut preserved = original.id;
+            let broken_mapping = if scenario == "without_references" {
+                let mapping = state
+                    .store
+                    .save_context_mapping(&ContextMapping {
+                        id: String::new(),
+                        workspace_id: profile.id.clone(),
+                        selectors: vec![LinkSelector {
+                            field: "repo".to_owned(),
+                            operator: "exact".to_owned(),
+                            value: "alpha".to_owned(),
+                        }],
+                        canonical_note_path: "outside/missing.md".to_owned(),
+                        enabled: true,
+                        source_identity: None,
+                        source_digest: None,
+                        created_at: DateTime::<Utc>::UNIX_EPOCH,
+                        updated_at: DateTime::<Utc>::UNIX_EPOCH,
+                    })
+                    .unwrap();
+                let guard = state
+                    .daily_generation_lock
+                    .clone()
+                    .try_lock_owned()
+                    .unwrap();
+                let (attempt, _) = generation::begin(&state, date, "manual").unwrap();
+                let error = generation::run(&state, date, false, None, attempt, guard)
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.failure_code, Some("reference_context_invalid"));
+                assert!(
+                    captured.lock().unwrap().is_none(),
+                    "bad reference config must fail before a model call"
+                );
+                assert_eq!(
+                    state
+                        .store
+                        .current_proposal_revision(&profile.id, date)
+                        .unwrap()
+                        .unwrap()
+                        .id,
+                    preserved
+                );
+                Some(mapping)
+            } else {
+                None
+            };
+            let credentials = generate_session_credentials();
+            state
+                .store
+                .create_dashboard_session(
+                    &credentials,
+                    &["draft:generate".to_owned(), "logs:read".to_owned()],
+                    Utc::now(),
+                    Duration::hours(1),
+                    Duration::hours(1),
+                )
+                .unwrap();
+            let guard = state
+                .daily_generation_lock
+                .clone()
+                .try_lock_owned()
+                .unwrap();
+            let mode = if scenario == "without_references" {
+                generation::ReferenceMode::None
+            } else {
+                generation::ReferenceMode::Configured
+            };
+            let (mut attempt, value) =
+                generation::begin_with_references(&state, date, "manual", mode).unwrap();
+            if scenario == "timeout" {
+                // Start the timeout only after proving the model request is pending.
+                // Paused Tokio time makes this independent of parallel SQLite/test load.
+                attempt.deadline =
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(3600);
+            }
+            let worker_state = state.clone();
+            let worker = tokio::spawn(async move {
+                generation::run(&worker_state, date, false, None, attempt, guard).await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(15), entered.notified())
+                .await
+                .expect("model receives request");
+            if scenario == "timeout" {
+                tokio::time::pause();
+                tokio::time::advance(std::time::Duration::from_secs(3601)).await;
+            }
+            if scenario == "cancel" {
+                let app = build_router(state.clone());
+                let uri = format!(
+                    "/api/v2/daily/{date}/generation/{}/cancel",
+                    value["id"].as_str().unwrap()
+                );
+                let cookie = format!("log_inbox_session={}", credentials.session_token);
+                let response = json_response(
+                    app,
+                    "POST",
+                    &uri,
+                    json!({}),
+                    Some(&cookie),
+                    Some(&credentials.csrf_token),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response_json(response).await["cancel_requested"], true);
+            } else if scenario == "edit" {
+                preserved = state
+                    .store
+                    .create_proposal_revision_if_current(
+                        &profile.id,
+                        date,
+                        None,
+                        "structured_edit",
+                        &content,
+                        &preserved,
+                    )
+                    .unwrap()
+                    .id;
+                release.notify_one();
+            } else if scenario == "without_references" {
+                let body = captured.lock().unwrap().clone().unwrap().to_string();
+                assert!(!body.contains("Reference excerpt must not leak"));
+                assert!(!body.contains("[[notes/alpha]]"));
+                release.notify_one();
+            }
+            let result = tokio::time::timeout(std::time::Duration::from_secs(3), worker)
+                .await
+                .unwrap()
+                .unwrap();
+            if scenario == "without_references" {
+                let revision = result.unwrap();
+                let snapshot = state
+                    .store
+                    .proposal_context_snapshot(&revision.id)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(snapshot.payload["reference_mode"], "none");
+                let content: DailyRevisionContent =
+                    serde_json::from_value(revision.content).unwrap();
+                assert!(
+                    content
+                        .workstreams
+                        .iter()
+                        .all(|stream| stream.canonical_links.is_empty())
+                );
+                assert_eq!(
+                    state
+                        .store
+                        .knowledge_collection(&collection.id)
+                        .unwrap()
+                        .unwrap(),
+                    collection
+                );
+                assert_eq!(
+                    state.store.list_context_mappings(&profile.id).unwrap(),
+                    broken_mapping.into_iter().collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    state
+                        .store
+                        .latest_generation_attempt(&profile.id, date)
+                        .unwrap()
+                        .unwrap()["completed_groups"],
+                    1
+                );
+                server.abort();
+                continue;
+            }
+            assert!(result.is_err(), "{scenario}");
+            let saved = state
+                .store
+                .latest_generation_attempt(&profile.id, date)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                saved["state"],
+                match scenario {
+                    "cancel" => "canceled",
+                    "timeout" => "timed_out",
+                    _ => "failed",
+                }
+            );
+            assert_eq!(
+                state
+                    .store
+                    .current_proposal_revision(&profile.id, date)
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                preserved
+            );
+            if scenario == "edit" {
+                assert!(result.unwrap_err().message.contains("changed"));
+            }
+            assert!(state.daily_generation_lock.try_lock().is_ok());
+            server.abort();
+            if scenario == "timeout" {
+                tokio::time::resume();
+            }
         }
     }
 
@@ -4656,6 +5838,30 @@ mod knowledge_destination_tests {
             .await
             .expect("response body reads");
         serde_json::from_slice(&bytes).expect("response is JSON")
+    }
+
+    async fn wait_for_generation(app: &Router, cookie: &str, date: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let response = json_response(
+                    app.clone(),
+                    "GET",
+                    &format!("/api/v2/daily/{date}"),
+                    json!({}),
+                    Some(cookie),
+                    None,
+                )
+                .await;
+                let day = response_json(response).await;
+                if day["generation_attempt"]["state"] != "running" {
+                    assert_eq!(day["generation_attempt"]["state"], "succeeded", "{day}");
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("generation completes promptly");
     }
 
     #[tokio::test]
@@ -5914,7 +7120,8 @@ mod knowledge_destination_tests {
             Some(&csrf),
         )
         .await;
-        assert_eq!(generated.status(), StatusCode::OK);
+        assert_eq!(generated.status(), StatusCode::ACCEPTED);
+        wait_for_generation(&app, &cookie, "2026-09-09").await;
 
         let apply_preview = json_response(
             app.clone(),
@@ -6007,7 +7214,8 @@ mod knowledge_destination_tests {
             Some(&csrf),
         )
         .await;
-        assert_eq!(regenerated.status(), StatusCode::OK);
+        assert_eq!(regenerated.status(), StatusCode::ACCEPTED);
+        wait_for_generation(&app, &cookie, "2026-09-09").await;
         let newer_preview = json_response(
             app.clone(),
             "GET",

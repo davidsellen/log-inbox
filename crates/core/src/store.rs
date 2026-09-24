@@ -1,5 +1,7 @@
 use crate::{
-    auth::{SessionCredentials, normalize_scopes, token_digest, token_matches},
+    auth::{
+        SessionCredentials, normalize_scopes, restored_csrf_token, token_digest, token_matches,
+    },
     daily::render_daily_path,
     models::{
         BackupVerification, DailyConsolidationJob, DashboardSession, IgnoredLinkIdentity,
@@ -1003,6 +1005,49 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 23 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE generation_attempts (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspace_profiles(id),
+                    local_date TEXT NOT NULL,
+                    operation_type TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('running','succeeded','failed','canceled','interrupted','timed_out')),
+                    stage TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    timeout_seconds INTEGER NOT NULL CHECK(timeout_seconds > 0),
+                    error TEXT
+                );
+                CREATE UNIQUE INDEX idx_generation_attempt_single_active
+                    ON generation_attempts((1)) WHERE state = 'running';
+                CREATE INDEX idx_generation_attempt_day
+                    ON generation_attempts(workspace_id, local_date, started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_log_events_received_at ON log_events(received_at);
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (23, 'durable generation attempts', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
+        if current < 24 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                "ALTER TABLE generation_attempts ADD COLUMN reference_mode TEXT NOT NULL DEFAULT 'configured';
+                 ALTER TABLE generation_attempts ADD COLUMN completed_groups INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE generation_attempts ADD COLUMN total_groups INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE generation_attempts ADD COLUMN failure_code TEXT;",
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (24, 'generation recovery and progress', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -1187,8 +1232,13 @@ impl Store {
             "dashboard session lacks required scope"
         );
         if let Some(csrf_token) = csrf_token {
+            let original_matches = token_matches(csrf_token, &session.csrf_digest);
+            let restored_matches = token_matches(
+                csrf_token,
+                &token_digest(&restored_csrf_token(session_token)),
+            );
             anyhow::ensure!(
-                token_matches(csrf_token, &session.csrf_digest),
+                original_matches | restored_matches,
                 "CSRF token does not match the dashboard session"
             );
         }
@@ -1213,20 +1263,14 @@ impl Store {
         now: DateTime<Utc>,
         idle_ttl: Duration,
     ) -> Result<(DashboardSession, String)> {
-        let mut session = self.authenticate_dashboard_session(
+        let session = self.authenticate_dashboard_session(
             session_token,
             None,
             required_scope,
             now,
             idle_ttl,
         )?;
-        let csrf_token = format!("csrf_{}", Uuid::new_v4().simple());
-        session.csrf_digest = token_digest(&csrf_token);
-        let conn = self.connect()?;
-        conn.execute(
-            "UPDATE dashboard_sessions SET csrf_digest = ?1 WHERE token_digest = ?2 AND revoked_at IS NULL",
-            params![session.csrf_digest, session.token_digest],
-        )?;
+        let csrf_token = restored_csrf_token(session_token);
         Ok((session, csrf_token))
     }
 
@@ -2230,6 +2274,7 @@ impl Store {
     pub(crate) fn connect(&self) -> Result<Connection> {
         let conn = Connection::open(&self.db_path)
             .with_context(|| format!("opening {}", self.db_path.display()))?;
+        conn.busy_timeout(StdDuration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(conn)
     }
@@ -2476,12 +2521,76 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_generation_saves_wait_for_writer_and_preserve_expected_revision() {
+        let store = temp_store();
+        let profile = store
+            .create_pending_workspace_profile(
+                "busy-test",
+                "UTC",
+                "Daily",
+                "{date}.md",
+                None,
+                "markdown",
+            )
+            .unwrap();
+        store.activate_workspace_profile(&profile.id).unwrap();
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 23).unwrap();
+        store
+            .ensure_daily_day(date, "Daily/2026-09-23.md", None)
+            .unwrap();
+        let note = store
+            .create_manual_daily_entry(&profile.id, date, "Concurrent result", &[])
+            .unwrap();
+        let content = serde_json::json!({"schema_version":1,"workstreams":[],"manual_entry_ids":[note.id],"open_questions":[]});
+        let mut conn = store.connect().unwrap();
+        let writer = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let workers = (0..2)
+            .map(|_| {
+                let store = store.clone();
+                let workspace = profile.id.clone();
+                let content = content.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.create_generated_revision_if_current(
+                        &workspace, date, None, None, "manual", &content, None,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        std::thread::sleep(StdDuration::from_millis(50));
+        writer.commit().unwrap();
+        let results = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(
+            results
+                .iter()
+                .filter_map(|result| result.as_ref().err())
+                .all(|error| error
+                    .to_string()
+                    .contains("current proposal revision changed"))
+        );
+        assert_eq!(
+            conn.pragma_query_value(None, "busy_timeout", |row| row.get::<_, u64>(0))
+                .unwrap(),
+            5000
+        );
+    }
+
+    #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 22);
+        assert_eq!(store.schema_version().expect("version reads"), 24);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 22);
+        assert_eq!(store.schema_version().expect("version remains"), 24);
     }
 
     #[test]
@@ -2549,7 +2658,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 22);
+        assert_eq!(verification.schema_version, 24);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());
@@ -2832,6 +2941,67 @@ mod tests {
             )
             .expect("session CSRF refreshes");
         assert_eq!(refreshed.scopes, ["logs:read", "review:write"]);
+        assert_eq!(refreshed.csrf_digest, session.csrf_digest);
+        let (_, second_restored_csrf) = store
+            .refresh_dashboard_session_csrf(
+                &credentials.session_token,
+                "logs:read",
+                now + Duration::minutes(1),
+                Duration::minutes(30),
+            )
+            .expect("another tab restores the session");
+        assert_eq!(refreshed_csrf, second_restored_csrf);
+        let other = generate_session_credentials();
+        store
+            .create_dashboard_session(
+                &other,
+                &["logs:read".to_owned(), "review:write".to_owned()],
+                now,
+                Duration::minutes(30),
+                Duration::hours(8),
+            )
+            .unwrap();
+        let (_, other_csrf) = store
+            .refresh_dashboard_session_csrf(
+                &other.session_token,
+                "logs:read",
+                now,
+                Duration::minutes(30),
+            )
+            .unwrap();
+        assert_ne!(refreshed_csrf, other_csrf);
+        assert!(
+            store
+                .authenticate_dashboard_session(
+                    &credentials.session_token,
+                    Some(&other_csrf),
+                    "review:write",
+                    now,
+                    Duration::minutes(30)
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .authenticate_dashboard_session(
+                    &other.session_token,
+                    Some(&refreshed_csrf),
+                    "review:write",
+                    now,
+                    Duration::minutes(30)
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .refresh_dashboard_session_csrf(
+                    "invalid-session",
+                    "logs:read",
+                    now,
+                    Duration::minutes(30)
+                )
+                .is_err()
+        );
         assert!(
             store
                 .authenticate_dashboard_session(
@@ -2841,7 +3011,7 @@ mod tests {
                     now + Duration::minutes(2),
                     Duration::minutes(30),
                 )
-                .is_err()
+                .is_ok()
         );
         assert!(
             store
@@ -2858,6 +3028,27 @@ mod tests {
             store
                 .revoke_dashboard_session(&credentials.session_token)
                 .expect("revokes")
+        );
+        assert!(
+            store
+                .refresh_dashboard_session_csrf(
+                    &credentials.session_token,
+                    "logs:read",
+                    now + Duration::minutes(2),
+                    Duration::minutes(30)
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .authenticate_dashboard_session(
+                    &credentials.session_token,
+                    Some(&refreshed_csrf),
+                    "review:write",
+                    now + Duration::minutes(2),
+                    Duration::minutes(30)
+                )
+                .is_err()
         );
         assert!(
             store

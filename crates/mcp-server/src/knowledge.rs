@@ -640,6 +640,11 @@ pub fn resolve_knowledge_with_adjustments(
                 merge_group,
                 matched_fields,
             } => {
+                if !catalog.contains_key(&path) {
+                    return Err(format!(
+                        "Mapped reference note {path} is not available in the selected reference collections. Review its collection or retry without reference notes."
+                    ));
+                }
                 let canonical_group_id = if merge_group {
                     canonical_group_id(&path)
                 } else {
@@ -677,6 +682,9 @@ pub fn resolve_knowledge_with_adjustments(
             GroupResolution::Ambiguous => ambiguous_group_count += 1,
             GroupResolution::Unresolved => {}
         }
+    }
+    if invalid_mapping_count > 0 {
+        return Err("A matching reference mapping points to an unavailable note. Review its mapping or retry without reference notes.".to_owned());
     }
     for links in workstream_links.values_mut() {
         links.sort();
@@ -723,7 +731,11 @@ pub fn resolve_knowledge_with_adjustments(
     let catalog_digest = json_digest(&JsonValue::Array(catalog_revision))?;
     let mut used_note_manifest = used_note_paths
         .iter()
-        .filter_map(|path| catalog.get(path))
+        .map(|path| {
+            catalog
+                .get(path)
+                .expect("resolved note belongs to the selected catalog")
+        })
         .map(|entry| {
             let resolution_digest = json_digest(&json!({
                 "path": entry.note.path,
@@ -1751,19 +1763,53 @@ mod tests {
     #[test]
     fn invalid_reviewed_mapping_never_falls_through_to_an_automatic_match() {
         let (_root, workspace) = workspace(&[("Products/Alpha.md", "# Alpha\n")]);
-        let resolution = resolve_knowledge(
+        let result = resolve_knowledge(
             &workspace,
             &[collection("workspace")],
             &[mapping("repo", "Alpha", "Products/Missing.md")],
             &[event("evt_1", "Alpha", "10")],
+        );
+        assert!(result.unwrap_err().contains("unavailable note"));
+    }
+
+    #[test]
+    fn mapped_notes_must_belong_to_the_usable_selected_catalog() {
+        let (_root, workspace) = workspace(&[
+            ("Products/Alpha.md", "# Alpha\n"),
+            ("Outside/Beta.md", "# Beta\n"),
+        ]);
+        let events = [event("evt_1", "Alpha", "10")];
+        for collections in [vec![], vec![collection("workspace")]] {
+            let error = resolve_knowledge(
+                &workspace,
+                &collections,
+                &[mapping("repo", "Alpha", "Outside/Beta.md")],
+                &events,
+            )
+            .unwrap_err();
+            assert!(error.contains("selected reference collections"));
+        }
+        let mut selected = collection("workspace");
+        selected.exclusions = vec!["Products/Alpha.md".to_owned()];
+        assert!(
+            resolve_knowledge(
+                &workspace,
+                &[selected],
+                &[mapping("repo", "Alpha", "Products/Alpha.md")],
+                &events
+            )
+            .unwrap_err()
+            .contains("selected reference collections")
+        );
+        let valid = resolve_knowledge(
+            &workspace,
+            &[collection("workspace")],
+            &[mapping("repo", "Alpha", "Products/Alpha.md")],
+            &events,
         )
         .unwrap()
         .unwrap();
-        assert_eq!(resolution.vault_context["candidate_notes"], json!([]));
-        assert_eq!(
-            resolution.snapshot_payload["diagnostics"]["invalid_mapping_count"],
-            1
-        );
+        log_inbox_core::validate_context_snapshot_payload(&valid.snapshot_payload).unwrap();
     }
 
     #[test]

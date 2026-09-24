@@ -85,9 +85,25 @@ if [ "$generate_status" -lt 200 ] || [ "$generate_status" -ge 300 ]; then
   jq -c . "$generate_body" >&2 || sed -n '1,20p' "$generate_body" >&2
   exit 1
 fi
-revision=$(jq -c . "$generate_body")
-revision_id=$(printf '%s' "$revision" | jq -er '.id')
-day=$(curl -fsS --max-time 10 "$daily_url/api/v2/daily/$local_date" -H "$daily_headers" -b "$cookie_jar")
+test "$generate_status" -eq 202
+generation_id=$(jq -er '.attempt.id' "$generate_body")
+attempt=1
+while [ "$attempt" -le 30 ]; do
+  day=$(curl -fsS --max-time 10 "$daily_url/api/v2/daily/$local_date" -H "$daily_headers" -b "$cookie_jar")
+  generation_state=$(printf '%s' "$day" | jq -r '.generation_attempt.state')
+  if [ "$generation_state" = succeeded ]; then
+    test "$(printf '%s' "$day" | jq -r '.generation_attempt.id')" = "$generation_id"
+    break
+  fi
+  if [ "$generation_state" != running ] || [ "$attempt" -eq 30 ]; then
+    printf 'Daily generation did not complete: %s\n' "$generation_state" >&2
+    printf '%s' "$day" | jq '.generation_attempt' >&2
+    exit 1
+  fi
+  sleep 1
+  attempt=$((attempt + 1))
+done
+revision_id=$(printf '%s' "$day" | jq -er '.current_revision.id')
 event_id=$(printf '%s' "$day" | jq -er '.current_snapshot.event_ids[0]')
 decision=$(jq -n --arg revision "$revision_id" '{expected_revision_id:$revision,disposition:"include",related_event_id:null,reason:"Compose smoke evidence"}')
 curl -fsS --max-time 10 -X PUT "$daily_url/api/v2/daily/$local_date/evidence/$event_id" \

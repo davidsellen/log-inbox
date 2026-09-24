@@ -18,7 +18,25 @@ const MAX_PROMPT_METADATA_BYTES: usize = 8 * 1024;
 const MAX_PROMPT_BYTES: usize = 512 * 1024;
 const MAX_LLM_RESPONSE_BYTES: usize = 256 * 1024;
 const DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS: u64 = 1200;
-pub const DAILY_GENERATION_CONTRACT: &str = "daily-structured-v1";
+
+// Emit timings even when the caller drops an in-flight request on cancellation.
+struct ModelRequestTiming {
+    started: std::time::Instant,
+    prompt_bytes: usize,
+    completed: bool,
+}
+
+impl Drop for ModelRequestTiming {
+    fn drop(&mut self) {
+        tracing::info!(
+            model_elapsed_ms = self.started.elapsed().as_millis() as u64,
+            prompt_bytes = self.prompt_bytes,
+            completed = self.completed,
+            "Model request finished"
+        );
+    }
+}
+pub const DAILY_GENERATION_CONTRACT: &str = "daily-structured-v2-batched";
 const CONTEXT_METADATA_KEYS: &[&str] = &[
     "event_type",
     "entry_kind",
@@ -56,6 +74,9 @@ pub struct LlmConfig {
 }
 
 impl LlmConfig {
+    pub fn timeout_seconds(&self) -> u64 {
+        self.request_timeout.as_secs()
+    }
     pub fn from_env() -> Option<Self> {
         let base_url = std::env::var("LOG_INBOX_LLM_BASE_URL").ok()?;
         let model = std::env::var("LOG_INBOX_LLM_MODEL").unwrap_or_else(|_| "llama3.1".to_owned());
@@ -456,32 +477,29 @@ pub async fn generate_automated_daily_summary(
     args: SuggestMarkdownSummaryArgs,
     events: Vec<StoredLogEvent>,
 ) -> Result<SummaryProposal, String> {
+    generate_automated_daily_summary_with_progress(config, args, events, |_, _, _| Ok(())).await
+}
+
+pub async fn generate_automated_daily_summary_with_progress(
+    config: Option<&LlmConfig>,
+    args: SuggestMarkdownSummaryArgs,
+    events: Vec<StoredLogEvent>,
+    progress: impl Fn(usize, usize, bool) -> Result<(), String> + Send + Sync,
+) -> Result<SummaryProposal, String> {
     if args.mode != "daily-consolidation" {
         return Err("automated daily generation requires daily-consolidation mode".to_owned());
     }
     if events.is_empty() {
         return Err("automated daily generation requires evidence".to_owned());
     }
-    suggest_automated_summary(config, args, events).await
-}
-
-async fn suggest_automated_summary(
-    config: Option<&LlmConfig>,
-    args: SuggestMarkdownSummaryArgs,
-    events: Vec<StoredLogEvent>,
-) -> Result<SummaryProposal, String> {
-    tracing::info!(mode = %args.mode, event_count = events.len(), attempt = 1, "LLM summary attempt started");
-    let result = suggest_automated_summary_once(config, args.clone(), events).await;
-    if result.is_ok() {
-        tracing::info!(mode = %args.mode, attempt = 1, "LLM summary attempt succeeded");
-    }
-    result
+    suggest_automated_summary_once(config, args, events, &progress).await
 }
 
 async fn suggest_automated_summary_once(
     config: Option<&LlmConfig>,
     args: SuggestMarkdownSummaryArgs,
     events: Vec<StoredLogEvent>,
+    progress: &(dyn Fn(usize, usize, bool) -> Result<(), String> + Send + Sync),
 ) -> Result<SummaryProposal, String> {
     let Some(config) = config else {
         if args.mode == "daily-consolidation" {
@@ -513,19 +531,51 @@ async fn suggest_automated_summary_once(
         let groups = event_groups(&events, &args);
         let mut workstreams = Vec::with_capacity(groups.len());
         let mut open_questions = Vec::new();
-        for (index, (group_id, group_events)) in groups.iter().enumerate() {
+        progress(0, groups.len(), false)?;
+        let mut fallback = false;
+        for batch in daily_batches(&args, &groups)? {
+            let batch_args = batch_context(&args, &batch);
+            let group_ids = event_groups(&batch, &batch_args)
+                .into_keys()
+                .collect::<Vec<_>>();
+            let count = group_ids.len();
+            let prompt = build_prompt(&batch_args, &batch)?;
             tracing::info!(
-                group = index + 1,
-                group_count = groups.len(),
-                event_count = group_events.len(),
-                "LLM daily workstream started"
+                group_count = count,
+                prompt_bytes = prompt.len(),
+                "LLM daily batch started"
             );
-            let prompt = build_prompt(&args, group_events)?;
-            let content = request_model(&client, config, prompt, true).await?;
-            let (workstream, mut questions) =
-                parse_single_daily_workstream(&content, group_id, group_events)?;
-            workstreams.push(workstream);
-            open_questions.append(&mut questions);
+            let content = request_model(&client, config, prompt, &group_ids).await?;
+            let parsed = parse_daily_batch(&content, &batch_args, &batch);
+            match parsed {
+                Ok(mut draft) => {
+                    workstreams.append(&mut draft.workstreams);
+                    open_questions.append(&mut draft.open_questions);
+                    progress(workstreams.len(), groups.len(), fallback)?;
+                }
+                Err(error) if count > 1 => {
+                    fallback = true;
+                    progress(workstreams.len(), groups.len(), true)?;
+                    tracing::info!(
+                        group_count = count,
+                        failure_kind = batch_failure_kind(&error),
+                        "Invalid daily batch; retrying individual groups once"
+                    );
+                    for single in event_groups(&batch, &batch_args).into_values() {
+                        let single_args = batch_context(&args, &single);
+                        let prompt = build_prompt(&single_args, &single)?;
+                        let ids = event_groups(&single, &single_args)
+                            .into_keys()
+                            .collect::<Vec<_>>();
+                        let content = request_model(&client, config, prompt, &ids).await?;
+                        let mut draft = parse_daily_batch(&content, &single_args, &single)?;
+                        workstreams.append(&mut draft.workstreams);
+                        open_questions.append(&mut draft.open_questions);
+                        progress(workstreams.len(), groups.len(), true)?;
+                    }
+                }
+                Err(error) => return Err(error),
+            }
         }
         let draft = StructuredDailyDraft {
             workstreams,
@@ -535,7 +585,7 @@ async fn suggest_automated_summary_once(
     }
 
     let prompt = build_prompt(&args, &events)?;
-    let content = request_model(&client, config, prompt, false).await?;
+    let content = request_model(&client, config, prompt, &[]).await?;
     parse_proposal(&content, &args, &events, &config.base_url)
 }
 
@@ -543,10 +593,22 @@ async fn request_model(
     client: &reqwest::Client,
     config: &LlmConfig,
     prompt: String,
-    daily: bool,
+    group_ids: &[String],
 ) -> Result<String, String> {
+    let group_count = group_ids.len();
+    let daily = group_count > 0;
+    let mut timing = ModelRequestTiming {
+        started: std::time::Instant::now(),
+        prompt_bytes: prompt.len(),
+        completed: false,
+    };
     let response_format = if daily {
-        daily_response_format()
+        let mut format = batch_response_format(group_count);
+        if group_count > 1 {
+            format["json_schema"]["schema"]["properties"]["workstreams"]["items"]["properties"]["id"]
+                ["enum"] = json!(group_ids);
+        }
+        format
     } else {
         json!({ "type": "json_object" })
     };
@@ -556,7 +618,7 @@ async fn request_model(
         .json(&json!({
             "model": config.model,
             "temperature": temperature,
-            "max_tokens": if daily { 512 } else { 2048 },
+            "max_tokens": if daily { (512 * group_count).min(2048) } else { 2048 },
             "response_format": response_format,
             "messages": [
                 {
@@ -599,7 +661,146 @@ async fn request_model(
         .first()
         .map(|choice| choice.message.content.clone())
         .ok_or_else(|| "LLM response did not include a choice".to_owned())?;
+    timing.completed = true;
     Ok(content)
+}
+
+fn batch_failure_kind(error: &str) -> &'static str {
+    if error.contains("decision evidence") || error.contains("validation evidence") {
+        "lifecycle_coverage"
+    } else if error.contains("workstream ID") || error.contains("evidence groups") {
+        "group_identity"
+    } else if error.contains("structured schema") {
+        "schema"
+    } else {
+        "content_validation"
+    }
+}
+
+fn batch_context(
+    args: &SuggestMarkdownSummaryArgs,
+    events: &[StoredLogEvent],
+) -> SuggestMarkdownSummaryArgs {
+    let mut scoped = args.clone();
+    let groups = event_groups(events, args);
+    let raw = events.iter().map(event_group_key).collect::<BTreeSet<_>>();
+    if let Some(context) = scoped.vault_context.as_object_mut() {
+        if let Some(aliases) = context
+            .get_mut("group_aliases")
+            .and_then(Value::as_object_mut)
+        {
+            aliases.retain(|id, _| raw.contains(id));
+        }
+        if let Some(links) = context
+            .get_mut("workstream_links")
+            .and_then(Value::as_object_mut)
+        {
+            links.retain(|id, _| groups.contains_key(id));
+            let candidates = links
+                .values()
+                .filter_map(Value::as_array)
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>();
+            context.insert("candidate_notes".into(), json!(candidates));
+        }
+        if let Some(knowledge) = context.get_mut("knowledge").and_then(Value::as_object_mut) {
+            let mut used = BTreeSet::new();
+            if let Some(mapping) = knowledge
+                .get_mut("workstream_excerpts")
+                .and_then(Value::as_object_mut)
+            {
+                mapping.retain(|id, _| groups.contains_key(id));
+                used.extend(
+                    mapping
+                        .values()
+                        .filter_map(Value::as_array)
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned),
+                );
+            }
+            if let Some(excerpts) = knowledge.get_mut("excerpts").and_then(Value::as_array_mut) {
+                excerpts
+                    .retain(|excerpt| excerpt["id"].as_str().is_some_and(|id| used.contains(id)));
+            }
+        }
+    }
+    scoped
+}
+
+fn daily_batches(
+    args: &SuggestMarkdownSummaryArgs,
+    groups: &BTreeMap<String, Vec<StoredLogEvent>>,
+) -> Result<Vec<Vec<StoredLogEvent>>, String> {
+    let mut batches = Vec::new();
+    let mut pending = Vec::new();
+    let mut count = 0;
+    for events in groups.values() {
+        let mut candidate = pending.clone();
+        candidate.extend(events.iter().cloned());
+        let fits = count < 4
+            && build_prompt(&batch_context(args, &candidate), &candidate)
+                .is_ok_and(|prompt| prompt.len() <= 16 * 1024);
+        if !pending.is_empty() && !fits {
+            batches.push(std::mem::take(&mut pending));
+            count = 0;
+        }
+        pending.extend(events.iter().cloned());
+        count += 1;
+        // An oversized single group still uses the existing hard prompt bound.
+        build_prompt(&batch_context(args, &pending), &pending)?;
+    }
+    if !pending.is_empty() {
+        batches.push(pending);
+    }
+    Ok(batches)
+}
+
+fn parse_daily_batch(
+    content: &str,
+    args: &SuggestMarkdownSummaryArgs,
+    events: &[StoredLogEvent],
+) -> Result<StructuredDailyDraft, String> {
+    let groups = event_groups(events, args);
+    let draft = if groups.len() == 1 {
+        let (id, events) = groups.iter().next().expect("one group");
+        let (workstream, open_questions) = parse_single_daily_workstream(content, id, events)?;
+        StructuredDailyDraft {
+            workstreams: vec![workstream],
+            open_questions,
+        }
+    } else {
+        parse_grouped_daily_draft(content, events, args)?
+    };
+    validate_daily_workstream_groups(&draft, events, args)?;
+    validate_durable_lifecycle_evidence(&draft, events, args)?;
+    Ok(draft)
+}
+
+fn batch_response_format(count: usize) -> Value {
+    let mut format = daily_response_format();
+    if count <= 1 {
+        return format;
+    }
+    let mut workstream = format["json_schema"]["schema"].clone();
+    workstream["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("open_questions");
+    workstream["properties"]["id"] = json!({"type":"string"});
+    let required = workstream["required"].as_array_mut().unwrap();
+    required.retain(|key| key != "open_questions");
+    required.push(json!("id"));
+    format["json_schema"]["schema"] = json!({
+        "type":"object", "additionalProperties":false,
+        "required":["workstreams","open_questions"],
+        "properties":{
+            "workstreams":{"type":"array","minItems":count,"maxItems":count,"items":workstream},
+            "open_questions":{"type":"array","maxItems":2*count,"items":{"type":"string","maxLength":320}}
+        }
+    });
+    format
 }
 
 fn daily_response_format() -> Value {
@@ -668,7 +869,14 @@ fn build_prompt(
         serde_json::to_string(&args.vault_context).map_err(|error| error.to_string())?;
     let allowed_links =
         serde_json::to_string(&allowed_canonical_links(args)).map_err(|error| error.to_string())?;
-    let (response_shape, format_rules) = if args.mode == "daily-consolidation" {
+    let (response_shape, format_rules) = if args.mode == "daily-consolidation"
+        && event_groups(events, args).len() > 1
+    {
+        (
+            r#"{"workstreams":[{"id":"exact supplied group_id","title":"Concise workstream name","outcome":["Supported fact"],"decision":[],"trade_off":[],"validation":[],"blocker":[],"follow_up":[]}],"open_questions":[]}"#,
+            "- Return exactly one workstream for each supplied group_id. Never merge groups or move facts between groups.\n- Return concise fact strings only; no event IDs or Markdown.\n- Preserve distinct outcomes, decisions, validation, blockers and follow-up; omit unsupported facts. Include at least one factual item per group.\n- Events with decision metadata require a Decision fact; events with tests or validation metadata require a Validation fact.",
+        )
+    } else if args.mode == "daily-consolidation" {
         (
             r#"{
   "title": "Concise human-readable workstream name",
@@ -1327,6 +1535,72 @@ fn safe_model_markdown_text(value: &str) -> String {
     escaped.replace("://", ":\u{200b}//")
 }
 
+/// Build a neutral record from stored evidence, without inference or Knowledge.
+pub(crate) fn activity_record(
+    events: &[StoredLogEvent],
+    manual_entry_ids: Vec<String>,
+) -> DailyRevisionContent {
+    let mut events = events.iter().collect::<Vec<_>>();
+    events.sort_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then(left.id.cmp(&right.id))
+    });
+    let mut workstreams: Vec<DailyWorkstream> = Vec::new();
+    // ponytail: at most 500 events; linear lookup preserves first-seen order.
+    // Add a group-to-index map if that bound grows.
+    for event in events {
+        let id = event_group_key(event);
+        let index = match workstreams.iter().position(|group| group.id == id) {
+            Some(index) => index,
+            None => {
+                let subject = ["work_item", "pull_request", "task_id", "session_id"]
+                    .iter()
+                    .find_map(|key| {
+                        event
+                            .metadata
+                            .get(*key)
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.trim().is_empty())
+                    });
+                let repo = event
+                    .metadata
+                    .get("repo")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&event.source);
+                let title = subject
+                    .map_or_else(|| repo.to_owned(), |subject| format!("{repo} · {subject}"));
+                workstreams.push(DailyWorkstream {
+                    id,
+                    title,
+                    evidence_event_ids: Vec::new(),
+                    canonical_links: Vec::new(),
+                    outcome: Vec::new(),
+                    decision: Vec::new(),
+                    trade_off: Vec::new(),
+                    validation: Vec::new(),
+                    blocker: Vec::new(),
+                    follow_up: Vec::new(),
+                    activity: Vec::new(),
+                });
+                workstreams.len() - 1
+            }
+        };
+        let group = &mut workstreams[index];
+        group.evidence_event_ids.push(event.id.clone());
+        group.activity.push(DailyFact {
+            text: event.message.clone(),
+            evidence_event_ids: vec![event.id.clone()],
+        });
+    }
+    DailyRevisionContent {
+        schema_version: 2,
+        workstreams,
+        manual_entry_ids,
+        open_questions: Vec::new(),
+    }
+}
+
 pub fn render_daily_revision_preview(
     content: &DailyRevisionContent,
     manual_entries: &[ManualDailyEntry],
@@ -1374,6 +1648,7 @@ pub fn render_daily_revision_preview(
             ];
             let facts = fields
                 .into_iter()
+                .chain(std::iter::once(("Activity", &workstream.activity)))
                 .flat_map(|(label, facts)| {
                     let excluded = &excluded;
                     facts
@@ -1384,7 +1659,16 @@ pub fn render_daily_revision_preview(
                                 .any(|event_id| !excluded.contains(event_id.as_str()))
                         })
                         .map(move |fact| {
-                            format!("- **{label}:** {}", safe_model_markdown_text(&fact.text))
+                            let text = if content.is_activity_record() {
+                                fact.text
+                                    .split('\n')
+                                    .map(safe_model_markdown_text)
+                                    .collect::<Vec<_>>()
+                                    .join("\n  ")
+                            } else {
+                                safe_model_markdown_text(&fact.text)
+                            };
+                            format!("- **{label}:** {text}")
                         })
                 })
                 .collect::<Vec<_>>();
@@ -1405,6 +1689,9 @@ pub fn render_daily_revision_preview(
         })
         .collect::<Vec<_>>();
     let mut sections = Vec::new();
+    if content.is_activity_record() {
+        sections.push("Activity record · not AI-summarized".to_owned());
+    }
     if !selected_manual.is_empty() {
         sections.push(format!("### My notes\n\n{}", selected_manual.join("\n")));
     }
@@ -1493,6 +1780,7 @@ pub(crate) fn daily_revision_content(
                 validation: revision_facts(workstream.validation),
                 blocker: revision_facts(workstream.blocker),
                 follow_up: revision_facts(workstream.follow_up),
+                activity: Vec::new(),
             })
             .collect(),
         manual_entry_ids,
@@ -2125,6 +2413,232 @@ mod tests {
         let fingerprint = generation_configuration_digest(&config);
         assert_eq!(fingerprint.len(), 64);
         assert!(!fingerprint.contains("credential-that-must-not-escape"));
+    }
+
+    /// Opt-in only: never contacts a model or reads real-day data in the normal suite.
+    /// Input is a JSON array of {events: [StoredLogEvent], vault_context: {...}}.
+    #[tokio::test]
+    #[ignore = "requires explicit local model configuration and representative day fixtures"]
+    async fn benchmark_representative_days() {
+        let config = LlmConfig::from_env().expect("configure LOG_INBOX_LLM_BASE_URL and MODEL");
+        assert!(
+            knowledge_text_stays_local(&config),
+            "benchmark requires a local model"
+        );
+        let path = std::env::var("LOG_INBOX_BENCHMARK_INPUT")
+            .expect("provide a private JSON fixture path");
+        let bytes = std::fs::read(path).expect("read benchmark fixtures");
+        assert!(
+            bytes.len() <= 16 * 1024 * 1024,
+            "benchmark fixtures exceed 16 MiB"
+        );
+        let cases: Vec<Value> = serde_json::from_slice(&bytes).expect("parse benchmark fixtures");
+        assert!(
+            (1..=3).contains(&cases.len()),
+            "provide up to three representative days"
+        );
+        for (index, case) in cases.iter().enumerate() {
+            let events: Vec<StoredLogEvent> =
+                serde_json::from_value(case["events"].clone()).expect("valid events");
+            assert!(!events.is_empty() && events.len() <= 500);
+            for with_context in [false, true] {
+                if with_context
+                    && case["vault_context"]
+                        .as_object()
+                        .is_none_or(|v| v.is_empty())
+                {
+                    continue;
+                }
+                for pass in 1..=2 {
+                    let args = SuggestMarkdownSummaryArgs {
+                        mode: "daily-consolidation".to_owned(),
+                        task: None,
+                        vault_context: if with_context {
+                            case["vault_context"].clone()
+                        } else {
+                            json!({})
+                        },
+                    };
+                    let prompt_bytes = build_prompt(&args, &events).expect("bounded prompt").len();
+                    let started = std::time::Instant::now();
+                    let result = tokio::time::timeout(
+                        config.request_timeout,
+                        async {
+                            if std::env::var("LOG_INBOX_BENCHMARK_VARIANT").as_deref() == Ok("baseline") {
+                                let client = reqwest::Client::builder().timeout(config.request_timeout).build().unwrap();
+                                let mut draft = StructuredDailyDraft {workstreams:vec![],open_questions:vec![]};
+                                for (id, group) in event_groups(&events,&args) {
+                                    let prompt = build_prompt(&args,&group)?;
+                                    let content = request_model(&client,&config,prompt,std::slice::from_ref(&id)).await?;
+                                    let (workstream,mut questions) = parse_single_daily_workstream(&content,&id,&group)?;
+                                    draft.workstreams.push(workstream);
+                                    draft.open_questions.append(&mut questions);
+                                }
+                                daily_proposal(draft,&args,&events,&config.base_url)
+                            } else {
+                                generate_automated_daily_summary_with_progress(Some(&config), args, events.clone(), |done,total,fallback| {
+                                    println!("benchmark_progress completed={done} total={total} fallback={fallback}");
+                                    Ok(())
+                                }).await
+                            }
+                        },
+                    )
+                    .await;
+                    let status = match result {
+                        Ok(Ok(_)) => "valid",
+                        Ok(Err(_)) => "invalid_or_failed",
+                        Err(_) => "timed_out",
+                    };
+                    // Counts and durations only: no prompts, provider credentials or output prose.
+                    println!(
+                        "{}",
+                        json!({"case":index + 1,"event_count":events.len(),"context":with_context,"pass":pass,"prompt_bytes":prompt_bytes,"elapsed_ms":started.elapsed().as_millis(),"status":status})
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn daily_batches_preserve_groups_and_scope_reference_context() {
+        let events = (0..9).map(|i| serde_json::from_value::<StoredLogEvent>(json!({
+            "id":format!("evt_{i}"),"received_at":Utc::now(),"timestamp":Utc::now(),
+            "source":"test","level":"info","message":"Completed useful work",
+            "metadata":{"repo":format!("repo{i}")},"fingerprint":null,"truncated":false,"reviewed":false
+        })).unwrap()).collect::<Vec<_>>();
+        let args = SuggestMarkdownSummaryArgs {
+            mode: "daily-consolidation".into(),
+            task: None,
+            vault_context: json!({"workstream_links":{"event:evt_0":["[[Zero]]"],"repo:other":["[[Other]]"]},
+                "knowledge":{"workstream_excerpts":{"event:evt_0":["zero"],"repo:other":["other"]},
+                "excerpts":[{"id":"zero","text":"Useful"},{"id":"other","text":"Not relevant"}]}}),
+        };
+        let groups = event_groups(&events, &args);
+        let batches = daily_batches(&args, &groups).unwrap();
+        assert_eq!(batches.iter().map(Vec::len).collect::<Vec<_>>(), [4, 4, 1]);
+        assert_eq!(
+            batches
+                .iter()
+                .flatten()
+                .map(|e| &e.id)
+                .collect::<BTreeSet<_>>(),
+            events.iter().map(|e| &e.id).collect()
+        );
+        let scoped = batch_context(&args, &events[..1]);
+        assert_eq!(
+            scoped.vault_context["knowledge"]["excerpts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            scoped.vault_context["workstream_links"]
+                .get("repo:other")
+                .is_none()
+        );
+        let mut large = events.clone();
+        for event in &mut large {
+            event.message = "long evidence ".repeat(600);
+        }
+        for batch in daily_batches(&args, &event_groups(&large, &args)).unwrap() {
+            assert!(
+                event_groups(&batch, &args).len() == 1
+                    || build_prompt(&batch_context(&args, &batch), &batch)
+                        .unwrap()
+                        .len()
+                        <= 16 * 1024
+            );
+        }
+        assert_eq!(
+            batch_response_format(4)["json_schema"]["schema"]["properties"]["workstreams"]["maxItems"],
+            4
+        );
+    }
+
+    #[test]
+    fn daily_batch_rejects_missing_duplicate_and_invented_groups() {
+        let events = (0..2).map(|i| serde_json::from_value::<StoredLogEvent>(json!({
+            "id":format!("evt_{i}"),"received_at":Utc::now(),"timestamp":Utc::now(),
+            "source":"test","level":"info","message":"Implemented navigation",
+            "metadata":{"repo":format!("repo{i}")},"fingerprint":null,"truncated":false,"reviewed":false
+        })).unwrap()).collect::<Vec<_>>();
+        let args = SuggestMarkdownSummaryArgs {
+            mode: "daily-consolidation".into(),
+            task: None,
+            vault_context: json!({}),
+        };
+        let groups = event_groups(&events, &args);
+        let workstreams = groups.keys().map(|id| json!({"id":id,"title":"Navigation","outcome":["Implemented navigation"],"decision":[],"trade_off":[],"validation":[],"blocker":[],"follow_up":[]})).collect::<Vec<_>>();
+        let valid = json!({"workstreams":workstreams,"open_questions":[]});
+        assert!(parse_daily_batch(&valid.to_string(), &args, &events).is_ok());
+        let mut missing = valid.clone();
+        missing["workstreams"].as_array_mut().unwrap().pop();
+        assert!(parse_daily_batch(&missing.to_string(), &args, &events).is_err());
+        let mut duplicate = valid.clone();
+        duplicate["workstreams"][1] = duplicate["workstreams"][0].clone();
+        assert!(parse_daily_batch(&duplicate.to_string(), &args, &events).is_err());
+        let mut invented = valid;
+        invented["workstreams"][1]["id"] = json!("invented");
+        assert!(parse_daily_batch(&invented.to_string(), &args, &events).is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_batch_falls_back_once_and_reports_validated_progress() {
+        use axum::{Json, Router, routing::post};
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let app = Router::new().route("/chat/completions", post(move |Json(body): Json<Value>| {
+            let count = count.clone();
+            async move {
+                let index = count.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(body["max_tokens"], if index == 0 { 1024 } else { 512 });
+                let content = if index == 0 { json!({"workstreams":[],"open_questions":[]}) } else {
+                    json!({"title":"Navigation","outcome":["Implemented navigation"],"decision":[],"trade_off":[],"validation":[],"blocker":[],"follow_up":[],"open_questions":[]})
+                };
+                Json(json!({"choices":[{"message":{"content":content.to_string()}}]}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = LlmConfig::for_test(&format!("http://{address}"));
+        let events = (0..2)
+            .map(|i| {
+                serde_json::from_value::<StoredLogEvent>(json!({
+                    "id":format!("evt_{i}"),"received_at":Utc::now(),"timestamp":Utc::now(),
+                    "source":"test","level":"info","message":"Implemented navigation",
+                    "metadata":{},"fingerprint":null,"truncated":false,"reviewed":false
+                }))
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let progress = Mutex::new(Vec::new());
+        let result = generate_automated_daily_summary_with_progress(
+            Some(&config),
+            SuggestMarkdownSummaryArgs {
+                mode: "daily-consolidation".into(),
+                task: None,
+                vault_context: json!({}),
+            },
+            events,
+            |done, total, fallback| {
+                progress.lock().unwrap().push((done, total, fallback));
+                Ok(())
+            },
+        )
+        .await;
+        server.abort();
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            *progress.lock().unwrap(),
+            [(0, 2, false), (0, 2, true), (1, 2, true), (2, 2, true)]
+        );
     }
 
     #[test]

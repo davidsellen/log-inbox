@@ -44,7 +44,8 @@ impl Store {
         );
         let snapshot_digest = format!("{:x}", Sha256::digest(payload_json.as_bytes()));
         let mut conn = self.connect()?;
-        let transaction = conn.transaction()?;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let candidate_id = format!("context_snapshot_{}", Uuid::new_v4().simple());
         transaction.execute(
             "INSERT OR IGNORE INTO context_snapshots (id, workspace_id, local_date, snapshot_digest, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -126,7 +127,8 @@ impl Store {
         let revision_digest =
             collection_revision_digest(label, purpose, &roots, &exclusions, enabled)?;
         let mut conn = self.connect()?;
-        let transaction = conn.transaction()?;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let workspace_is_active: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM workspace_profiles WHERE id = ?1 AND status = 'active')",
             params![workspace_id],
@@ -1127,7 +1129,11 @@ fn validate_markdown_path(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_context_snapshot_payload(payload: &serde_json::Value) -> Result<()> {
+pub fn validate_context_snapshot_payload(payload: &serde_json::Value) -> Result<()> {
+    anyhow::ensure!(
+        serde_json::to_vec(payload)?.len() <= 1024 * 1024,
+        "Knowledge context snapshot exceeds 1048576 bytes"
+    );
     let schema_version = payload
         .get("schema_version")
         .and_then(serde_json::Value::as_u64);

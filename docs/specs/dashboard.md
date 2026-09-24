@@ -1,17 +1,23 @@
 # Daily and Knowledge Dashboard
 
-The service exposes one authenticated browser workflow at `/`, with a Daily review surface and optional Knowledge collection settings. It is not a vault explorer or generic note editor.
+The service exposes one authenticated browser workflow at `/`, centred on Daily. Reference notes are optional setup reached from Settings; existing Knowledge deep links remain usable. It is not a vault explorer or generic note editor.
 
 ## Workflow
 
 1. Select a calendar date. The server resolves the day in the saved IANA timezone and returns only that interval.
 2. Add optional owner-authored notes. They are saved immediately in SQLite, remain separate under **My notes**, and are never rewritten by the model.
-3. Generate a structured candidate from the day's bounded automated evidence.
-4. Edit Outcome, Decision, Trade-off, Validation, Blocker, and Follow-up facts or explicitly include/omit evidence. Each save creates an immutable revision in SQLite.
-5. Review the exact destination and managed-block replacement.
-6. Confirm Apply. This is the only action that writes Markdown.
+3. Choose Create draft from the day's bounded automated evidence. The day itself shows generation state, elapsed time and the configured timeout, with Cancel or Retry as appropriate.
+4. Optionally edit Outcome, Decision, Trade-off, Validation, Blocker, and Follow-up facts or omit evidence. Untouched evidence is included by default; no item-by-item decision is required. Pending omissions are saved automatically before the exact Apply preview. Structured edits create an immutable revision in SQLite.
+5. Read or copy the draft; copying does not approve it or write Markdown. Edit when necessary.
+6. Choose Review & save, inspect the exact destination and managed-block replacement, then Save to note. This is the only action that writes Markdown.
 
 The screen states whether an action is read-only, saves app state, or writes Markdown. Late evidence is shown as an update; it never silently replaces an edited candidate.
+
+When preparation fails without a current draft, **Use activity record** is an opt-in alternative. It replaces the empty draft area with **Activity record · not AI-summarized**, showing collapsed task groups with counts and expandable original messages. My notes stays separate. Editing, omission, Copy, and reviewed Apply use the existing controls; no evidence decision is mandatory. Previous AI failure details are collapsed inside the record. No model or Knowledge request is made, and existing drafts are never replaced. **Create AI summary** asks for replacement confirmation.
+
+Generation is server-owned and survives browser navigation. Daily polls active work and exposes failures beside the draft instead of requiring a trip to Settings. Another active day is identified explicitly; duplicate generation is disabled. Sources, exact Markdown and help remain available through disclosure controls. Activity received reports collector receipts, not a promise of continuous producer connectivity.
+
+Automated evidence opens in a bounded scrollable panel, including when preparation fails or no draft exists. Search matches message and source; Previous/Next moves focus through matching items and shows the current position. Filtering never changes inclusion. Generation status stays visible while browsing, with Browse activity, Cancel, and Retry actions as appropriate. Generated draft sections are bounded separately so long drafts do not push evidence out of reach.
 
 ## Settings
 
@@ -25,9 +31,9 @@ Dismiss removes the exact visible candidate from reminders without writing or de
 
 Settings also exposes a reviewed, idempotent migration when legacy database or proposal-file state is detected. Migration mounts exist only in the Compose override and are never part of the ordinary runtime.
 
-## Knowledge links
+## Reference notes
 
-The Knowledge tab is a small review queue for durable names found in recent retained evidence. Product, project, repository, application, service, module, work-item, and pull-request names can be linked to an existing canonical note or ignored. Source names, branches, task/session IDs, messages, and other transient diagnostics are not shown as linking work.
+Reference-note administration retains the small review queue for durable names found in recent retained evidence. Product, project, repository, application, service, module, work-item, and pull-request names can be linked to an existing canonical note or ignored. Source names, branches, task/session IDs, messages, and other transient diagnostics are not shown as linking work. An empty setup is normal: Daily works without reference notes.
 
 **Names to review** is the primary surface. Choosing Link opens a bounded title/path search within enabled source collections; it never opens a file browser or returns note bodies. Choosing Ignore only removes that identity from the review list, and **Review again** reverses it. **Saved links** are grouped by canonical note and expose explicit change, pause/enable, and remove actions. Imported advanced rules remain visible but cannot be silently simplified by the basic editor.
 

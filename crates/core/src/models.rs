@@ -436,6 +436,12 @@ pub struct DailyRevisionContent {
     pub open_questions: Vec<String>,
 }
 
+impl DailyRevisionContent {
+    pub fn is_activity_record(&self) -> bool {
+        self.schema_version == 2
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DailyWorkstream {
@@ -456,6 +462,9 @@ pub struct DailyWorkstream {
     pub blocker: Vec<DailyFact>,
     #[serde(default)]
     pub follow_up: Vec<DailyFact>,
+    /// Owner-requested, unsummarized activity; never a model-produced factual field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activity: Vec<DailyFact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

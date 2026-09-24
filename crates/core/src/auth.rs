@@ -51,6 +51,15 @@ pub fn token_digest(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 
+/// Stable per-session browser authority without storing a recoverable secret.
+/// Domain separation prevents the stored session digest from serving as CSRF.
+pub fn restored_csrf_token(session_token: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"log-inbox/csrf/v1\0");
+    hash.update(session_token.as_bytes());
+    format!("csrf_{:x}", hash.finalize())
+}
+
 pub fn token_matches(token: &str, expected_digest: &str) -> bool {
     let actual = token_digest(token);
     if actual.len() != expected_digest.len() {

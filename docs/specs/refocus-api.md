@@ -6,7 +6,11 @@ All routes use exact configured Host/Origin boundaries. Error responses have `{ 
 
 The Daily server exposes only the authenticated v2 Daily/settings/migration routes, health endpoint, and static root assets. Removed browser-vault, proposal/consolidation, and Daily-service `/mcp` routes have no runtime aliases. The separate collector exposes the ingestion-only MCP endpoint.
 
-## Authentication
+## Activity-record creation
+
+`POST /api/v2/daily/{date}/activity-record` requires `draft:generate`, an authenticated session, and CSRF. It accepts no record content and returns `201` with the created proposal revision. The server groups the day's original events without a model or Knowledge lookup, preserving manual-note IDs. An active generation, existing draft, dismissed day, empty day, or known expired snapshot evidence returns `409`; more than 500 events returns `422` rather than a partial record. Creation uses the generation guard and an expected-empty-current-revision transaction check. It writes app state only; preview and Apply remain unchanged.
+
+## Authentication endpoints
 
 ### `POST /api/v2/auth/login`
 
@@ -14,7 +18,7 @@ Body: `{ "owner_secret": "...", "remember_me": true|false }`. Requires an allowe
 
 ### `GET /api/v2/auth/session`
 
-Requires the session cookie and `logs:read`. Returns the granted scopes, absolute expiry, and a freshly rotated CSRF token so a reload can restore mutation access without retaining the owner secret or CSRF token in persistent browser storage.
+Requires the session cookie and `logs:read`. Returns the granted scopes, absolute expiry, and a stable session-bound CSRF token so reload restores mutation access without invalidating another open tab. The restore token is domain-separated from the opaque cookie; the original login token remains accepted for that session. Neither the owner secret nor CSRF tokens are placed in persistent browser storage.
 
 ### `POST /api/v2/auth/logout`
 
@@ -106,6 +110,7 @@ Requires the session cookie and `logs:read`. The URL contains a calendar date, n
 - bounded automated evidence and truncation state;
 - trusted owner-authored manual entries stored outside ingest;
 - frozen day state, current immutable proposal revision and its evidence snapshot when present;
+- `generation_attempt`: the latest persisted attempt for this day, including its ID, operation type, state, stage, start/end times, timeout and safe failure detail;
 - server-derived candidate freshness, separate new/expired evidence counts, and exact active late-evidence deferrals, so late evidence is never presented as part of an older current draft and raw retention is not mistaken for a new arrival;
 - deterministic `preview_markdown` rendered from the structured current revision, trusted manual entries, and evidence dispositions.
 - a deliberately limited `current_context_snapshot` status projection when exact Knowledge matching participated: snapshot identity/digest, resolver version, used/resolved counts, and non-sensitive diagnostic counts. Raw collection roots, note metadata, mappings, and source content are never returned by this logs-only route.
@@ -119,6 +124,8 @@ Snapshot evidence carries an `available` flag. Expired raw evidence remains repr
 Requires the session cookie and `logs:read`. It returns profile-local `today`, the IANA timezone and server time, summary counts, and at most 1–31 recent meaningful day records. Today is always present; untouched empty past dates are omitted. The bounded discovery window is returned as `window_start` and is derived from the larger of configured catch-up and raw-retention days, capped at 90 calendar days.
 
 Each day exposes independent generation, review, freshness, scheduling, new-evidence, and expired-evidence facts plus one display status. Counts are exact and do not load event messages. Apply state is considered only when it belongs to the exact current revision. A past day is missed only when it has unhandled automated evidence; manual-only days are shown as notes to review. Browser navigation uses the returned profile-local Today rather than the device calendar.
+
+`active_generation` identifies the service's current attempt, if any. `intake` reports today's receipt count, latest receipt time, and at most ten recent source identities with receipt times. Receipt time is deliberately independent of producer event time. This proves activity arrived; it does not claim a producer is continuously connected.
 
 ## Manual daily entries
 
@@ -139,15 +146,25 @@ The server resolves the active workspace and calendar date, freezes the day dest
 
 ### `POST /api/v2/daily/{YYYY-MM-DD}/generate`
 
-Requires `draft:generate`, the session cookie, an allowed Host/Origin, and the matching `X-CSRF-Token`. The optional body is `{ "replace_edited": false }`. A context adjustment additionally supplies the exact current `expected_revision_id` and a bounded `context_exclusions` array of `{ "workstream_id", "note_path" }`; either both fields are present or neither is. The server serializes generation per owner process, freezes the day, rejects a truncated evidence set, creates an immutable evidence snapshot, and stores a schema-validated immutable proposal revision. An identical evidence/manual/context snapshot returns the existing current revision instead of calling the model again. New manual entries are attached to the existing structured revision without discarding its edits or calling the model.
+The optional `reference_mode` is `configured` (default) or `none`. `none` is an explicit one-attempt recovery: it omits reference mappings, aliases, links and excerpts without changing collections or mappings. It cannot be combined with context exclusions. The day response's `revision_reference_mode` describes the current revision, not the latest attempted generation.
 
-When new automated evidence exists and the current revision contains structured edits, the server returns `409 Conflict` unless `replace_edited` is explicitly true. The Daily UI asks for confirmation before sending that authorization. A successful replacement remains a new immutable `regenerated` revision; the edited revision is retained in history.
+Attempts additionally expose `reference_mode`, `completed_groups`/`total_groups`, `failure_code` and `recovery_actions`. Counts advance only after validation; `stage=requesting_model_fallback` discloses sequential fallback. `reference_context_invalid` offers `retry_without_references`; transient failures offer `retry`. Technical detail remains bounded and redacted. Reference snapshots must pass the persistence validator before a model request begins.
+
+Requires `draft:generate`, the session cookie, an allowed Host/Origin, and the matching `X-CSRF-Token`. The optional body is `{ "replace_edited": false }`. A context adjustment additionally supplies the exact current `expected_revision_id` and a bounded `context_exclusions` array of `{ "workstream_id", "note_path" }`; either both fields are present or neither is. Accepted generation returns `202 Accepted` with `{ "attempt": ... }`; read the day endpoint for its terminal state and resulting revision. Work survives browser refresh. A competing operation returns `409 Conflict` instead of waiting in an invisible queue.
+
+The server freezes the day, rejects a truncated evidence set, creates an immutable evidence snapshot, and stores a schema-validated immutable proposal revision. An identical evidence/manual/context snapshot reuses the existing current revision instead of calling the model again. New manual entries are attached to the existing structured revision without discarding its edits or calling the model.
+
+When new automated evidence exists and the current revision contains structured edits, generation refuses replacement unless `replace_edited` is explicitly true; this appears as a failed attempt after acceptance. The Daily UI asks for confirmation before sending that authorization. A successful replacement remains a new immutable `regenerated` revision; the edited revision is retained in history. A compare-and-swap also refuses to overwrite a revision edited while the model was responding.
 
 If source evidence from the current snapshot has expired, generation preserves that complete revision and refuses to replace it from a partial event set. Owner-authored manual notes can still be attached without a model call. The owner may explicitly leave each newly arrived event for later; active deferrals are excluded from regeneration and Apply freshness checks only for that exact revision and event digest.
 
 Automated evidence always uses the strict structured model contract, even if an ingest producer claims `entry_kind=manual`. Before the model call, enabled Knowledge collections are read through the workspace capability and used only for reviewed mappings or unique exact title, alias, and typed-reference matches. A local endpoint may receive the bounded excerpts described in the Knowledge contract. Per-workstream exclusions suppress only excerpt text; canonical-link authorization and grouping remain unchanged. Omitted adjustment fields preserve the current revision's frozen exclusions. Stale or no-longer-resolvable explicit adjustments return `409 Conflict` instead of silently changing meaning. Other Knowledge resolution failures degrade explicitly to evidence-only generation and are recorded as a bounded diagnostic without returning internal paths or errors.
 
-Manual-only days create a reviewable revision without an LLM. Model absence, oversized input, provider failure, invalid JSON, schema mismatch, missing evidence, or unsafe grouping returns `422 Unprocessable Entity`; raw log text is never substituted as a candidate. Generation changes SQLite review state only. It does not create a folder or Markdown file.
+Manual-only days create a reviewable revision without an LLM. Failures after acceptance, including model absence, oversized input, provider failure, invalid JSON, schema mismatch, missing evidence or unsafe grouping, appear on the attempt; raw log text is never substituted as a candidate. Generation changes SQLite review state only. It does not create a folder or Markdown file. The configured timeout bounds the whole attempt, not each workstream independently. Startup marks unfinished attempts interrupted and preserves existing revisions.
+
+### `POST /api/v2/daily/{YYYY-MM-DD}/generation/{attempt_id}/cancel`
+
+Requires `draft:generate`, the session cookie, an allowed Host/Origin and CSRF. Cancellation is bound to an exact attempt and date. It stops waiting for the model and prevents the cancelled attempt from publishing a revision; it cannot guarantee a remote provider stops computing. Once final persistence has begun, completion wins instead of falsely reporting cancellation. Cancelled scheduled work stays stopped until explicit retry.
 
 ## Review evidence
 

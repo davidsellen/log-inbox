@@ -34,6 +34,7 @@ Keep manual notes separate from automated summaries. Report model failures visib
 - Resolve dates on the server using the workspace timezone; retain event time and receipt time separately.
 - Generate validated structured workstreams, with explicit evidence coverage and no automatic raw fallback.
 - Support manual entries, structured review, reversible evidence-scoped omission, and visible failures without Knowledge setup.
+- After preparation fails, offer an explicit **Use activity record** action: a grouped, editable record of original activity, labelled as not AI-summarized. It uses the same reviewed writer, never silently replaces a draft, and is not an automatic raw-log fallback.
 - Authenticate sensitive access and mutations before enabling the new writable deployment.
 - Show the resolved daily destination and block diff; Apply through one reviewed, recoverable writer.
 - Cut over through an idempotent migration that preserves source data on failure and removes obsolete runtime paths only when the replacement is ready.

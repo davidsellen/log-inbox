@@ -689,7 +689,10 @@ impl Store {
             None => ("none".to_owned(), None, None),
         };
         let mut conn = self.connect()?;
-        let transaction = conn.transaction()?;
+        // Reserve the writer before reading: a deferred read-to-write upgrade in
+        // WAL mode can fail immediately instead of honoring the busy timeout.
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let current: Option<String> = transaction
             .query_row(
                 "SELECT template_revision FROM daily_days WHERE workspace_id = ?1 AND local_date = ?2",
@@ -1137,6 +1140,14 @@ impl Store {
         Ok(())
     }
 
+    pub fn day_has_expired_snapshot_evidence(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+    ) -> Result<bool> {
+        self.connect()?.query_row("SELECT EXISTS(SELECT 1 FROM evidence_snapshot_events e JOIN evidence_snapshots s ON s.id=e.snapshot_id WHERE s.workspace_id=?1 AND s.local_date=?2 AND e.live_event_id IS NULL)", params![workspace_id, local_date.to_string()], |row| row.get(0)).map_err(Into::into)
+    }
+
     pub fn create_evidence_snapshot(
         &self,
         workspace_id: &str,
@@ -1176,7 +1187,8 @@ impl Store {
             .collect::<Result<Vec<_>>>()?;
         let snapshot_digest = digest(&serde_json::to_vec(&event_digests)?);
         let mut conn = self.connect()?;
-        let transaction = conn.transaction()?;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let existing = transaction
             .query_row(
                 "SELECT id FROM evidence_snapshots WHERE workspace_id = ?1 AND local_date = ?2 AND snapshot_digest = ?3",
@@ -1260,7 +1272,7 @@ impl Store {
             None,
             origin,
             content,
-            Some(expected_current_revision_id),
+            Some(Some(expected_current_revision_id)),
         )
     }
 
@@ -1286,6 +1298,30 @@ impl Store {
             Some(context_snapshot_id),
             origin,
             content,
+            Some(Some(expected_current_revision_id)),
+        )
+    }
+
+    /// Publish only if the candidate has not changed while generation was in
+    /// flight. None means the day must still have no candidate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_generated_revision_if_current(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        snapshot_id: Option<&str>,
+        context_snapshot_id: Option<&str>,
+        origin: &str,
+        content: &Value,
+        expected_current_revision_id: Option<&str>,
+    ) -> Result<ProposalRevision> {
+        self.create_proposal_revision_internal(
+            workspace_id,
+            local_date,
+            snapshot_id,
+            context_snapshot_id,
+            origin,
+            content,
             Some(expected_current_revision_id),
         )
     }
@@ -1299,7 +1335,7 @@ impl Store {
         context_snapshot_id: Option<&str>,
         origin: &str,
         content: &Value,
-        expected_current_revision_id: Option<&str>,
+        expected_current_revision_id: Option<Option<&str>>,
     ) -> Result<ProposalRevision> {
         anyhow::ensure!(
             matches!(
@@ -1350,7 +1386,8 @@ impl Store {
         let content_json = serde_json::to_string(content)?;
         let content_hash = digest(content_json.as_bytes());
         let mut conn = self.connect()?;
-        let transaction = conn.transaction()?;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if let Some(expected) = expected_current_revision_id {
             let current: Option<String> = transaction
                 .query_row(
@@ -1361,7 +1398,7 @@ impl Store {
                 .optional()?
                 .flatten();
             anyhow::ensure!(
-                current.as_deref() == Some(expected),
+                current.as_deref() == expected,
                 "current proposal revision changed"
             );
         }
@@ -1393,9 +1430,14 @@ impl Store {
                  AND revision_id != ?4 AND reopened_at IS NULL"#,
             params![now, workspace_id, local_date.to_string(), id],
         )?;
+        // Read before committing: a retry must never repeat an already-committed
+        // write merely because a separate follow-up read encountered contention.
+        let revision = transaction.query_row(
+            "SELECT id, workspace_id, local_date, snapshot_id, revision_number, origin, content_json, content_hash, created_at FROM proposal_revisions WHERE id = ?1",
+            params![id], proposal_revision_from_row,
+        )?;
         transaction.commit()?;
-        self.proposal_revision(&id)?
-            .context("proposal revision missing after creation")
+        Ok(revision)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1497,7 +1539,8 @@ impl Store {
         };
         let now = Utc::now().to_rfc3339();
         let mut conn = self.connect()?;
-        let transaction = conn.transaction()?;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let (current_revision_id, review_status, freshness): (Option<String>, String, String) = transaction
             .query_row(
                 "SELECT current_revision_id, review_status, freshness FROM daily_days WHERE workspace_id = ?1 AND local_date = ?2",
@@ -1599,7 +1642,8 @@ impl Store {
         );
 
         let mut conn = self.connect()?;
-        let transaction = conn.transaction()?;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let stored = transaction
             .query_row(
                 r#"SELECT workspace_id, local_date, source_revision_id, snapshot_id,
@@ -2080,22 +2124,13 @@ impl Store {
         );
 
         if let Some(snapshot_id) = snapshot_id {
-            let unresolved: u64 = transaction.query_row(
-                "SELECT COUNT(*) FROM evidence_snapshot_events WHERE snapshot_id = ?1 AND disposition IS NULL",
-                params![snapshot_id],
-                |row| row.get(0),
-            )?;
-            anyhow::ensure!(
-                unresolved == 0,
-                "all snapshot evidence requires a review decision before finalization"
-            );
             let now = Utc::now().to_rfc3339();
             transaction.execute(
                 r#"INSERT INTO review_state (event_id, reviewed_at, reviewed_by, note)
                    SELECT live_event_id, ?1, ?2, ?3
                    FROM evidence_snapshot_events
                    WHERE snapshot_id = ?4
-                     AND disposition = 'include'
+                     AND (disposition IS NULL OR disposition = 'include')
                      AND live_event_id IS NOT NULL
                    ON CONFLICT(event_id) DO UPDATE SET
                        reviewed_at = excluded.reviewed_at,
@@ -2282,9 +2317,55 @@ impl Store {
         context_snapshot: Option<&crate::models::ContextSnapshot>,
     ) -> Result<()> {
         anyhow::ensure!(
-            content.schema_version == 1,
+            matches!(content.schema_version, 1 | 2),
             "unsupported daily revision schema"
         );
+        if content.is_activity_record() {
+            anyhow::ensure!(
+                origin == "structured_edit" && context_snapshot.is_none(),
+                "activity records are owner-authored and cannot use Knowledge"
+            );
+            anyhow::ensure!(
+                content.open_questions.is_empty(),
+                "activity records cannot infer open questions"
+            );
+        }
+        for workstream in &content.workstreams {
+            if content.is_activity_record() {
+                anyhow::ensure!(
+                    workstream.canonical_links.is_empty()
+                        && [
+                            &workstream.outcome,
+                            &workstream.decision,
+                            &workstream.trade_off,
+                            &workstream.validation,
+                            &workstream.blocker,
+                            &workstream.follow_up
+                        ]
+                        .iter()
+                        .all(|facts| facts.is_empty()),
+                    "activity records cannot contain inferred factual fields or links"
+                );
+                let ids = workstream
+                    .activity
+                    .iter()
+                    .flat_map(|entry| &entry.evidence_event_ids)
+                    .collect::<Vec<_>>();
+                anyhow::ensure!(
+                    workstream
+                        .activity
+                        .iter()
+                        .all(|entry| entry.evidence_event_ids.len() == 1)
+                        && ids.iter().copied().collect::<HashSet<_>>().len() == ids.len(),
+                    "activity entries must each reference one distinct source event"
+                );
+            } else {
+                anyhow::ensure!(
+                    workstream.activity.is_empty(),
+                    "AI summaries cannot contain activity-record entries"
+                );
+            }
+        }
         let manual_ids = content.manual_entry_ids.iter().collect::<HashSet<_>>();
         anyhow::ensure!(
             manual_ids.len() == content.manual_entry_ids.len(),
@@ -2931,6 +3012,7 @@ fn validate_workstream_evidence(
             &workstream.validation,
             &workstream.blocker,
             &workstream.follow_up,
+            &workstream.activity,
         ]
         .into_iter()
         .flatten()
@@ -3044,6 +3126,7 @@ mod tests {
                 validation: Vec::new(),
                 blocker: Vec::new(),
                 follow_up: Vec::new(),
+                activity: Vec::new(),
             }],
             manual_entry_ids: Vec::new(),
             open_questions: Vec::new(),
@@ -3587,13 +3670,23 @@ mod tests {
             .expect("existing day resolves");
         assert_eq!(frozen.destination_path, day.destination_path);
         assert_eq!(day.end_utc - day.start_utc, chrono::Duration::hours(23));
-        let frozen = store
-            .freeze_daily_template(
-                &profile.id,
-                date,
-                Some(("Templates/Daily.md", b"# Daily template\n")),
-            )
-            .expect("template freezes");
+        let writer = store.connect().unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        writer
+            .execute("UPDATE daily_days SET updated_at = updated_at", [])
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            writer.execute_batch("COMMIT").unwrap();
+        });
+        let frozen = store.freeze_daily_template(
+            &profile.id,
+            date,
+            Some(("Templates/Daily.md", b"# Daily template\n")),
+        );
+        release.join().unwrap();
+        let frozen =
+            frozen.expect("template waits for a concurrent writer instead of failing an upgrade");
         let template_hash = digest(b"# Daily template\n");
         assert_eq!(
             frozen.template_revision.as_deref(),
@@ -4804,9 +4897,7 @@ mod tests {
         let snapshot = store
             .create_evidence_snapshot(&profile.id, date, &event_ids)
             .expect("snapshot stores");
-        store
-            .decide_snapshot_evidence(&snapshot.id, &event_ids[0], "include", None, "owner", None)
-            .expect("include records");
+        // Untouched evidence is included by default; only exclusions need decisions.
         store
             .decide_snapshot_evidence(
                 &snapshot.id,

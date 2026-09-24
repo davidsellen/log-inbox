@@ -59,13 +59,15 @@ Supported factual fields are Outcome, Decision, Trade-off, Validation, Blocker, 
 
 Revision origin is `generated`, `structured_edit`, `manual`, `regenerated`, or `advanced_markdown`. Advanced Markdown is a detached override: returning to structured generation or discarding it requires confirmation, and evidence decisions remain explicit records.
 
+An owner-requested activity record uses content schema version 2 and origin `structured_edit`. Its workstreams contain neutral `activity` entries, each with text and exactly one distinct evidence ID. It cannot contain inferred factual fields, canonical links, or open questions. Schema version 1 remains the AI-summary format and cannot contain activity entries. Editing preserves the schema version; changing an activity record to an AI summary requires explicit regeneration approval. All snapshot evidence must remain represented, with omission handled separately. Markdown and Copy retain the “Activity record · not AI-summarized” label.
+
 A Knowledge context comparison is a separate immutable experiment bound to one unedited source revision, its complete evidence snapshot, frozen Knowledge snapshot, and non-secret model/contract fingerprints. It stores two validated shadow contents in randomized order and reveals their identity only after a single owner decision. Choosing an arm atomically creates a normal `regenerated` proposal revision; the source and unchosen arm remain recoverable audit evidence. An open comparison never changes the day or Markdown.
 
 ### Review decision
 
 A review decision addresses one evidence digest in one snapshot. Its disposition is `include`, `omit`, `duplicate_of`, or `superseded_by`, with actor, time, and optional reason. Omission is reversible while the evidence exists. A later event version is unresolved even when an earlier version was omitted.
 
-Editing rendered Markdown does not create review decisions. Applying is allowed only when every snapshot item has a disposition and every factual evidence reference validates against that snapshot.
+Editing rendered Markdown does not create review decisions. Untouched snapshot evidence is included by default; explicit omissions are optional. Applying does not require item-by-item review, but every factual evidence reference must validate against the snapshot. Included evidence, including untouched items, is marked reviewed when Apply finalizes.
 
 A dismissal is an explicit reversible resolution of one exact proposal revision and content hash. It suppresses reminders without changing the revision, evidence, or Markdown. A later event makes the day Update available instead of inheriting the dismissal. Reopening restores review of the same revision and discloses any expired source evidence.
 

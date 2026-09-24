@@ -257,6 +257,163 @@ async function openDaily(page, date = "2026-09-08") {
   await expect(page.locator("#daily-app")).toBeVisible();
 }
 
+test("Stale scheduled errors do not override running or database recovery status",async({page})=>{
+  await mockDaily(page);
+  let attempt={id:"current_attempt",local_date:"2026-09-08",state:"running",stage:"requesting_model",started_at:new Date().toISOString()};
+  await page.route("**/api/v2/daily/overview",route=>route.fulfill({json:{today:"2026-09-08",days:[{local_date:"2026-09-08",status:"generation_failed",schedule_error:"raw obsolete error"}],active_generation:attempt.state==="running"?attempt:null}}));
+  await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:{...dailyResponse(),generation_attempt:attempt}}));
+  await openDaily(page);
+  await expect(page.locator("#generation-message")).toContainText("Writing draft");
+  await expect(page.locator("#generate")).toHaveText("Preparing draft…");
+  await expect(page.locator("#notice")).not.toContainText("raw obsolete error");
+  attempt={...attempt,state:"failed",stage:"complete",failure_code:"database_busy",recovery_actions:["retry"],error:"raw database detail"};
+  await expect(page.locator("#generation-message")).toContainText("The database was busy. Retry preparation; your notes and previous draft are unchanged.",{timeout:8000});
+  await expect(page.getByRole("button",{name:"Try again",exact:true})).toBeEnabled();
+  await expect(page.locator("#notice")).not.toContainText("raw obsolete error");
+  await expect(page.locator("#generation-error-text")).toBeHidden();
+  await expect(page.locator("#readable-draft")).toContainText("Built a predictable Daily review.");
+});
+
+test("Daily shows completed groups, sequential fallback and saving as distinct stages",async({page})=>{
+  await mockDaily(page);
+  let stage="requesting_model";let completed=0;
+  const attempt=()=>({id:"progress_1",local_date:"2026-09-08",state:"running",stage,completed_groups:completed,total_groups:4,reference_mode:"configured",started_at:new Date().toISOString(),timeout_seconds:120});
+  await page.route("**/api/v2/daily/overview",route=>route.fulfill({json:{today:"2026-09-08",days:[],active_generation:attempt()}}));
+  await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:{...dailyResponse(),generation_attempt:attempt()}}));
+  await openDaily(page);
+  await expect(page.locator("#generation-message")).toContainText("0 of 4 groups complete");
+  stage="requesting_model_fallback";completed=2;
+  await expect(page.locator("#generation-message")).toContainText("Retrying smaller groups one at a time · 2 of 4 groups complete",{timeout:8000});
+  stage="saving";completed=4;
+  await expect(page.locator("#generation-message")).toContainText("Saving prepared draft · 4 of 4 groups complete",{timeout:8000});
+  await expect(page.locator("#generate")).toBeDisabled();
+});
+
+test("Daily retries invalid references for one attempt and labels the resulting revision",async({page})=>{
+  const requests=await mockDaily(page);
+  let attempt={id:"invalid_refs",local_date:"2026-09-08",state:"failed",stage:"complete",failure_code:"reference_context_invalid",recovery_actions:["retry_without_references"],reference_mode:"configured",error:"Reference digest mismatch",started_at:new Date().toISOString()};
+  let done=false;const bodies=[];
+  await page.route("**/api/v2/daily/overview",route=>route.fulfill({json:{today:"2026-09-08",days:[],active_generation:attempt.state==="running"?attempt:null}}));
+  await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:{...dailyResponse("2026-09-08",{revisionId:done?"without_refs":"revision_1"}),revision_reference_mode:done?"none":"configured",generation_attempt:attempt}}));
+  await page.route("**/api/v2/daily/2026-09-08/generate",route=>{bodies.push(route.request().postDataJSON());attempt={...attempt,id:"retry_none",state:"running",stage:"requesting_model",reference_mode:"none",failure_code:null,recovery_actions:[],error:null};return route.fulfill({status:202,json:{attempt}});});
+  await openDaily(page);
+  await expect(page.locator("#generation-message")).toContainText("Reference notes need attention");
+  await expect(page.locator("#generation-error-text")).toBeHidden();
+  await page.getByRole("button",{name:"Edit draft",exact:true}).click();
+  await page.getByLabel("Workstream 1 title").fill("Preserve my pending edit");
+  await page.getByRole("button",{name:"Retry without reference notes",exact:true}).click();
+  await expect(page.getByLabel("Workstream 1 title")).toHaveValue("Preserve my pending edit");
+  expect(bodies).toHaveLength(0);
+  page.once("dialog",dialog=>dialog.accept());
+  await page.getByRole("button",{name:"Cancel editing",exact:true}).click();
+  await page.getByRole("button",{name:"Retry without reference notes",exact:true}).click();
+  await expect(page.locator("#generation-message")).toContainText("Without reference notes");
+  await expect(page.locator("#notice")).not.toContainText("preparation started");
+  expect(bodies).toEqual([{replace_edited:false,reference_mode:"none"}]);
+  await expect(page.locator("#revision-reference-mode")).toBeHidden();
+  done=true;attempt={...attempt,state:"succeeded",stage:"complete"};
+  await expect(page.locator("#revision-reference-mode")).toBeVisible({timeout:8000});
+  attempt={...attempt,state:"failed",reference_mode:"configured",failure_code:"generation_failed"};
+  await page.reload();
+  await expect(page.locator("#revision-reference-mode")).toContainText("Generated without reference notes");
+  expect(requests.filter(request=>request.method!=="GET"&&(request.path.includes("/settings/")||request.path.includes("/knowledge/")))).toHaveLength(0);
+});
+
+test("Daily explains a legacy failed preparation without an attempt record",async({page})=>{
+  await mockDaily(page);
+  await page.route("**/api/v2/daily/2026-09-08",route=>{const data=dailyResponse();data.current_revision=null;data.generation_attempt=null;data.day.generation_status="failed";return route.fulfill({json:data});});
+  await openDaily(page);
+  await expect(page.locator("#generation-status")).toBeVisible();
+  await expect(page.locator("#generation-message")).toContainText("Previous preparation did not finish. Your notes are safe.");
+  await expect(page.getByRole("button",{name:"Try again",exact:true})).toBeEnabled();
+  await expect(page.getByRole("button",{name:"Cancel generation"})).toBeHidden();
+});
+
+test("Copy draft uses the reviewed preview and disables copying unsaved edits",async({page})=>{
+  const requests=await mockDaily(page);await openDaily(page);
+  await page.evaluate(()=>Object.defineProperty(navigator,"clipboard",{configurable:true,value:{writeText:async text=>{window.copiedDraft=text;}}}));
+  await page.getByRole("button",{name:"Copy draft",exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.copiedDraft)).toBe(dailyResponse().preview_markdown);
+  await expect(page.locator("#notice")).toContainText("Nothing has been written");
+  await page.getByRole("button",{name:"Edit draft",exact:true}).click();
+  await page.getByLabel("Workstream 1 title").fill("Unsaved title");
+  await expect(page.getByRole("button",{name:"Copy draft",exact:true})).toBeDisabled();
+  expect(requests.filter(request=>request.path.endsWith("/apply")&&request.method==="POST")).toHaveLength(0);
+});
+
+test("Readable drafts honor evidence decisions and preserve references and questions",async({page})=>{
+  await mockDaily(page);
+  let disposition="omit";
+  await page.route("**/api/v2/daily/2026-09-08",route=>{const data=dailyResponse("2026-09-08",{evidenceDisposition:disposition});const workstream=data.current_revision.content.workstreams[0];data.current_revision.content.workstreams.push({...workstream,id:"kept",title:"Retained work",canonical_links:["Products/Alpha.md"],outcome:[{text:"Keep this supported fact",evidence_event_ids:["evt_keep"]}]});data.current_revision.content.open_questions=["Who owns the follow-up?"];return route.fulfill({json:data});});
+  await openDaily(page);
+  for(const choice of ["omit","duplicate_of","superseded_by"]){disposition=choice;await page.reload();await expect(page.locator("#readable-draft")).not.toContainText("Built a predictable Daily review.");await expect(page.locator("#readable-draft")).not.toContainText("Daily workflow");await expect(page.locator("#readable-draft")).toContainText("Keep this supported fact");await expect(page.locator("#readable-draft")).toContainText("Products/Alpha.md");await expect(page.locator("#readable-draft")).toContainText("Who owns the follow-up?");}
+});
+
+test("Daily restores running preparation, prevents duplicate starts and cancels it", async ({ page }) => {
+  const requests=await mockDaily(page);
+  let attempt={id:"attempt_1",local_date:"2026-09-08",state:"running",stage:"requesting_model",started_at:new Date().toISOString(),timeout_seconds:120};
+  await page.route("**/api/v2/daily/overview",route=>route.fulfill({json:{today:"2026-09-08",days:[],active_generation:attempt.state==="running"?attempt:null,intake:{today_count:4,latest_received_at:new Date().toISOString(),sources:[]}}}));
+  await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:{...dailyResponse(),generation_attempt:attempt}}));
+  await page.route("**/generation/attempt_1/cancel",route=>{attempt={...attempt,state:"canceled"};return route.fulfill({json:{attempt}});});
+  await openDaily(page);
+  await expect(page.locator("#generation-message")).toContainText("Writing draft");
+  await expect(page.locator("#generation-message")).toContainText("120s limit");
+  await expect(page.locator("#generate")).toBeDisabled();
+  await expect(page.locator("#intake-status")).toContainText("4 activities received today");
+  await page.reload();
+  await expect(page.locator("#generate")).toBeDisabled();
+  await page.getByRole("button",{name:"Cancel generation"}).click();
+  await expect(page.locator("#generation-message")).toContainText("cancelled");
+  await expect(page.getByRole("button",{name:"Try again",exact:true})).toBeEnabled();
+  expect(requests.filter(request=>request.path.endsWith("/generate"))).toHaveLength(0);
+});
+
+test("Daily waits for an accepted background draft before showing it",async({page})=>{
+  await mockDaily(page);
+  let attempt=null;
+  let finished=false;
+  await page.route("**/api/v2/daily/overview",route=>route.fulfill({json:{today:"2026-09-08",days:[],active_generation:finished?null:attempt}}));
+  await page.route("**/api/v2/daily/2026-09-08",route=>{const data=dailyResponse();if(!finished){data.current_revision=null;data.preview_markdown=null;}return route.fulfill({json:{...data,generation_attempt:attempt?{...attempt,state:finished?"succeeded":"running"}:null}});});
+  await page.route("**/api/v2/daily/2026-09-08/generate",route=>{attempt={id:"attempt_new",local_date:"2026-09-08",state:"running",stage:"requesting_model",started_at:new Date().toISOString()};return route.fulfill({status:202,json:{attempt}});});
+  await openDaily(page);
+  await page.getByRole("button",{name:"Create draft",exact:true}).click();
+  await expect(page.locator("#generate")).toBeDisabled();
+  await expect(page.locator("#readable-draft")).toBeHidden();
+  finished=true;
+  await expect(page.locator("#readable-draft")).toContainText("Built a predictable Daily review.",{timeout:8000});
+  await expect(page.locator("#generation-message")).toContainText("Draft ready to review");
+  await expect(page.getByRole("button",{name:"Review & save",exact:true})).toBeEnabled();
+});
+
+test("Daily polls a running attempt without replacing unsaved draft edits",async({page})=>{
+  await mockDaily(page);
+  let done=false;
+  const running={id:"attempt_2",local_date:"2026-09-08",state:"running",stage:"requesting_model",started_at:new Date().toISOString()};
+  await page.route("**/api/v2/daily/overview",route=>route.fulfill({json:{today:"2026-09-08",days:[],active_generation:done?null:running}}));
+  await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:{...dailyResponse("2026-09-08",{revisionId:done?"revision_2":"revision_1"}),generation_attempt:{...running,state:done?"succeeded":"running"}}}));
+  await openDaily(page);
+  await expect(page.locator("#readable-draft")).toContainText("Built a predictable Daily review.");
+  await expect(page.getByLabel("Workstream 1 title")).toBeHidden();
+  await page.getByRole("button",{name:"Edit draft"}).click();
+  await page.getByLabel("Workstream 1 title").fill("Keep my unsaved title");
+  done=true;
+  await expect(page.locator("#notice")).toContainText("A new draft is ready",{timeout:8000});
+  await expect(page.getByLabel("Workstream 1 title")).toHaveValue("Keep my unsaved title");
+});
+
+test("Daily links a workstream reference without leaving the selected day",async({page})=>{
+  const requests=await mockDaily(page,{knowledgeCollections:[knowledgeCollection()],review:knowledgeReview({unresolved:{total_count:1,identities:[{field:"product",value:"Alpha",event_count:1}]}})});
+  await page.route("**/api/v2/daily/2026-09-08",route=>{const data=dailyResponse();data.automated_evidence.events[0].metadata={product:"Alpha"};return route.fulfill({json:data});});
+  await openDaily(page);
+  await page.getByRole("button",{name:"Add a reference note"}).click();
+  await expect(page.locator("#note-search")).toHaveValue("Alpha");
+  await page.locator("#note-results button").first().click();
+  await page.getByRole("button",{name:"Save link",exact:true}).click();
+  await expect(page.getByRole("button",{name:"Update draft",exact:true})).toBeVisible();
+  await expect(page.locator("#daily-panel")).toBeVisible();
+  expect(requests.filter(request=>request.path.endsWith("/generate"))).toHaveLength(0);
+});
+
 test("refocused Daily shows one date, destination, notes, and exact preview", async ({ page }) => {
   const requests = await mockDaily(page);
   await openDaily(page);
@@ -275,17 +432,18 @@ test("refocused Daily shows one date, destination, notes, and exact preview", as
   await page.getByLabel("Daily log date").fill("2026-09-07");
   await page.getByLabel("Daily log date").dispatchEvent("change");
   await expect.poll(() => requests.some(request => request.path === "/api/v2/daily/2026-09-07")).toBe(true);
-  await expect(page.getByRole("status")).toContainText("Automatic generation failed: model unavailable");
+  await expect(page.locator("#notice")).not.toContainText("model unavailable");
 });
 
-test("refocused Daily stages included evidence by default and applies all decisions once", async ({ page }) => {
+test("Daily includes untouched evidence and saves only optional changes", async ({ page }) => {
   const requests = await mockDaily(page);
   await openDaily(page);
 
-  await page.getByText("Review source events and include or omit them").click();
+  await expect(page.locator("#activity-details")).toHaveAttribute("open", "");
   const decision = page.getByLabel(/Evidence decision:/);
   await expect(decision).toHaveValue("include");
-  await expect(page.getByText("1 decision ready to apply")).toBeVisible();
+  await expect(page.getByText("All activity is included unless you omit it. No item-by-item review required.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Apply all" })).toBeDisabled();
   await page.getByRole("button", { name: "Omit all" }).click();
   await expect(decision).toHaveValue("omit");
   await page.getByRole("button", { name: "Apply all" }).click();
@@ -294,8 +452,113 @@ test("refocused Daily stages included evidence by default and applies all decisi
     expected_revision_id: "revision_1",
     decisions: [{ event_id: "evt_1", disposition: "omit" }]
   });
-  await expect(page.getByText("All evidence decisions saved")).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("Applied 1 evidence decision");
+  await expect(page.getByText("All activity is included unless you omit it. No item-by-item review required.")).toBeVisible();
+  await expect(page.locator("#notice")).toContainText("Applied 1 evidence decision");
+});
+
+test("Failed preparation keeps activity scrollable, searchable and navigable", async ({ page }) => {
+  await mockDaily(page);
+  const data = dailyResponse();
+  data.day.generation_status = "failed";
+  data.current_revision = null;
+  data.current_snapshot_evidence = [];
+  data.automated_evidence.events = Array.from({ length: 40 }, (_, index) => ({ id: `event_${index}`, source: "codex/test", timestamp: "2026-09-08T09:00:00Z", message: `Activity ${index + 1}: investigated generation and kept the notes safe.` }));
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  await openDaily(page);
+  await page.getByRole("button", { name: "Browse activity", exact: true }).click();
+  await expect(page.getByLabel("Search automated activity")).toBeFocused();
+  expect(await page.locator("#evidence").evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+  await page.getByRole("button", { name: "Next activity", exact: true }).click();
+  await expect(page.locator("#activity-position")).toHaveText("Item 1 of 40");
+  await page.getByRole("button", { name: "Next activity", exact: true }).click();
+  await expect(page.locator("#activity-position")).toHaveText("Item 2 of 40");
+  await page.getByRole("button", { name: "Previous activity", exact: true }).click();
+  await expect(page.locator("#activity-position")).toHaveText("Item 1 of 40");
+  await page.getByLabel("Search automated activity").fill("Activity 40:");
+  await expect(page.locator("#evidence .evidence-item:visible")).toHaveCount(1);
+  await page.getByLabel("Search automated activity").fill("missing item");
+  await expect(page.locator("#activity-empty")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Next activity", exact: true })).toBeDisabled();
+  await page.getByLabel("Search automated activity").fill("");
+  await page.locator("#evidence").evaluate(node => { node.scrollTop = node.scrollHeight; });
+  await expect(page.locator("#generation-status")).toBeInViewport();
+  await expect(page.locator("#generation-message")).toContainText("Previous preparation did not finish");
+  await expect(page.getByRole("button", { name: "Retry preparation", exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "Browse activity", exact: true }).click();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("Retry preparation starts a fresh attempt after a database failure", async ({ page }) => {
+  await mockDaily(page);
+  let attempt = { id: "old_failure", local_date: "2026-09-08", state: "failed", stage: "complete", error: "database is locked", started_at: "2026-09-08T07:25:00Z", finished_at: "2026-09-08T07:25:01Z" };
+  let starts = 0;
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: { ...dailyResponse(), current_revision: null, generation_attempt: attempt } }));
+  await page.route("**/api/v2/daily/2026-09-08/generate", route => { starts++; if(starts===1)return route.fulfill({status:409,json:{error:"The database is busy.",failure_code:"database_busy"}}); attempt = { ...attempt, id: "fresh_attempt", state: "running", stage: "preparing", error: null, finished_at: null, started_at: new Date().toISOString() }; return route.fulfill({ status: 202, json: { attempt } }); });
+  await openDaily(page);
+  await page.getByRole("button", { name: "Retry preparation", exact: true }).click();
+  await expect.poll(() => starts).toBe(1);
+  await expect(page.locator("#generation-retry-error")).toContainText("New attempt could not start");
+  await expect(page.locator("#generation-message")).toContainText("Last attempt:");
+  await page.getByRole("button", { name: "Retry preparation", exact: true }).click();
+  await expect.poll(() => starts).toBe(2);
+  await expect(page.locator("#generation-retry-error")).toBeHidden();
+  await expect(page.locator("#generation-message")).toContainText("Preparing sources");
+  await expect(page.locator("#generation-error")).toBeHidden();
+});
+
+test("Activity record is opt-in, compact, editable and uses the existing save preview", async ({ page }) => {
+  const requests = await mockDaily(page);
+  const data = dailyResponse();
+  data.current_revision = null;
+  data.day.generation_status = "failed";
+  data.generation_attempt = { id: "failed_attempt", state: "failed", stage: "complete", error: "Model unavailable", started_at: "2026-09-08T09:00:00Z" };
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({json:data}));
+  let created = 0;
+  await page.route("**/api/v2/daily/2026-09-08/activity-record", route => {
+    created++;
+    data.current_revision={id:"activity_1",revision_number:1,origin:"structured_edit",content:{schema_version:2,manual_entry_ids:["manual_1"],open_questions:[],workstreams:[{id:"task_1",title:"Daily workflow",evidence_event_ids:["evt_1"],activity:[{text:"Validated the Daily workflow.",evidence_event_ids:["evt_1"]}]}]}};
+    data.preview_markdown="Activity record · not AI-summarized\nValidated the Daily workflow.";
+    return route.fulfill({status:201,json:data.current_revision});
+  });
+  await page.route("**/api/v2/daily/2026-09-08/candidate", route => {
+    data.current_revision.content=route.request().postDataJSON().content;
+    return route.fulfill({json:data.current_revision});
+  });
+  await openDaily(page);
+  expect(created).toBe(0);
+  await page.getByRole("button", {name:"Use activity record",exact:true}).click();
+  await expect(page.getByRole("heading", {name:"Activity record · not AI-summarized",exact:true})).toBeVisible();
+  expect(created).toBe(1);
+  await expect(page.locator("#generation-status")).toBeHidden();
+  await expect(page.locator("#readable-draft details.workstream")).not.toHaveAttribute("open", "");
+  await expect(page.locator("#readable-draft .workstream p")).toBeHidden();
+  await page.locator("#readable-draft .workstream summary").click();
+  await expect(page.locator("#readable-draft .workstream p")).toHaveText("Validated the Daily workflow.");
+  await page.getByRole("button", {name:"Edit draft",exact:true}).click();
+  await page.locator('#candidate textarea[data-field="activity"]').fill("Checked the workflow with the team.");
+  await page.getByRole("button", {name:"Save edits",exact:true}).click();
+  await expect.poll(()=>data.current_revision.content.workstreams[0].activity[0].text).toBe("Checked the workflow with the team.");
+  await page.reload();
+  await expect(page.getByRole("heading", {name:"Activity record · not AI-summarized",exact:true})).toBeVisible();
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.getByRole("button", {name:"Create AI summary",exact:true}).click();
+  expect(requests.some(request=>request.path.endsWith("/generate")&&request.method==="POST")).toBe(false);
+  await page.getByRole("button", {name:"Review & save",exact:true}).click();
+  await expect(page.locator("#apply-dialog")).toBeVisible();
+  expect(requests.some(request=>request.path.endsWith("/apply")&&request.method==="POST")).toBe(false);
+});
+
+test("Activity record is unavailable during generation or when a draft already exists", async ({ page }) => {
+  await mockDaily(page);
+  await openDaily(page);
+  await expect(page.getByRole("button",{name:"Use activity record",exact:true})).toBeHidden();
+  const attempt={id:"running",state:"running",local_date:"2026-09-08",stage:"preparing",started_at:new Date().toISOString()};
+  await page.route("**/api/v2/daily/overview",route=>route.fulfill({json:{today:"2026-09-08",days:[],active_generation:attempt}}));
+  await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:{...dailyResponse(),current_revision:null,generation_attempt:attempt}}));
+  await page.reload();
+  await expect(page.getByRole("button",{name:"Cancel generation",exact:true})).toBeVisible();
+  await expect(page.getByRole("button",{name:"Use activity record",exact:true})).toBeHidden();
 });
 
 test("refocused login can remember this device", async ({ page }) => {
@@ -318,7 +581,7 @@ test("refocused Daily deletes a manual note after confirmation", async ({ page }
 
   await expect.poll(() => requests.some(request => request.path.endsWith("/manual/manual_1") && request.method === "DELETE")).toBe(true);
   await expect(page.getByText("No manual notes for this day.")).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("Manual note deleted");
+  await expect(page.locator("#notice")).toContainText("Manual note deleted");
 });
 
 test("refocused settings explains and commits reviewed legacy migration", async ({ page }) => {
@@ -333,13 +596,14 @@ test("refocused settings explains and commits reviewed legacy migration", async 
 
   await expect.poll(() => requests.find(request => request.path === "/api/v2/migration/cutover" && request.method === "POST")?.body).toEqual({ operation_id: "refocus_fixture", report_digest: "f".repeat(64) });
   await expect(page.locator("#migration-summary")).toContainText("Migration completed");
-  await expect(page.getByRole("status")).toContainText("5 blocked preparation runs were queued again");
+  await expect(page.locator("#notice")).toContainText("5 blocked preparation runs were queued again");
 });
 
 test("refocused Daily saves structured edits against the visible revision", async ({ page }) => {
   const requests = await mockDaily(page);
   await openDaily(page);
 
+  await page.getByRole("button", { name: "Edit draft" }).click();
   const title = page.getByLabel("Workstream 1 title");
   await title.fill("Daily review experience");
   await page.getByRole("button", { name: "Save edits" }).click();
@@ -354,12 +618,12 @@ test("refocused Daily reviews the exact managed block before Apply", async ({ pa
   const requests = await mockDaily(page);
   await openDaily(page);
 
-  await page.getByRole("button", { name: "Review Apply" }).click();
+  await page.getByRole("button", { name: "Review & save" }).click();
   await expect(page.getByRole("heading", { name: "Apply to Markdown" })).toBeVisible();
   await expect(page.locator("#apply-target")).toContainText("Work Log/2026/Sep");
   await expect(page.locator("#apply-before")).toContainText("Old");
   await expect(page.locator("#apply-after")).toContainText("Reviewed Daily");
-  await page.getByRole("button", { name: "Confirm Apply" }).click();
+  await page.getByRole("button", { name: "Save to note" }).click();
 
   await expect.poll(() => requests.find(request => request.path.endsWith("/apply") && request.method === "POST")?.body).toMatchObject({
     expected_revision_id: "revision_1",
@@ -370,7 +634,22 @@ test("refocused Daily reviews the exact managed block before Apply", async ({ pa
     expected_original_content_hash: "e".repeat(64),
     expected_updated_content_hash: "d".repeat(64)
   });
-  await expect(page.getByRole("status")).toContainText("Applied to Work Log/2026/Sep");
+  await expect(page.locator("#notice")).toContainText("Applied to Work Log/2026/Sep");
+  expect(requests.some(request => request.path.includes("/evidence") && request.method === "PUT")).toBe(false);
+});
+
+test("Review and save persists an optional omission before fetching the exact preview", async ({ page }) => {
+  const requests = await mockDaily(page);
+  await openDaily(page);
+  await expect(page.locator("#activity-details")).toHaveAttribute("open", "");
+  await page.getByLabel(/Evidence decision:/).selectOption("omit");
+  await page.getByRole("button", { name: "Review & save" }).click();
+  await expect(page.locator("#apply-dialog")).toBeVisible();
+  const omit = requests.findIndex(request => request.path.endsWith("/evidence") && request.method === "PUT");
+  const preview = requests.findIndex(request => request.path.endsWith("/apply-preview"));
+  expect(omit).toBeGreaterThanOrEqual(0);
+  expect(preview).toBeGreaterThan(omit);
+  expect(requests[omit].body.decisions).toEqual([{event_id:"evt_1",disposition:"omit"}]);
 });
 
 test("refocused Daily restores in-memory CSRF authority from its session after reload", async ({ page }) => {
@@ -432,7 +711,7 @@ test("refocused Daily exposes server failures", async ({ page }) => {
   await mockDaily(page, { dailyStatus: 503 });
   await openDaily(page);
 
-  await expect(page.getByRole("status")).toContainText("Daily fixture unavailable");
+  await expect(page.locator("#notice")).toContainText("Daily fixture unavailable");
 });
 
 test("refocused Daily keeps interrupted Apply visible and retryable", async ({ page }) => {
@@ -441,11 +720,11 @@ test("refocused Daily keeps interrupted Apply visible and retryable", async ({ p
 
   await expect(page.getByRole("heading", { name: "Apply needs attention" })).toBeVisible();
   await expect(page.getByText("The destination changed during Apply.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Review Apply" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Review & save" })).toBeDisabled();
   await page.getByRole("button", { name: "Verify and retry" }).click();
 
   await expect.poll(() => requests.some(request => request.path.endsWith("/apply/apply_fixture/retry"))).toBe(true);
-  await expect(page.getByRole("status")).toContainText("Apply verified and finalized");
+  await expect(page.locator("#notice")).toContainText("Apply verified and finalized");
   await expect(page.getByRole("heading", { name: "Apply needs attention" })).toHaveCount(0);
 });
 
@@ -484,12 +763,12 @@ test("refocused Daily explicitly leaves late evidence for later and reopens it",
   const requests = await mockDaily(page, { lateEvidence: true });
   await openDaily(page);
 
-  await page.getByText("Review source events and include or omit them").click();
+  await expect(page.locator("#activity-details")).toHaveAttribute("open", "");
   await expect(page.getByText("Late deployment evidence.")).toBeVisible();
   await page.getByRole("button", { name: "Leave for later" }).click();
   await expect(page.getByText("Left for later — not part of this revision")).toBeVisible();
   await expect(page.locator("#evidence-count")).toContainText("1 left for later");
-  await expect(page.getByRole("status")).toContainText("preserved revision can now be reviewed and applied");
+  await expect(page.locator("#notice")).toContainText("preserved revision can now be reviewed and applied");
   await page.getByRole("button", { name: "Reopen", exact: true }).click();
   await expect(page.getByRole("button", { name: "Leave for later" })).toBeVisible();
 
@@ -514,7 +793,7 @@ test("Daily shows frozen Knowledge links and discloses when setup changed", asyn
   await expect(page.locator("#context-card")).toContainText("Daily workflow");
   await expect(page.locator("#context-card")).toContainText("Products/Alpha.md · Saved link for Product");
   await expect(page.locator("#context-card")).toContainText("Regenerate to use the latest setup");
-  await expect(page.getByRole("button", { name: "Review Apply" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Review & save" })).toBeEnabled();
 });
 
 test("Daily discloses the exact bounded Knowledge excerpt sent to a local model", async ({ page }) => {
@@ -587,7 +866,7 @@ test("Daily compares two private drafts and promotes only the owner's choice", a
     note: "B is shorter and needs less cleanup."
   });
   await dialog.getByRole("button", { name: "Done" }).click();
-  await expect(page.getByRole("status")).toContainText("Comparison saved");
+  await expect(page.locator("#notice")).toContainText("Comparison saved");
 });
 
 test("Daily retries comparison creation without exposing a partial pair", async ({ page }) => {
@@ -652,7 +931,7 @@ test("Daily blocks Apply when a frozen Knowledge target disappeared", async ({ p
   await openDaily(page);
 
   await expect(page.locator("#context-status")).toHaveText("Source unavailable");
-  await expect(page.getByRole("button", { name: "Review Apply" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Review & save" })).toBeDisabled();
   await expect(page.locator("#context-card")).toContainText("Regenerate before Apply");
 });
 
@@ -661,13 +940,15 @@ test("Knowledge navigation is lazy, keyboard accessible, and URL-addressable", a
   await openDaily(page);
 
   expect(requests.filter(request => request.path === "/api/v2/knowledge/collections")).toHaveLength(0);
-  const knowledge = page.getByRole("tab", { name: "Knowledge" });
-  await knowledge.focus();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const knowledge = page.locator("#knowledge-tab");
+  const manage = page.getByRole("button", { name: "Manage reference notes" });
+  await manage.focus();
   await page.keyboard.press("Enter");
 
   await expect(knowledge).toHaveAttribute("aria-selected", "true");
   await expect(page).toHaveURL(/view=knowledge/);
-  await expect(page.getByRole("heading", { name: "Knowledge links" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Reference notes" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Names to review" })).toBeVisible();
   await page.getByText("Saved links and setup", { exact: true }).click();
   await page.getByText("Source collections (1)", { exact: true }).click();
@@ -682,14 +963,30 @@ test("Knowledge navigation is lazy, keyboard accessible, and URL-addressable", a
   await expect(page.getByRole("heading", { name: "Product context" })).toBeVisible();
 });
 
+test("Reference setup starts with one folder and derives editable defaults",async({page})=>{
+  const requests=await mockDaily(page);await openDaily(page);
+  await page.getByRole("button",{name:"Settings",exact:true}).click();
+  await page.getByRole("button",{name:"Manage reference notes"}).click();
+  await page.getByText("Saved links and setup",{exact:true}).click();
+  await page.getByRole("button",{name:"New collection",exact:true}).click();
+  await expect(page.getByLabel("Collection name")).toBeHidden();
+  await page.getByLabel("Which folder holds your reference notes?").fill("Products/Alpha");
+  await page.getByRole("button",{name:"Review collection",exact:true}).click();
+  await expect(page.locator("#knowledge-preview")).toContainText("3 Markdown notes match");
+  await page.getByRole("button",{name:"Create collection",exact:true}).click();
+  expect(requests.find(request=>request.path.endsWith("/collections/preview"))?.body).toMatchObject({label:"Alpha",purpose:"Product and engineering background for daily drafts",roots:["Products/Alpha"],exclusions:[]});
+});
+
 test("Knowledge creates a collection only after reviewing the bounded definition", async ({ page }) => {
   const requests = await mockDaily(page);
   await openDaily(page);
-  await page.getByRole("tab", { name: "Knowledge" }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Manage reference notes" }).click();
 
   await page.getByText("Saved links and setup", { exact: true }).click();
   await expect(page.getByText("No source collections. Daily still works, but canonical-note search is unavailable.")).toBeVisible();
   await page.getByRole("button", { name: "New collection" }).first().click();
+  await page.getByText("Advanced options", { exact: true }).click();
   await page.getByLabel("Collection name").fill(" Product context ");
   await page.getByLabel("What should this context help with?").fill(" Product behavior and decisions ");
   await page.locator("#collection-root-input").fill("Products/Alpha");
@@ -714,7 +1011,8 @@ test("Knowledge edits, pauses, and removes definitions without implying file cha
   const requests = await mockDaily(page, { knowledgeCollections: [knowledgeCollection()] });
   page.on("dialog", dialog => dialog.accept());
   await openDaily(page);
-  await page.getByRole("tab", { name: "Knowledge" }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Manage reference notes" }).click();
   await page.getByText("Saved links and setup", { exact: true }).click();
   await page.getByText("Source collections (1)", { exact: true }).click();
 
@@ -728,10 +1026,10 @@ test("Knowledge edits, pauses, and removes definitions without implying file cha
   await page.getByRole("button", { name: "Pause" }).click();
   await page.getByText("Source collections (1)", { exact: true }).click();
   await expect(page.getByText("Paused", { exact: true })).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("paused and will not be used by Daily");
+  await expect(page.locator("#knowledge-notice")).toContainText("paused and will not be used by Daily");
   await page.getByRole("button", { name: "Remove" }).click();
   await expect(page.getByText("No source collections. Daily still works, but canonical-note search is unavailable.")).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("Markdown files were not changed");
+  await expect(page.locator("#knowledge-notice")).toContainText("Markdown files were not changed");
 
   const updates = requests.filter(request => request.path.endsWith("/knowledge_fixture") && request.method === "PUT");
   expect(updates[0].body.expected_updated_at).toBe("2026-09-09T12:00:00Z");
@@ -743,7 +1041,8 @@ test("Knowledge edits, pauses, and removes definitions without implying file cha
 test("Knowledge remains editable after reload restores CSRF authority", async ({ page }) => {
   await mockDaily(page, { knowledgeCollections: [knowledgeCollection()] });
   await openDaily(page);
-  await page.getByRole("tab", { name: "Knowledge" }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Manage reference notes" }).click();
   await page.reload();
 
   await page.getByText("Saved links and setup", { exact: true }).click();
@@ -764,7 +1063,8 @@ test("Knowledge links a reviewed name through bounded note search and can ignore
     ], total_count: 2, truncated: false } })
   });
   await openDaily(page);
-  await page.getByRole("tab", { name: "Knowledge" }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Manage reference notes" }).click();
 
   await expect(page.getByText("Alpha", { exact: true })).toBeVisible();
   await page.locator(".review-row").filter({ hasText: "Alpha" }).getByRole("button", { name: "Link", exact: true }).click();
@@ -775,7 +1075,7 @@ test("Knowledge links a reviewed name through bounded note search and can ignore
   await expect(page.getByRole("heading", { name: "Saved links" })).toBeVisible();
   await expect(page.getByText("Products/Alpha.md", { exact: true })).toBeVisible();
   await expect(page.getByText("Product: Alpha", { exact: true })).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("Regenerate a Daily candidate");
+  await expect(page.locator("#knowledge-notice")).toContainText("Regenerate a Daily candidate");
   const mapping = requests.find(request => request.path === "/api/v2/knowledge/mappings" && request.method === "POST");
   expect(mapping.body).toEqual({ mapping: { field: "product", value: "Alpha", canonical_note_path: "Products/Alpha.md", enabled: true } });
 
@@ -792,7 +1092,8 @@ test("Knowledge links a reviewed name through bounded note search and can ignore
 test("Knowledge exposes collection load failures with a retry", async ({ page }) => {
   await mockDaily(page, { knowledgeStatus: 503 });
   await openDaily(page);
-  await page.getByRole("tab", { name: "Knowledge" }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Manage reference notes" }).click();
 
   await page.getByText("Saved links and setup", { exact: true }).click();
   await expect(page.getByText("Collections could not be loaded: Knowledge fixture unavailable")).toBeVisible();

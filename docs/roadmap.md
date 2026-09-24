@@ -14,6 +14,16 @@ Keep Log Inbox a single-owner, self-hosted HTTP collector, dashboard, scheduler,
 - **Knowledge is optional context:** selected source collections and canonical mappings, not a prerequisite for a useful draft.
 - **Settings configures the service:** workspace, dates, automation, model connection, retention, security, and integration.
 
+### Current delivery: make Daily understandable
+
+The explicit **Use activity record** recovery path provides a model-independent, owner-requested record after failure. It preserves original activity in collapsed groups, labels the output as not AI-summarized, and reuses reviewed Apply. This is a completion path, not evidence that AI latency or quality has passed the personal-pilot gate.
+
+Prioritize reliable generation and direct actions on Daily before expanding Knowledge. Persist attempts, recover interrupted work, show actual stage/elapsed time and actionable failure, and allow exact-attempt cancellation. Keep one active operation and no hidden manual backlog. Accepted generation runs independently of browser navigation; the UI follows server state.
+
+Make the current revision readable before editing, offer Copy summary, and preserve exact reviewed Markdown writes. Move optional Reference notes into Settings while retaining existing configuration and Knowledge deep links. Context setup must demonstrate a benefit to the daily draft rather than become another inbox to maintain.
+
+Use bounded intake receipt aggregates and content-free timing diagnostics. The opt-in [generation benchmark](generation-performance.md) separates real-model measurement from deterministic workflow tests. Real-day speed/quality comparisons and the ten-day pilot remain validation work; implementation alone does not satisfy those gates.
+
 The service operates on a workspace available to its Docker host. Signing in from another device does not make that device's local folder available. Synchronization, if needed, remains an explicitly configured external responsibility.
 
 ## Scope and Defaults
