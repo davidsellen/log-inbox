@@ -161,7 +161,10 @@ export function createReferenceNotes({
             "The enabled source collections are too large to review at once. Narrow the collection roots, then retry.",
           resolver_error:
             "Reference-note matching is unavailable. Check your source collections and saved links, then retry.",
-        }[review?.diagnostics?.resolution_error_code] ||
+        }[
+          review?.diagnostics?.resolution_error_code ||
+            (review?.diagnostics?.resolution_failed ? "resolver_error" : "")
+        ] ||
         "Review is temporarily unavailable.";
       unresolvedList.append(
         el("div", "empty", `Names could not be reviewed: ${error}`),

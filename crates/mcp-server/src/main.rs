@@ -913,7 +913,7 @@ async fn refocus_knowledge_review(
             },
             json!({
                 "resolution_failed": true,
-                "resolution_error_code": public_knowledge_resolution_error_code(&error),
+                "resolution_error_code": public_knowledge_resolution_error_code(error),
             }),
         ),
     };
