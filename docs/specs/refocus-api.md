@@ -80,7 +80,7 @@ Requires `knowledge:read`. This is a bounded folder-only typeahead for collectio
 
 ### `GET /api/v2/knowledge/review?limit=...`
 
-Requires both `knowledge:read` and `logs:read`. It evaluates at most the 500 most recent retained events against enabled collections, saved mappings, and ignored names. The response returns at most 100 curated durable identities, saved mapping status, ignored names, bounded counts, and sanitized diagnostics. Source, branch, task/session, event messages, note bodies, complete catalog metadata, and migration provenance are not returned. If collection resolution is unavailable, names are not guessed and `review_status` is `unavailable`.
+Requires both `knowledge:read` and `logs:read`. It evaluates at most the 500 most recent retained events against enabled collections, saved mappings, and ignored names. The response returns at most 100 curated durable identities, saved mapping status, ignored names, bounded counts, and sanitized diagnostics. Source, branch, task/session, event messages, note bodies, complete catalog metadata, migration provenance, and resolver error text are not returned. If collection resolution is unavailable, names are not guessed, `review_status` is `unavailable`, and `diagnostics.resolution_error_code` identifies the bounded recovery category when known.
 
 ### `GET /api/v2/knowledge/notes?query=...&limit=...`
 

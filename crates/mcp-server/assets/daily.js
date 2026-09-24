@@ -191,6 +191,10 @@ async function loadDay() {
 
 function renderDaily() {
   const data = state.data;
+  renderAttentionDays();
+  const applied =
+    data.apply_status?.state === "finalized" ||
+    data.day?.review_status === "applied";
   $("day-title").textContent = new Date(
     `${data.local_date}T12:00:00`,
   ).toLocaleDateString(undefined, {
@@ -210,7 +214,7 @@ function renderDaily() {
     : "";
   const dismissed = data.day?.review_status === "dismissed";
   $("status").textContent = data.current_revision
-    ? `Revision ${data.current_revision.revision_number}${dismissed ? " · Dismissed" : ""}${freshness}${expiry}`
+    ? `${applied ? "Applied to Markdown · " : ""}Revision ${data.current_revision.revision_number}${dismissed ? " · Dismissed" : ""}${freshness}${expiry}`
     : "";
   $("dismiss").hidden = !data.current_revision;
   $("dismiss").textContent = dismissed ? "Reopen" : "Dismiss";
@@ -258,9 +262,59 @@ function renderDaily() {
     $("retry-apply").hidden = !apply.can_retry;
     $("retry-apply").disabled = !state.csrf || state.saving;
   }
-  $("review-apply").hidden = !data.current_revision || dismissed;
+  $("review-apply").hidden = !data.current_revision || dismissed || applied;
   $("review-apply").disabled =
     !state.csrf || state.saving || pending || invalidContext;
+}
+
+function renderAttentionDays() {
+  const days = (state.overview?.days || []).filter((day) =>
+    [
+      "apply_attention",
+      "generation_failed",
+      "generating",
+      "in_review",
+      "missed",
+      "notes_unreviewed",
+      "scheduled",
+      "update_available",
+    ].includes(day.status),
+  );
+  const panel = $("attention-panel");
+  panel.hidden = !days.length;
+  if (!days.length) return;
+  const labels = {
+    apply_attention: "Apply needs attention",
+    generation_failed: "Generation failed",
+    generating: "Generating",
+    in_review: "Ready for review",
+    missed: "Not prepared",
+    notes_unreviewed: "Notes not drafted",
+    scheduled: "Scheduled",
+    update_available: "New activity available",
+  };
+  $("attention-summary").textContent = `Needs attention (${days.length})`;
+  const list = $("attention-list");
+  list.className = "attention-list";
+  list.replaceChildren();
+  for (const day of days) {
+    const button = el("button", "attention-item");
+    button.type = "button";
+    button.append(
+      el(
+        "span",
+        "",
+        new Date(`${day.local_date}T12:00:00`).toLocaleDateString(undefined, {
+          weekday: "short",
+          month: "short",
+          day: "numeric",
+        }),
+      ),
+      el("small", "", labels[day.status] || "Needs attention"),
+    );
+    button.addEventListener("click", () => selectDay(day.local_date));
+    list.append(button);
+  }
 }
 
 function renderDayAvailability() {
@@ -1394,6 +1448,14 @@ function renderCandidate(content) {
 }
 
 function renderGeneration() {
+  const applied =
+    state.data?.apply_status?.state === "finalized" ||
+    state.data?.day?.review_status === "applied";
+  if (applied) {
+    $("generation-status").hidden = true;
+    $("reference-recovery").hidden = true;
+    return;
+  }
   const active = activeAttempt();
   const attempt = active || state.data?.generation_attempt;
   const legacyFailure =

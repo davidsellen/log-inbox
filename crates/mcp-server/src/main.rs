@@ -904,14 +904,17 @@ async fn refocus_knowledge_review(
                 .map(public_knowledge_diagnostics)
                 .unwrap_or_else(|| json!({})),
         ),
-        Err(_) => (
+        Err(error) => (
             "unavailable",
             knowledge::UnresolvedIdentityReview {
                 identities: Vec::new(),
                 total_count: 0,
                 truncated: false,
             },
-            json!({"resolution_failed": true}),
+            json!({
+                "resolution_failed": true,
+                "resolution_error_code": public_knowledge_resolution_error_code(&error),
+            }),
         ),
     };
     let mappings = mappings
@@ -950,6 +953,18 @@ async fn refocus_knowledge_review(
             "truncated": evidence.truncated,
         }
     })))
+}
+
+fn public_knowledge_resolution_error_code(error: &str) -> &'static str {
+    if error.contains("not available in the selected reference collections")
+        || error.contains("matching reference mapping points to an unavailable note")
+    {
+        "mapping_outside_collections"
+    } else if error.contains("catalog exceeds") {
+        "catalog_limit"
+    } else {
+        "resolver_error"
+    }
 }
 
 fn public_context_mapping(mapping: &ContextMapping) -> Value {
@@ -4886,6 +4901,26 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod knowledge_destination_tests {
+    #[test]
+    fn knowledge_review_errors_are_reduced_to_safe_recovery_codes() {
+        assert_eq!(
+            super::public_knowledge_resolution_error_code(
+                "Mapped reference note Products/Alpha.md is not available in the selected reference collections."
+            ),
+            "mapping_outside_collections"
+        );
+        assert_eq!(
+            super::public_knowledge_resolution_error_code(
+                "Knowledge catalog exceeds 2000 unique notes"
+            ),
+            "catalog_limit"
+        );
+        assert_eq!(
+            super::public_knowledge_resolution_error_code("unexpected resolver failure"),
+            "resolver_error"
+        );
+    }
+
     #[tokio::test]
     async fn dashboard_assets_are_embedded_and_explicitly_allowlisted() {
         for (name, content_type) in [

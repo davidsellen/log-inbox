@@ -164,6 +164,37 @@ mark {
   padding: 0.5rem 0.65rem;
   font-weight: 650;
 }
+.attention-panel {
+  margin: -8px 0 24px;
+  border: 1px solid #e7c77d;
+  border-radius: 8px;
+  background: #fff8e8;
+  color: var(--ink);
+}
+.attention-panel > summary {
+  cursor: pointer;
+  padding: 0.65rem 0.8rem;
+  color: var(--amber);
+  font-weight: 700;
+}
+.attention-list {
+  display: grid;
+  gap: 6px;
+  padding: 0 0.8rem 0.8rem;
+}
+.attention-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  width: 100%;
+  gap: 12px;
+  text-align: left;
+  background: #fff;
+}
+.attention-item small {
+  color: var(--muted);
+  font-weight: 500;
+}
 h1 {
   margin: 0;
   font-size: 28px;

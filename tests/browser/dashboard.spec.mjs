@@ -25,7 +25,7 @@ const dailyAssets = Object.fromEntries(await Promise.all([
   await readFile(new URL(`../../crates/mcp-server/assets/${name}`, import.meta.url), "utf8")
 ])));
 
-function dailyResponse(date = "2026-09-08", { revisionId = "revision_1", origin = "generated", freshness = "current", applyStatus = null, dismissed = false, lateEvidence = false, lateDeferred = false, contextSnapshot = null, evidenceDisposition = null } = {}) {
+function dailyResponse(date = "2026-09-08", { revisionId = "revision_1", origin = "generated", freshness = "current", applyStatus = null, dismissed = false, reviewStatus = null, lateEvidence = false, lateDeferred = false, contextSnapshot = null, evidenceDisposition = null } = {}) {
   const events = [{ id: "evt_1", source: "codex/fedora", timestamp: `${date}T09:00:00Z`, message: "Validated the Daily workflow." }];
   if (lateEvidence) events.push({ id: "evt_late", source: "codex/fedora", timestamp: `${date}T10:00:00Z`, message: "Late deployment evidence." });
   return {
@@ -35,7 +35,7 @@ function dailyResponse(date = "2026-09-08", { revisionId = "revision_1", origin 
     start_utc: `${date}T00:00:00Z`,
     end_utc: `${date}T23:59:59Z`,
     destination_path: `Work Log/2026/Sep/Daily log ${date}.md`,
-    day: { generation_status: "ready", review_status: dismissed ? "dismissed" : "in_review" },
+    day: { generation_status: "ready", review_status: reviewStatus || (dismissed ? "dismissed" : "in_review") },
     automated_evidence: {
       events,
       returned_count: events.length,
@@ -459,6 +459,39 @@ test("Daily navigation works without a day list or its preference", async ({ pag
   await expect(page.locator("#recent-days-setting")).toHaveCount(0);
   await expect(page.locator("#reference-settings")).toBeVisible();
   expect(requests.filter(request => request.path === "/api/v2/settings/dashboard")).toHaveLength(0);
+});
+
+test("Applied days show a completed state and hide review messaging", async ({ page }) => {
+  await mockDaily(page);
+  await page.route("**/api/v2/daily/2026-09-08", route =>
+    route.fulfill({ json: dailyResponse("2026-09-08", { reviewStatus: "applied", applyStatus: { state: "finalized" } }) }),
+  );
+  await openDaily(page);
+  await expect(page.locator("#status")).toContainText("Applied to Markdown");
+  await expect(page.locator("#generation-status")).toBeHidden();
+  await expect(page.locator("#review-apply")).toBeHidden();
+  await expect(page.getByText("Draft ready to review. Nothing has been written.")).toHaveCount(0);
+});
+
+test("Needs attention lists incomplete days without restoring the day rail", async ({ page }) => {
+  await mockDaily(page);
+  await page.route("**/api/v2/daily/overview", route => route.fulfill({ json: {
+    today: "2026-09-08",
+    days: [
+      { local_date: "2026-09-08", status: "applied" },
+      { local_date: "2026-09-07", status: "generation_failed" },
+      { local_date: "2026-09-06", status: "in_review" },
+    ],
+  } }));
+  await page.route("**/api/v2/daily/2026-09-07", route => route.fulfill({ json: dailyResponse("2026-09-07") }));
+  await openDaily(page);
+  await expect(page.locator("#attention-panel")).toBeVisible();
+  await expect(page.locator("#attention-summary")).toHaveText("Needs attention (2)");
+  await page.locator("#attention-panel").locator("summary").click();
+  await expect(page.locator(".attention-item")).toHaveCount(2);
+  await expect(page.locator(".attention-item").first()).toContainText("Generation failed");
+  await page.locator(".attention-item").first().click();
+  await expect(page.locator("#day")).toHaveValue("2026-09-07");
 });
 
 test("Today preserves unsaved edits on the same date and guards a different date", async ({ page }) => {
@@ -1778,4 +1811,26 @@ test("Knowledge exposes collection load failures with a retry", async ({ page })
   await page.getByText("Saved links and setup", { exact: true }).click();
   await expect(page.getByText("Collections could not be loaded: Knowledge fixture unavailable")).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+});
+
+test("Knowledge explains an unavailable review without rendering a boolean", async ({ page }) => {
+  await mockDaily(page, {
+    review: knowledgeReview({
+      review_status: "unavailable",
+      unresolved: { identities: [], total_count: 0, truncated: false },
+      diagnostics: {
+        resolution_failed: true,
+      },
+    }),
+  });
+  await openDaily(page);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("link", { name: "Manage reference notes" }).click();
+
+  await expect(page.locator("#knowledge-content")).toContainText(
+    "Reference-note matching is unavailable.",
+  );
+  await expect(page.locator("#knowledge-content")).not.toContainText(
+    "Names could not be reviewed: true",
+  );
 });

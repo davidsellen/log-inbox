@@ -154,7 +154,14 @@ export function createReferenceNotes({
     if (reviewError || review?.review_status === "unavailable") {
       const error =
         reviewError?.message ||
-        review?.diagnostics?.resolution_failed ||
+        {
+          mapping_outside_collections:
+            "A saved link points outside the enabled source collections. Add or enable the collection that contains its note, then retry.",
+          catalog_limit:
+            "The enabled source collections are too large to review at once. Narrow the collection roots, then retry.",
+          resolver_error:
+            "Reference-note matching is unavailable. Check your source collections and saved links, then retry.",
+        }[review?.diagnostics?.resolution_error_code] ||
         "Review is temporarily unavailable.";
       unresolvedList.append(
         el("div", "empty", `Names could not be reviewed: ${error}`),

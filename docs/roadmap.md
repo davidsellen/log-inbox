@@ -209,6 +209,7 @@ M4 remains an evidence-gated context milestone, not a commitment to build a gene
 - [x] Keep folder search confined to collection selection and note search to templates/mappings/context; no general vault browser.
 - [x] Group identifier aliases by canonical note; surface curated unresolved identities and hide transient technical noise in diagnostics.
 - [x] Resolve saved mappings and unique exact title/alias/reference matches before bounded text retrieval. Text retrieval does not create canonical links.
+- [x] Explain unavailable review states, including saved links outside enabled source collections, and guide recovery through bounded collection setup.
 - [ ] Add incremental local SQLite FTS only where pilot cases justify it; refresh at startup, periodically, when stale before generation, and via Rescan.
 - [x] Show Context used with excerpts/revisions and per-workstream adjustment.
   - [x] Freeze and disclose exact bounded excerpts for local models; keep nonlocal models link-only, invalidate removed/excluded sources, and exclude generated blocks from self-reinforcing evidence.
