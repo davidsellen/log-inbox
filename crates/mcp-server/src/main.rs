@@ -7594,7 +7594,10 @@ mod knowledge_destination_tests {
         assert!(received["metadata"].get("product").is_none());
         assert_eq!(received["effective_metadata"]["product"], "Log Inbox");
         assert!(
-            state.store.get_events_by_ids(&[first.id.clone()]).unwrap()[0]
+            state
+                .store
+                .get_events_by_ids(std::slice::from_ref(&first.id))
+                .unwrap()[0]
                 .metadata
                 .get("product")
                 .is_none()

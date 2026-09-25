@@ -252,7 +252,9 @@ mod tests {
         assert_eq!(events[1].metadata["product"], "Log Inbox");
         assert!(events[2].metadata.get("product").is_none());
         assert!(
-            store.get_events_by_ids(&[first.id.clone()]).unwrap()[0]
+            store
+                .get_events_by_ids(std::slice::from_ref(&first.id))
+                .unwrap()[0]
                 .metadata
                 .get("product")
                 .is_none(),
