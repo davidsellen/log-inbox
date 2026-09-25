@@ -118,16 +118,40 @@
                   <div id="generation-error-text"></div>
                 </details>
               </section>
-              <div id="reference-recovery" class="notice" hidden>
-                <p>
-                  Some reference notes are unavailable or no longer match this
-                  draft. Retry using only your activity and notes, or check
-                  Reference notes in Settings.
+              <section
+                id="reference-recovery"
+                class="notice reference-recovery"
+                hidden
+                aria-labelledby="reference-recovery-title"
+              >
+                <h3 id="reference-recovery-title">
+                  Reference notes couldn’t be used
+                </h3>
+                <p id="reference-recovery-detail">
+                  Some saved links or notes may be unavailable. Review your
+                  links and source folders, then retry. Your notes and activity
+                  are safe.
                 </p>
-                <button id="retry-without-references">
-                  Retry without reference notes
+                <div
+                  id="recovery-reference-choices"
+                  class="recovery-reference-choices"
+                  hidden
+                >
+                  <p>Choose which reference notes to use for the retry:</p>
+                  <div id="recovery-reference-list" class="references"></div>
+                </div>
+                <div class="actions">
+                  <button id="retry-selected-references" class="primary" hidden>
+                    Retry with selected references
+                  </button>
+                  <button id="retry-without-references">
+                    Retry without reference notes
+                  </button>
+                </div>
+                <button id="fix-references">
+                  Review saved links and folders
                 </button>
-              </div>
+              </section>
               <p id="revision-reference-mode" class="subtle" hidden>
                 Generated without reference notes · based on your activity and
                 notes.
@@ -381,6 +405,48 @@
                 <summary>Connected activity sources</summary>
                 <ul id="intake-sources"></ul>
               </details>
+              <section
+                class="agent-guidance"
+                aria-labelledby="agent-guidance-title"
+              >
+                <h3 id="agent-guidance-title">Agent metadata</h3>
+                <p class="subtle">
+                  Recommended fields help correlate reports and classify work.
+                  Coverage gaps are clues to inspect, not errors—some context
+                  may not apply. Missing values never block activity or Daily
+                  drafts.
+                </p>
+                <p id="agent-guidance-coverage" class="subtle" role="status">
+                  Loading recent activity coverage…
+                </p>
+                <div id="agent-guidance-sources" class="subtle"></div>
+                <details id="agent-guidance-options">
+                  <summary>Choose recommended fields</summary>
+                  <div
+                    id="agent-guidance-fields"
+                    class="agent-guidance-fields"
+                  ></div>
+                </details>
+                <div class="actions">
+                  <button
+                    type="button"
+                    id="save-agent-guidance"
+                    class="primary"
+                  >
+                    Save recommendations
+                  </button>
+                  <button type="button" id="copy-agent-guidance">
+                    Copy agent instructions
+                  </button>
+                </div>
+                <details>
+                  <summary>Preview instructions</summary>
+                  <pre
+                    id="agent-guidance-snippet"
+                    class="agent-guidance-snippet"
+                  ></pre>
+                </details>
+              </section>
             </section>
             <section class="settings-section">
               <h3>Reference notes</h3>
@@ -731,8 +797,8 @@
             autocomplete="off"
         /></label>
         <p class="subtle">
-          Choose one folder. We will show which notes can be used before you
-          save.
+          Enter a folder path relative to the mounted workspace (for example, 03
+          Products). Preview shows which notes match before you save.
         </p>
         <details id="collection-advanced">
           <summary>Advanced options</summary>

@@ -13,7 +13,12 @@ use log_inbox_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, io::ErrorKind, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::ErrorKind,
+    path::Path,
+};
 
 const LEGACY_PREFERENCE_KEYS: &[&str] = &[
     "browser_vault_catalog",
@@ -26,6 +31,50 @@ const LEGACY_PREFERENCE_KEYS: &[&str] = &[
     "extra_instructions",
 ];
 const MAX_PROPOSAL_BYTES: u64 = 4 * 1024 * 1024;
+
+pub(crate) fn cleanup_applied_proposals(
+    proposal_dir: &Path,
+    applied_event_ids: &BTreeSet<String>,
+) -> anyhow::Result<usize> {
+    match fs::symlink_metadata(proposal_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => anyhow::bail!("pending proposal directory is not a safe directory"),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    }
+    let mut cleaned = 0;
+    for entry in fs::read_dir(proposal_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() > MAX_PROPOSAL_BYTES
+        {
+            continue;
+        }
+        let contents = fs::read(&path)?;
+        let Ok(proposal) = inspect_legacy_proposal_bytes(&contents) else {
+            continue;
+        };
+        if proposal.evidence_event_ids.is_empty()
+            || !proposal
+                .evidence_event_ids
+                .iter()
+                .all(|event_id| applied_event_ids.contains(event_id))
+        {
+            continue;
+        }
+        if fs::read(&path).is_ok_and(|current| sha256(&current) == sha256(&contents)) {
+            fs::remove_file(path)?;
+            cleaned += 1;
+        }
+    }
+    Ok(cleaned)
+}
 
 pub fn cleanup_expired_backups(
     store: &Store,
@@ -1025,6 +1074,36 @@ mod tests {
         let path = std::env::temp_dir().join(format!("log-inbox-{label}-{}", Uuid::new_v4()));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn applied_proposal_cleanup_removes_only_fully_included_events() {
+        let dir = temp_dir("applied-proposals");
+        let proposal = |id: &str, event_ids: &str| {
+            format!(
+                "---\nproposal_id: proposal_{id}\ntarget_note: Daily log.md\nevidence_event_ids: [{event_ids}]\n---\nSummary.\n"
+            )
+        };
+        fs::write(
+            dir.join("matching.md"),
+            proposal("matching", "evt_one, evt_two"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("partial.md"),
+            proposal("partial", "evt_one, evt_three"),
+        )
+        .unwrap();
+        fs::write(dir.join("empty.md"), proposal("empty", "")).unwrap();
+        fs::write(dir.join("malformed.md"), "not a proposal").unwrap();
+        let applied = BTreeSet::from(["evt_one".to_owned(), "evt_two".to_owned()]);
+
+        assert_eq!(cleanup_applied_proposals(&dir, &applied).unwrap(), 1);
+        assert!(!dir.join("matching.md").exists());
+        assert!(dir.join("partial.md").exists());
+        assert!(dir.join("empty.md").exists());
+        assert!(dir.join("malformed.md").exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

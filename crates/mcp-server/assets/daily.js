@@ -25,6 +25,30 @@ const state = {
   saving: false,
   applyPreview: null,
 };
+const agentMetadataFields = [
+  "task_id",
+  "session_id",
+  "sequence",
+  "event_type",
+  "status",
+  "agent",
+  "host",
+  "repo",
+  "project",
+  "branch",
+  "base_branch",
+  "target_branch",
+  "product",
+  "modules",
+  "changed_paths",
+  "commit",
+  "commit_message",
+  "tests",
+  "validation",
+  "work_item",
+  "pull_request",
+  "canonical_note_candidates",
+];
 let dayLoadVersion = 0;
 const notice = (message, error = false) => {
   const el = $("notice");
@@ -104,6 +128,8 @@ async function boot() {
       !settings.workspaceSettings.active_profile ||
       !settings.workspaceSettings.binding_matches
     ) {
+      state.date = requestedDate || localDate();
+      $("day").value = state.date;
       await selectView(requestedView, false);
       $("daily-app").hidden = false;
       const message = settings.workspaceSettings.active_profile
@@ -120,6 +146,7 @@ async function boot() {
       return;
     }
     await settings.loadAutomation();
+    await settings.loadAgentGuidance();
     state.overview = await api("/api/v2/daily/overview");
     state.date = requestedDate || state.overview.today;
     $("day").value = state.date;
@@ -132,7 +159,7 @@ async function boot() {
       settings.migration?.items?.length
     ) {
       notice(
-        "Older Log Inbox data is waiting in Settings. Review the migration before relying on this Daily view.",
+        "Older Log Inbox data still needs migration review in Settings. Applying Daily records does not complete that migration.",
         true,
       );
     }
@@ -694,12 +721,158 @@ function renderEvidence(events, decisions, deferrals) {
     row.dataset.activitySearch =
       `${event.message} ${event.source}`.toLowerCase();
     const message = el("div", "evidence-message", event.message);
+    const metadata = event.metadata || {};
+    const effective = event.effective_metadata || metadata;
+    const context = [
+      "product",
+      "repo",
+      "project",
+      "modules",
+      "work_item",
+      "pull_request",
+      "task_id",
+    ]
+      .filter((field) => effective[field] != null && effective[field] !== "")
+      .map(
+        (field) =>
+          `${field.replaceAll("_", " ")}: ${Array.isArray(effective[field]) ? effective[field].join(", ") : effective[field]}`,
+      )
+      .join(" · ");
     const meta = el(
       "div",
       "evidence-meta",
       `${event.source} · ${new Date(event.timestamp).toLocaleTimeString()}`,
     );
     row.append(message, meta);
+    if (context) row.append(el("div", "evidence-meta", context));
+    const details = document.createElement("details");
+    details.className = "evidence-details";
+    const summary = document.createElement("summary");
+    summary.textContent = "Incoming metadata and corrections";
+    details.append(summary);
+    const received = el("div", "subtle", "Received from agent");
+    const receivedData = document.createElement("pre");
+    receivedData.textContent = JSON.stringify(metadata, null, 2);
+    received.append(receivedData);
+    details.append(received);
+    const overrides = Object.fromEntries(
+      Object.entries(effective).filter(
+        ([key, value]) =>
+          JSON.stringify(metadata[key]) !== JSON.stringify(value),
+      ),
+    );
+    if (Object.keys(overrides).length) {
+      const corrected = el(
+        "div",
+        "subtle",
+        "Owner-reviewed corrections (used for future grouping and drafts)",
+      );
+      const correctedData = document.createElement("pre");
+      correctedData.textContent = JSON.stringify(overrides, null, 2);
+      corrected.append(correctedData);
+      for (const field of Object.keys(overrides))
+        corrected.append(
+          action(`Undo ${field}`, () =>
+            removeMetadataCorrection(event.id, field),
+          ),
+        );
+      details.append(corrected);
+    }
+    const edit = document.createElement("details");
+    edit.className = "metadata-correction-details";
+    const editSummary = document.createElement("summary");
+    editSummary.textContent = "Correct metadata for this task";
+    edit.append(editSummary);
+    const form = el("div", "metadata-correction");
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", "Metadata field to correct");
+    for (const field of agentMetadataFields) {
+      const option = document.createElement("option");
+      option.value = field;
+      option.textContent = field.replaceAll("_", " ");
+      select.append(option);
+    }
+    const value = document.createElement("input");
+    value.type = "text";
+    value.maxLength = 2000;
+    value.placeholder = "Enter the correct value";
+    value.setAttribute("aria-label", "Correct value");
+    const fieldLabel = document.createElement("label");
+    fieldLabel.className = "field";
+    fieldLabel.append("Field", select);
+    const valueLabel = document.createElement("label");
+    valueLabel.className = "field";
+    valueLabel.append("Value", value);
+    const save = action(
+      "Save for task",
+      async () => {
+        const correlation = metadata.task_id
+          ? `task ${metadata.task_id}`
+          : metadata.session_id
+            ? `session ${metadata.session_id}`
+            : "this event only";
+        const matched = events.filter((candidate) =>
+          metadata.task_id
+            ? candidate.metadata?.task_id === metadata.task_id
+            : metadata.session_id
+              ? candidate.metadata?.session_id === metadata.session_id
+              : candidate.id === event.id,
+        ).length;
+        if (!value.value.trim()) {
+          notice("Enter a value first.", true);
+          return;
+        }
+        if (
+          !confirm(
+            `Apply ${select.value} to ${matched} matching event(s) on this day in ${correlation}. Future matching events and regenerated drafts will use it too. Original evidence and existing revisions stay unchanged.`,
+          )
+        )
+          return;
+        try {
+          await api(
+            `/api/v2/daily/${encodeURIComponent(state.date)}/evidence/${encodeURIComponent(event.id)}/metadata`,
+            {
+              method: "PUT",
+              body: JSON.stringify({
+                field: select.value,
+                value: value.value.trim(),
+              }),
+            },
+          );
+          await loadDay();
+          notice(
+            "Metadata correction saved. The original incoming event is unchanged.",
+          );
+        } catch (error) {
+          notice(error.message, true);
+        }
+      },
+      { primary: true, disabled: !state.csrf },
+    );
+    const recommend = action(
+      "Recommend for future reports",
+      async () => {
+        const field = select.value;
+        await settings.openSettings("general");
+        settings.recommendAgentField(field);
+      },
+      { disabled: !state.csrf },
+    );
+    form.append(fieldLabel, valueLabel, save, recommend);
+    edit.append(
+      form,
+      el(
+        "p",
+        "subtle",
+        metadata.task_id
+          ? `This applies to events sharing task_id ${metadata.task_id}.`
+          : metadata.session_id
+            ? `This applies to events sharing session_id ${metadata.session_id}.`
+            : "No task/session ID is available, so this applies to this event only.",
+      ),
+    );
+    details.append(edit);
+    row.append(details);
     const controls = el("div", "evidence-controls");
     if (deferralsById.has(event.id)) {
       const reopen = action(
@@ -769,6 +942,24 @@ function renderEvidence(events, decisions, deferrals) {
   }
   refreshEvidenceToolbar();
   filterActivity();
+}
+
+async function removeMetadataCorrection(eventId, field) {
+  try {
+    await api(
+      `/api/v2/daily/${encodeURIComponent(state.date)}/evidence/${encodeURIComponent(eventId)}/metadata`,
+      {
+        method: "DELETE",
+        body: JSON.stringify({ field }),
+      },
+    );
+    await loadDay();
+    notice(
+      `Correction to ${field.replaceAll("_", " ")} removed; received evidence is unchanged.`,
+    );
+  } catch (error) {
+    notice(error.message, true);
+  }
 }
 
 function activityRows() {
@@ -931,7 +1122,7 @@ async function toggleLateEvidence(eventId, reopen) {
 }
 
 // Generation and comparison commands. These never Apply Markdown automatically.
-async function generate(referenceMode) {
+async function generate(referenceMode, contextAdjustments) {
   if (state.saving) return;
   if (hasPendingChanges()) {
     notice(
@@ -966,6 +1157,7 @@ async function generate(referenceMode) {
       body: JSON.stringify({
         replace_edited: editedWithNewEvidence,
         ...(withoutReferences ? { reference_mode: "none" } : {}),
+        ...(contextAdjustments || {}),
       }),
     });
     if (state.date !== date) return;
@@ -1486,8 +1678,13 @@ function renderGeneration() {
     ) ||
       state.contextDetails?.status === "invalid");
   $("reference-recovery").hidden = !needsReferenceRecovery;
+  $("reference-recovery-detail").textContent =
+    attempt?.failure_code === "reference_context_invalid" && attempt.error
+      ? attempt.error
+      : "Some saved links or notes may be unavailable. Review your links and source folders, then retry. Your notes and activity are safe.";
   $("retry-without-references").disabled =
     !state.csrf || state.saving || Boolean(active);
+  renderReferenceRecoveryChoices();
   $("revision-reference-mode").hidden =
     !state.data?.current_revision ||
     state.data?.revision_reference_mode !== "none";
@@ -1549,6 +1746,37 @@ function renderGeneration() {
   }
   renderIntake(state.overview?.intake);
   renderDayAvailability();
+}
+
+function renderReferenceRecoveryChoices() {
+  const choices = $("recovery-reference-choices");
+  const list = $("recovery-reference-list");
+  const available =
+    state.contextDetails?.mode === "bounded_knowledge" &&
+    state.contextDetails?.workstreams?.some(
+      (workstream) => workstream.notes?.length,
+    );
+  choices.hidden = !available;
+  $("retry-selected-references").hidden = !available;
+  list.replaceChildren();
+  if (!available) return;
+  initContextDraft();
+  for (const workstream of state.contextDetails.workstreams) {
+    for (const note of workstream.notes || []) {
+      const tag = el("label", "recovery-reference-tag");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = !state.contextDraft.excluded.has(
+        contextKey(workstream.id, note.path),
+      );
+      input.disabled = !state.csrf || state.saving;
+      input.addEventListener("change", () =>
+        toggleContextExcerpt(workstream.id, note.path, input.checked),
+      );
+      tag.append(input, el("span", "", note.title || note.path));
+      list.append(tag);
+    }
+  }
 }
 
 function renderAttemptMessage(attempt) {
@@ -1939,6 +2167,19 @@ function bindDailyEvents() {
   $("retry-without-references").addEventListener("click", () =>
     generate("none"),
   );
+  $("fix-references").addEventListener("click", () => selectView("knowledge"));
+  $("retry-selected-references").addEventListener("click", () => {
+    const context_exclusions = [...(state.contextDraft?.excluded || [])].map(
+      (key) => {
+        const [workstream_id, note_path] = JSON.parse(key);
+        return { workstream_id, note_path };
+      },
+    );
+    generate(undefined, {
+      expected_revision_id: state.contextDraft?.revisionId,
+      context_exclusions,
+    });
+  });
   // These used to be inline HTML handlers; module functions are intentionally private.
   $("retry-generation").addEventListener("click", () => generate());
   $("browse-activity").addEventListener("click", () => {

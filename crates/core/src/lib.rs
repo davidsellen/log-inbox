@@ -1,3 +1,4 @@
+pub mod agent_metadata;
 pub mod auth;
 mod context_store;
 pub use context_store::validate_context_snapshot_payload;

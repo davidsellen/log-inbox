@@ -561,12 +561,11 @@ fn path_contains(root: &str, candidate: &str) -> bool {
 
 fn root_binding(canonical_root: &Path, metadata: &fs::Metadata) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"log-inbox-workspace-root-v1\0");
+    hasher.update(b"log-inbox-workspace-root-v2\0");
     hasher.update(canonical_root.to_string_lossy().as_bytes());
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        hasher.update(metadata.dev().to_le_bytes());
         hasher.update(metadata.ino().to_le_bytes());
     }
     #[cfg(not(unix))]
@@ -578,7 +577,7 @@ fn root_binding(canonical_root: &Path, metadata: &fs::Metadata) -> String {
             hasher.update(duration.as_nanos().to_le_bytes());
         }
     }
-    format!("workspace-root-v1:{:x}", hasher.finalize())
+    format!("workspace-root-v2:{:x}", hasher.finalize())
 }
 
 #[cfg(test)]

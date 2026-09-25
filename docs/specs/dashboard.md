@@ -27,7 +27,9 @@ Automated evidence opens in a bounded scrollable panel, including when preparati
 
 ## Settings
 
-Settings is a URL-addressable full page with three sections: General, Markdown destination, and Preparation & retention. Desktop uses native section links; small screens use a labelled section selector. Only one section is visible at a time. Section changes preserve edits and replace the current history entry; Back to Daily restores the selected date, scroll position and unsaved Daily draft without refreshing the page. Leaving with unsaved settings asks once for confirmation. Escape does not dismiss a page.
+Settings is a URL-addressable full page with General, Markdown destination, and Preparation & retention sections. General includes activity-source health and workspace-scoped agent metadata recommendations with recent source-level coverage and copyable agent guidance. Desktop uses native section links; small screens use a labelled section selector. Only one section is visible at a time. Section changes preserve edits and replace the current history entry; Back to Daily restores the selected date, scroll position and unsaved Daily draft without refreshing the page. Leaving with unsaved settings asks once for confirmation. Escape does not dismiss a page.
+
+Daily evidence shows post-redaction incoming metadata on demand. Owner corrections are stored as reversible workspace overlays associated with a task, session, or single event; they inform future grouping and generation while preserving received evidence and existing revisions.
 
 Each form has its own explicit save, unsaved indicator and local feedback. Saving one section never marks another section's edits as saved. Optional migration details, mounted workspace information and recent preparation runs use disclosure controls. Reference notes remain optional setup, with return links to Settings and Daily.
 

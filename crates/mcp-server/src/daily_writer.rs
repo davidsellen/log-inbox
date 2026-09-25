@@ -1,5 +1,6 @@
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
+use chrono::{Datelike, NaiveDate};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -9,6 +10,15 @@ use std::{
 };
 
 const MAX_MARKDOWN_FILE_BYTES: usize = 4 * 1024 * 1024;
+
+pub fn render_template_date(template: &str, date: NaiveDate) -> String {
+    template
+        .replace("{{date:YYYY-MM-DD}}", &date.format("%Y-%m-%d").to_string())
+        .replace(
+            "{{date:MMM D}}",
+            &format!("{} {}", date.format("%b"), date.day()),
+        )
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ManagedBlockPlan {

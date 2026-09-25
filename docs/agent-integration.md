@@ -33,6 +33,8 @@ Send `progress` only for durable milestones, decisions, deployments, or blockers
 
 The product resolver compares normalized repository identifiers with wiki-link targets in the configured product navigation. For example, `CustomerPortal`, `customer-portal`, and `Customer Portal` can match the same existing note. A repository may contain several products, so changed modules and an explicitly confirmed `product` take precedence over guessing from the repository name.
 
+Settings → General → Agent metadata shows recent field coverage grouped by incoming `source`, lets the owner choose which fields to recommend, and provides a copyable guidance snippet. Coverage gaps are advisory and some fields may not apply to every event. Daily evidence exposes the received, redacted metadata separately from owner corrections. Corrections are reversible workspace overlays scoped to a correlated task (`task_id`, then `session_id`) and affect future grouping/generation only; Log Inbox never edits agent-local instruction files or changes original evidence.
+
 Do not send secrets, access tokens, complete diffs, source files, personal data, or huge command output. Reference an artifact path and digest when detailed evidence must remain elsewhere.
 
 ## Start Event

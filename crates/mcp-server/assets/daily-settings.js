@@ -14,6 +14,8 @@ export function createSettings({
     automation: null,
     settingsPreview: null,
     migration: null,
+    agentGuidance: null,
+    agentFieldsDraft: [],
     initialized: false,
     saving: false,
   };
@@ -49,6 +51,113 @@ export function createSettings({
       link.href = `?date=${encodeURIComponent(app.date)}&view=settings&section=${section}`;
     }
     updateSaveButtons();
+    $("save-agent-guidance").disabled =
+      !app.csrf || state.saving || !agentGuidanceDirty();
+  }
+  function agentGuidanceDirty() {
+    return (
+      Boolean(state.agentGuidance) &&
+      JSON.stringify(state.agentFieldsDraft) !==
+        JSON.stringify(state.agentGuidance.fields)
+    );
+  }
+  function renderAgentGuidance() {
+    const data = state.agentGuidance;
+    if (!data) return;
+    const fieldRoot = $("agent-guidance-fields");
+    fieldRoot.replaceChildren();
+    const coverage = new Map(
+      (data.coverage || []).map((item) => [item.field, item]),
+    );
+    for (const field of data.available_fields || []) {
+      const label = el("label", "check-field");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = field;
+      input.checked = state.agentFieldsDraft.includes(field);
+      input.disabled = !app.csrf || state.saving;
+      const counts = coverage.get(field);
+      const title = counts
+        ? `${field.replaceAll("_", " ")} · ${counts.present} present, ${counts.missing} missing`
+        : field.replaceAll("_", " ");
+      label.append(input, el("span", "", title));
+      fieldRoot.append(label);
+    }
+    const total = data.sample_size || 0;
+    $("agent-guidance-coverage").textContent = total
+      ? `Last 30 days · ${total}${data.sample_truncated ? "+" : ""} recent events checked. Counts show events with each recommended field.`
+      : "No recent events to check yet. Send a start and terminal event to see metadata coverage.";
+    const producers = (data.producers || []).map((producer) => {
+      const agents = producer.agents?.length
+        ? ` · ${producer.agents.join(", ")}`
+        : "";
+      const missing = producer.missing?.length
+        ? ` · missing in recent events: ${producer.missing.map((item) => `${item.field} (${item.missing})`).join(", ")}`
+        : " · all selected recommendations present";
+      return `${producer.source} · ${producer.events} events${agents}${missing}`;
+    });
+    $("agent-guidance-sources").replaceChildren(
+      ...producers.map((text) => el("p", "subtle", text)),
+    );
+    $("agent-guidance-snippet").textContent = data.snippet || "";
+    $("save-agent-guidance").disabled =
+      !app.csrf || state.saving || !agentGuidanceDirty();
+  }
+  async function loadAgentGuidance() {
+    try {
+      state.agentGuidance = await api("/api/v2/settings/agent-guidance");
+      state.agentFieldsDraft = [...state.agentGuidance.fields];
+      renderAgentGuidance();
+    } catch (error) {
+      $("agent-guidance-coverage").textContent =
+        `Agent metadata guidance is unavailable: ${error.message}`;
+      $("save-agent-guidance").disabled = true;
+      $("copy-agent-guidance").disabled = true;
+    }
+  }
+  async function saveAgentGuidance() {
+    try {
+      state.saving = true;
+      renderAgentGuidance();
+      state.agentGuidance = await api("/api/v2/settings/agent-guidance", {
+        method: "PUT",
+        body: JSON.stringify({ fields: state.agentFieldsDraft }),
+      });
+      state.agentFieldsDraft = [...state.agentGuidance.fields];
+      renderAgentGuidance();
+      $("agent-guidance-coverage").textContent +=
+        " Recommendations saved; copy the updated instructions into your agent guidance files.";
+    } catch (error) {
+      $("agent-guidance-coverage").textContent = error.message;
+    } finally {
+      state.saving = false;
+      renderAgentGuidance();
+    }
+  }
+  async function copyAgentGuidance() {
+    try {
+      if (!state.agentGuidance?.snippet)
+        throw new Error("Instructions are unavailable");
+      await navigator.clipboard.writeText(state.agentGuidance?.snippet || "");
+      pageNotice(
+        "Agent instructions copied. Paste them into the AGENTS.md or equivalent files your agents use.",
+      );
+    } catch {
+      pageNotice(
+        "Clipboard access is unavailable. Open Preview instructions and copy the text manually.",
+        true,
+      );
+    }
+  }
+  function recommendAgentField(field) {
+    if (!state.agentGuidance?.available_fields.includes(field)) return;
+    if (!state.agentFieldsDraft.includes(field))
+      state.agentFieldsDraft.push(field);
+    $("agent-guidance-options").open = true;
+    renderAgentGuidance();
+    pageNotice(
+      `${field.replaceAll("_", " ")} added to the draft guidance checklist. Save recommendations, then copy the updated agent instructions.`,
+    );
   }
   function updateSaveButtons() {
     const allowed = !!app.csrf && !state.saving;
@@ -59,7 +168,9 @@ export function createSettings({
     $("save-settings").disabled =
       !allowed ||
       !state.settingsPreview ||
-      (!dirty("destination") && !!state.workspaceSettings?.active_profile);
+      (!dirty("destination") &&
+        !!state.workspaceSettings?.active_profile &&
+        state.workspaceSettings.binding_matches);
   }
   function markSaved(section) {
     baselines.set(section, values(section));
@@ -483,6 +594,14 @@ export function createSettings({
     );
     $("settings-page").addEventListener("input", updateDirtyLabels);
     $("settings-page").addEventListener("change", updateDirtyLabels);
+    $("agent-guidance-fields").addEventListener("change", () => {
+      state.agentFieldsDraft = [
+        ...$("agent-guidance-fields").querySelectorAll("input:checked"),
+      ].map((input) => input.value);
+      updateDirtyLabels();
+    });
+    $("save-agent-guidance").addEventListener("click", saveAgentGuidance);
+    $("copy-agent-guidance").addEventListener("click", copyAgentGuidance);
     const invalidatePreview = () => {
       state.settingsPreview = null;
       $("save-settings").disabled = true;
@@ -510,12 +629,14 @@ export function createSettings({
   return {
     bindEvents,
     loadWorkspaceSettings,
+    loadAgentGuidance,
+    recommendAgentField,
     loadAutomation,
     loadMigration,
     openSettings,
     prepare,
     showSection,
-    hasChanges: () => Object.keys(forms).some(dirty),
+    hasChanges: () => Object.keys(forms).some(dirty) || agentGuidanceDirty(),
     pageNotice,
     discard: () => {
       state.initialized = false;

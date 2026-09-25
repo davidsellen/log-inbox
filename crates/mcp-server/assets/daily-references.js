@@ -82,6 +82,7 @@ export function createReferenceNotes({
     if (sections.length > 1) {
       const setup = document.createElement("details");
       setup.className = "knowledge-details";
+      setup.open = state.knowledgeReview?.review_status === "unavailable";
       const setupSummary = document.createElement("summary");
       setupSummary.textContent = "Saved links and setup";
       setup.append(setupSummary);
@@ -109,6 +110,10 @@ export function createReferenceNotes({
     if (!app.csrf)
       knowledgeNotice(
         "Reviewing Knowledge read-only. Unlock changes to link or ignore names.",
+      );
+    else if (review?.review_status === "unavailable" && !collectionCount)
+      knowledgeNotice(
+        `${review.mappings?.length || 0} saved links cannot be checked because no source collection is configured. Add a collection that includes their note folders, then retry.`,
       );
     else if (review?.evidence?.truncated)
       knowledgeNotice(
@@ -152,8 +157,13 @@ export function createReferenceNotes({
     );
     const unresolvedList = el("div", "review-list");
     if (reviewError || review?.review_status === "unavailable") {
+      const needsCollection =
+        !collectionCount &&
+        review?.diagnostics?.resolution_error_code ===
+          "mapping_outside_collections";
       const error =
         reviewError?.message ||
+        review?.diagnostics?.resolution_message ||
         {
           mapping_outside_collections:
             "A saved link points outside the enabled source collections. Add or enable the collection that contains its note, then retry.",
@@ -167,8 +177,19 @@ export function createReferenceNotes({
         ] ||
         "Review is temporarily unavailable.";
       unresolvedList.append(
-        el("div", "empty", `Names could not be reviewed: ${error}`),
-        action("Retry", loadKnowledge),
+        el(
+          "div",
+          "empty",
+          needsCollection
+            ? `${review.mappings?.length || 0} saved links are blocked because no reference folder is configured. Choose a folder containing those notes, preview it, then create the collection.`
+            : `Names could not be reviewed: ${error}`,
+        ),
+        needsCollection
+          ? action("Choose reference folder", () => openCollection(), {
+              primary: true,
+              disabled: !app.csrf,
+            })
+          : action("Retry", loadKnowledge),
       );
     } else if (!review?.unresolved?.identities?.length)
       unresolvedList.append(
@@ -206,7 +227,11 @@ export function createReferenceNotes({
         unresolvedList.append(row);
       }
     unresolved.append(unresolvedList);
-    if (!collectionCount && !collectionError)
+    if (
+      !collectionCount &&
+      !collectionError &&
+      review?.review_status !== "unavailable"
+    )
       unresolved.append(
         el(
           "div",

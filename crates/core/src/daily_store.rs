@@ -1971,6 +1971,10 @@ impl Store {
         self.list_apply_operations_by_states(&["prepared", "writing", "written"], limit)
     }
 
+    pub fn list_finalized_apply_operations(&self, limit: usize) -> Result<Vec<ApplyOperation>> {
+        self.list_apply_operations_by_states(&["finalized"], limit)
+    }
+
     fn list_apply_operations_by_states(
         &self,
         states: &[&str],

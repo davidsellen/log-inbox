@@ -258,6 +258,43 @@ button.primary:not(:disabled):hover {
   color: var(--red);
   background: #fff2f2;
 }
+.reference-recovery h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+.reference-recovery p {
+  margin: 0 0 12px;
+}
+.reference-recovery .actions {
+  justify-content: flex-start;
+}
+.recovery-reference-choices {
+  margin: 12px 0;
+}
+.recovery-reference-choices > p {
+  margin-bottom: 8px;
+}
+.recovery-reference-choices .references {
+  margin-top: 0;
+}
+.recovery-reference-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid #d6c18e;
+  border-radius: 999px;
+  background: #fffdf8;
+  color: #684400;
+}
+.recovery-reference-tag input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+.reference-recovery #fix-references {
+  margin-top: 10px;
+}
 .stack {
   display: grid;
   gap: 16px;
@@ -402,6 +439,44 @@ button.primary:not(:disabled):hover {
   color: var(--muted);
   font-size: 12px;
   margin-top: 5px;
+}
+.evidence-details {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.evidence-details pre,
+.agent-guidance-snippet {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 18rem;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f7faf8;
+  color: var(--ink);
+}
+.metadata-correction {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.7fr) minmax(180px, 1fr) auto auto;
+  gap: 8px;
+  align-items: end;
+  margin-top: 8px;
+}
+.agent-guidance {
+  border-top: 1px solid var(--line);
+  margin-top: 18px;
+  padding-top: 12px;
+}
+.agent-guidance-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 5px 12px;
+  margin: 10px 0;
+}
+.agent-guidance-fields .check-field {
+  font-size: 13px;
 }
 .evidence-controls {
   display: flex;
@@ -900,7 +975,8 @@ dialog::backdrop {
 @media (max-width: 780px) {
   .settings-fields,
   .comparison-grid,
-  .comparison-questions {
+  .comparison-questions,
+  .metadata-correction {
     grid-template-columns: 1fr;
   }
   .day-head,

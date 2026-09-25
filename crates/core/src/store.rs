@@ -1062,6 +1062,34 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 26 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE agent_metadata_preferences (
+                    workspace_id TEXT PRIMARY KEY REFERENCES workspace_profiles(id) ON DELETE CASCADE,
+                    fields_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE event_metadata_overrides (
+                    workspace_id TEXT NOT NULL REFERENCES workspace_profiles(id) ON DELETE CASCADE,
+                    scope_key TEXT NOT NULL,
+                    field TEXT NOT NULL,
+                    value_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    anchor_event_id TEXT NOT NULL REFERENCES log_events(id) ON DELETE CASCADE,
+                    PRIMARY KEY(workspace_id, scope_key, field)
+                );
+                CREATE INDEX idx_event_metadata_overrides_workspace
+                    ON event_metadata_overrides(workspace_id, scope_key);
+                "#,
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (26, 'workspace agent metadata guidance and evidence overlays', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -2601,10 +2629,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 25);
+        assert_eq!(store.schema_version().expect("version reads"), 26);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 25);
+        assert_eq!(store.schema_version().expect("version remains"), 26);
     }
 
     #[test]
@@ -2672,7 +2700,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 25);
+        assert_eq!(verification.schema_version, 26);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());

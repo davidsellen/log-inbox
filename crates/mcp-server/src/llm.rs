@@ -1449,40 +1449,63 @@ fn render_strict_daily_markdown(
     events: &[StoredLogEvent],
 ) -> String {
     let groups = event_groups(events, args);
-    draft
-        .workstreams
-        .iter()
-        .map(|workstream| {
-            let evidence = groups
-                .get(&workstream.id)
-                .expect("validated workstream group exists");
-            let fields = [
-                ("Outcome", &workstream.outcome),
-                ("Decision", &workstream.decision),
-                ("Trade-off", &workstream.trade_off),
-                ("Validation", &workstream.validation),
-                ("Blocker", &workstream.blocker),
-                ("Follow-up", &workstream.follow_up),
-            ];
-            let body = fields
-                .into_iter()
-                .flat_map(|(label, values)| {
-                    values.iter().filter_map(move |fact| {
-                        let value = fact.text.trim().trim_start_matches("- ").trim();
-                        (!value.is_empty()).then(|| format!("- **{label}:** {value}"))
-                    })
+    let mut rendered = Vec::<(Vec<String>, Vec<(String, String)>)>::new();
+    for workstream in &draft.workstreams {
+        let evidence = groups
+            .get(&workstream.id)
+            .expect("validated workstream group exists");
+        let fields = [
+            ("Outcome", &workstream.outcome),
+            ("Decision", &workstream.decision),
+            ("Trade-off", &workstream.trade_off),
+            ("Validation", &workstream.validation),
+            ("Blocker", &workstream.blocker),
+            ("Follow-up", &workstream.follow_up),
+        ];
+        let body = fields
+            .into_iter()
+            .flat_map(|(label, values)| {
+                values.iter().filter_map(move |fact| {
+                    let value = fact.text.trim().trim_start_matches("- ").trim();
+                    (!value.is_empty()).then(|| format!("- **{label}:** {value}"))
                 })
-                .map(|line| safe_model_markdown_line(&line))
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!(
-                "{}\n\n{}",
-                workstream_heading(
-                    &safe_model_markdown_text(workstream.title.trim()),
-                    &links_for_group(args, &workstream.id)
-                ),
-                with_daily_details(body, evidence)
-            )
+            })
+            .map(|line| safe_model_markdown_line(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let links = links_for_group(args, &workstream.id);
+        let index = if links.is_empty() {
+            None
+        } else {
+            rendered
+                .iter()
+                .position(|(candidate, _)| *candidate == links)
+        };
+        let section = (
+            safe_model_markdown_text(workstream.title.trim()),
+            with_daily_details(body, evidence),
+        );
+        if let Some(index) = index {
+            rendered[index].1.push(section);
+        } else {
+            rendered.push((links, vec![section]));
+        }
+    }
+    rendered
+        .into_iter()
+        .map(|(links, sections)| {
+            if sections.len() == 1 {
+                let (title, body) = sections.into_iter().next().unwrap_or_default();
+                format!("{}\n\n{}", workstream_heading(&title, &links), body)
+            } else {
+                let mut output = vec![format!("### {}", links.join(" · "))];
+                output.extend(
+                    sections
+                        .into_iter()
+                        .map(|(title, body)| format!("#### {title}\n\n{body}")),
+                );
+                output.join("\n\n")
+            }
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -2737,6 +2760,66 @@ mod tests {
         );
         assert!(!proposal.markdown.contains("source `agent/test`"));
         assert_eq!(proposal.canonical_links, ["[[Record Navigation]]"]);
+    }
+
+    #[test]
+    fn groups_daily_workstreams_under_a_shared_canonical_note() {
+        let now = Utc::now();
+        let make_event = |id: &str, task: &str| StoredLogEvent {
+            id: id.to_owned(),
+            received_at: now,
+            timestamp: now,
+            source: "codex/log-inbox".to_owned(),
+            level: "info".to_owned(),
+            message: format!("Completed {task}"),
+            metadata: Map::from_iter([
+                ("repo".to_owned(), Value::from("log-inbox")),
+                ("task_id".to_owned(), Value::from(task)),
+            ]),
+            fingerprint: None,
+            truncated: false,
+            reviewed: false,
+        };
+        let events = [make_event("evt_one", "one"), make_event("evt_two", "two")];
+        let args = SuggestMarkdownSummaryArgs {
+            vault_context: json!({
+                "workstream_links": {
+                    "repo:log-inbox|task:one": ["[[Log Inbox]]"],
+                    "repo:log-inbox|task:two": ["[[Log Inbox]]"]
+                }
+            }),
+            mode: "daily-consolidation".to_owned(),
+            task: None,
+        };
+        let draft = StructuredDailyDraft {
+            workstreams: ["one", "two"]
+                .into_iter()
+                .zip(["evt_one", "evt_two"])
+                .map(|(task, event_id)| StructuredWorkstream {
+                    id: format!("repo:log-inbox|task:{task}"),
+                    title: format!("Task {task}"),
+                    evidence_event_ids: vec![event_id.to_owned()],
+                    outcome: vec![StructuredFact {
+                        text: format!("Outcome {task}"),
+                        evidence_event_ids: vec![event_id.to_owned()],
+                    }],
+                    decision: Vec::new(),
+                    trade_off: Vec::new(),
+                    validation: Vec::new(),
+                    blocker: Vec::new(),
+                    follow_up: Vec::new(),
+                })
+                .collect(),
+            open_questions: Vec::new(),
+        };
+
+        let markdown = render_strict_daily_markdown(&draft, &args, &events);
+
+        assert_eq!(markdown.matches("### [[Log Inbox]]").count(), 1);
+        assert!(markdown.contains("#### Task one"));
+        assert!(markdown.contains("#### Task two"));
+        assert!(markdown.contains("Outcome one"));
+        assert!(markdown.contains("Outcome two"));
     }
 
     #[test]

@@ -115,6 +115,7 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
   let dismissed = false;
   let automationSaved = false;
   let automationSettings = { workspace_id: "workspace_fixture", enabled: false, generation_time: "00:15", catch_up_days: 7, raw_retention_days: 30, audit_retention_days: 365, recovery_retention_days: 30, updated_at: "1970-01-01T00:00:00Z" };
+  let agentGuidance = { fields: ["task_id", "session_id", "sequence", "event_type", "status", "agent", "host"], available_fields: ["task_id", "session_id", "sequence", "event_type", "status", "agent", "host", "repo", "product", "modules"], snippet: "Include task_id and session_id.", coverage: [{ field: "task_id", present: 1, missing: 0 }], sample_size: 1, sample_truncated: false, producers: [{ source: "codex/fedora", agents: ["codex"], events: 1, missing: [] }] };
   let lateDeferred = false;
   let currentOrigin = origin;
   let currentRevisionId = "revision_1";
@@ -144,6 +145,11 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ active_profile: activeProfile, destination_example: "Journal/2026-09-08.md", binding_matches: true, changes_saved: true }) });
     }
     if (url.pathname === "/api/v2/settings/automation" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ settings: automationSettings, saved: automationSaved, recent_runs: [], writes_markdown_automatically: false }) });
+    if (url.pathname === "/api/v2/settings/agent-guidance" && request.method() === "GET") return route.fulfill({ json: agentGuidance });
+    if (url.pathname === "/api/v2/settings/agent-guidance" && request.method() === "PUT") {
+      agentGuidance = { ...agentGuidance, fields: request.postDataJSON().fields, snippet: `Include ${request.postDataJSON().fields.join(", ")}.` };
+      return route.fulfill({ json: agentGuidance });
+    }
     if (url.pathname === "/api/v2/settings/automation" && request.method() === "PUT") {
       automationSaved = true;
       automationSettings = { workspace_id: "workspace_fixture", ...request.postDataJSON(), updated_at: "2026-09-09T13:00:00Z" };
@@ -341,6 +347,33 @@ test("Empty today receives activity automatically and intake stays in Settings",
   await page.locator("#settings").click();
   await expect(page.locator("#intake-status")).toBeVisible();
   await expect(page.locator("#intake-status")).toContainText("12 activities received today");
+});
+
+test("Settings shows source metadata gaps and lets an owner recommend another field", async ({ page }) => {
+  const requests = await mockDaily(page);
+  await openDaily(page);
+  await page.locator("#settings").click();
+  await expect(page.locator("#agent-guidance-title")).toBeVisible();
+  await expect(page.locator("#agent-guidance-coverage")).toContainText("1 recent events checked");
+  await expect(page.locator("#agent-guidance-sources")).toContainText("codex/fedora");
+  await page.locator("#agent-guidance-options summary").click();
+  await page.locator("#agent-guidance-fields label").filter({ hasText: "repo" }).locator("input").check();
+  await page.locator("#save-agent-guidance").click();
+  await expect(page.locator("#agent-guidance-snippet")).toContainText("repo");
+  expect(requests.find((request) => request.path === "/api/v2/settings/agent-guidance" && request.method === "PUT").body.fields).toContain("repo");
+});
+
+test("Evidence separates received metadata from workspace corrections", async ({ page }) => {
+  await mockDaily(page);
+  const data = dailyResponse();
+  data.automated_evidence.events[0].metadata = { task_id: "task-42", repo: "alpha" };
+  data.automated_evidence.events[0].effective_metadata = { task_id: "task-42", repo: "alpha", product: "Alpha" };
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  await openDaily(page);
+  await page.locator("#evidence .evidence-details > summary").click();
+  await expect(page.locator("#evidence .evidence-details")).toContainText("Received from agent");
+  await expect(page.locator("#evidence .evidence-details")).toContainText("Owner-reviewed corrections");
+  await expect(page.locator("#evidence .evidence-details")).toContainText('"product": "Alpha"');
 });
 
 test("A source-empty day keeps failed generation recovery visible", async ({ page }) => {

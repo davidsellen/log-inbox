@@ -244,6 +244,25 @@ struct SaveAutomationSettingsRequest {
     expected_updated_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentGuidanceRequest {
+    fields: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceMetadataOverrideRequest {
+    field: String,
+    value: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoveEvidenceMetadataOverrideRequest {
+    field: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct KnowledgeCollectionDraft {
@@ -337,12 +356,19 @@ async fn main() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/workspace"));
     let workspace = InspectedWorkspace::inspect(&configured_root)?;
+    let legacy_proposal_dir = env::var_os("LOG_INBOX_MIGRATION_PROPOSAL_DIR")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let pending = workspace
+                .canonical_root()
+                .join("00 Inbox/Log Inbox/pending");
+            pending.is_dir().then_some(pending)
+        });
     let state = AppState {
         store,
         llm_config: llm::LlmConfig::from_env(),
-        legacy_proposal_dir: env::var_os("LOG_INBOX_MIGRATION_PROPOSAL_DIR")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from),
+        legacy_proposal_dir,
         legacy_support_files: [
             ("context_file", "LOG_INBOX_MIGRATION_CONTEXT_FILE"),
             (
@@ -412,6 +438,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/v2/settings/automation",
             get(refocus_automation_settings).put(refocus_save_automation_settings),
+        )
+        .route(
+            "/api/v2/settings/agent-guidance",
+            get(refocus_agent_guidance).put(refocus_save_agent_guidance),
         )
         .route(
             "/api/v2/knowledge/collections",
@@ -505,6 +535,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/v2/daily/{date}/evidence/{event_id}",
             put(refocus_decide_daily_evidence).delete(refocus_reopen_daily_evidence),
+        )
+        .route(
+            "/api/v2/daily/{date}/evidence/{event_id}/metadata",
+            put(refocus_save_evidence_metadata).delete(refocus_remove_evidence_metadata),
         )
         .route(
             "/api/v2/daily/{date}/late-evidence/{event_id}",
@@ -701,6 +735,222 @@ async fn refocus_save_automation_settings(
         "requeued_failed_runs": requeued_failed_runs,
         "writes_markdown_automatically": false
     })))
+}
+
+async fn refocus_agent_guidance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "logs:read", false)?;
+    let profile = active_refocus_workspace(&state)?;
+    let fields = state
+        .store
+        .agent_metadata_fields(&profile.id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let result = state
+        .store
+        .query_logs(LogQuery {
+            source: None,
+            since: Some(Utc::now() - Duration::days(30)),
+            level: None,
+            query: None,
+            limit: Some(500),
+        })
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let total = result.events.len();
+    let coverage = fields
+        .iter()
+        .map(|field| {
+            let present = result
+                .events
+                .iter()
+                .filter(|event| metadata_has_value(&event.metadata, field))
+                .count();
+            json!({"field":field,"present":present,"missing":total.saturating_sub(present)})
+        })
+        .collect::<Vec<_>>();
+    let mut grouped = BTreeMap::<String, Vec<_>>::new();
+    for event in &result.events {
+        grouped.entry(event.source.clone()).or_default().push(event);
+    }
+    let producers = grouped
+        .into_iter()
+        .map(|(source, events)| {
+            let agents = events
+                .iter()
+                .filter_map(|event| event.metadata.get("agent").and_then(Value::as_str))
+                .collect::<BTreeSet<_>>();
+            let missing = fields
+                .iter()
+                .filter_map(|field| {
+                    let count = events
+                        .iter()
+                        .filter(|event| !metadata_has_value(&event.metadata, field))
+                        .count();
+                    (count > 0).then(|| json!({"field":field,"missing":count}))
+                })
+                .collect::<Vec<_>>();
+            json!({"source":source,"events":events.len(),"agents":agents,"missing":missing})
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(
+        json!({"fields": fields, "available_fields": log_inbox_core::agent_metadata::METADATA_FIELDS, "snippet": agent_guidance_snippet(&fields), "coverage":coverage,"sample_size":total,"sample_truncated":result.truncated,"producers":producers}),
+    ))
+}
+
+fn metadata_has_value(metadata: &serde_json::Map<String, Value>, field: &str) -> bool {
+    metadata.get(field).is_some_and(|value| match value {
+        Value::Null => false,
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+        _ => true,
+    })
+}
+
+async fn refocus_save_agent_guidance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<AgentGuidanceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "settings:write", true)?;
+    let profile = active_refocus_workspace(&state)?;
+    let fields = state
+        .store
+        .save_agent_metadata_fields(&profile.id, &input.fields)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(Json(
+        json!({"fields": fields, "snippet": agent_guidance_snippet(&fields)}),
+    ))
+}
+
+fn agent_guidance_snippet(fields: &[String]) -> String {
+    let fields = fields
+        .iter()
+        .map(|field| format!("`{field}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "## Log Inbox activity metadata\n\nCorrelate meaningful work with stable `task_id` and `session_id`; send ordered lifecycle events using `sequence`, `event_type`, and `status`. Include these recommended fields when known: {fields}. Omit unknown values rather than guessing. Keep the human-readable outcome in `message`; never send secrets, raw logs, or personal data.\n"
+    )
+}
+
+async fn refocus_save_evidence_metadata(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((date, event_id)): AxumPath<(String, String)>,
+    Json(input): Json<EvidenceMetadataOverrideRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "review:write", true)?;
+    let date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("Invalid date"))?;
+    let profile = active_refocus_workspace(&state)?;
+    let day = state
+        .store
+        .daily_day(&profile.id, date)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let window =
+        effective_daily_window(date, &profile, day.as_ref()).map_err(ApiError::bad_request)?;
+    let events = state
+        .store
+        .get_events_between(window.start_utc, window.end_utc, 500)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let event = events
+        .events
+        .iter()
+        .find(|event| event.id == event_id)
+        .ok_or_else(|| ApiError::not_found("This activity is no longer available on this day"))?;
+    let scope = if let Some(task) = event
+        .metadata
+        .get("task_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    {
+        format!("task:{task}")
+    } else if let Some(session) = event
+        .metadata
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    {
+        format!("session:{session}")
+    } else {
+        format!("event:{}", event.id)
+    };
+    let matched_count = events
+        .events
+        .iter()
+        .filter(|candidate| {
+            if scope.starts_with("task:") {
+                candidate
+                    .metadata
+                    .get("task_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| format!("task:{v}") == scope)
+            } else if scope.starts_with("session:") {
+                candidate
+                    .metadata
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| format!("session:{v}") == scope)
+            } else {
+                candidate.id == event.id
+            }
+        })
+        .count();
+    let corrected_value = if ["modules", "changed_paths", "canonical_note_candidates"]
+        .contains(&input.field.as_str())
+    {
+        json!(
+            input
+                .value
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+        )
+    } else {
+        json!(input.value)
+    };
+    state
+        .store
+        .save_event_metadata_override(&profile.id, &event_id, &input.field, corrected_value)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(Json(
+        json!({"scope":scope,"matched_events":matched_count,"field":input.field,"saved":true}),
+    ))
+}
+
+async fn refocus_remove_evidence_metadata(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((date, event_id)): AxumPath<(String, String)>,
+    Json(input): Json<RemoveEvidenceMetadataOverrideRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "review:write", true)?;
+    let date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("Invalid date"))?;
+    let profile = active_refocus_workspace(&state)?;
+    let day = state
+        .store
+        .daily_day(&profile.id, date)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let window =
+        effective_daily_window(date, &profile, day.as_ref()).map_err(ApiError::bad_request)?;
+    let events = state
+        .store
+        .get_events_between(window.start_utc, window.end_utc, 500)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if !events.events.iter().any(|event| event.id == event_id) {
+        return Err(ApiError::not_found(
+            "This activity is no longer available on this day",
+        ));
+    }
+    let removed = state
+        .store
+        .remove_event_metadata_override(&profile.id, &event_id, &input.field)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(Json(json!({"removed":removed})))
 }
 
 async fn refocus_knowledge_collections(
@@ -914,6 +1164,7 @@ async fn refocus_knowledge_review(
             json!({
                 "resolution_failed": true,
                 "resolution_error_code": public_knowledge_resolution_error_code(error),
+                "resolution_message": reference_resolution_message(error),
             }),
         ),
     };
@@ -965,6 +1216,21 @@ fn public_knowledge_resolution_error_code(error: &str) -> &'static str {
     } else {
         "resolver_error"
     }
+}
+
+fn reference_resolution_message(error: &str) -> String {
+    if let Some((note_path, _)) = error
+        .strip_prefix("Mapped reference note ")
+        .and_then(|rest| rest.split_once(" is not available in the selected reference collections"))
+    {
+        return format!(
+            "Reference note ‘{note_path}’ is outside your enabled reference folders. Add its folder to an enabled collection, or pause/remove its saved link in Reference notes. Your activity and notes are preserved."
+        );
+    }
+    if error.contains("matching reference mapping points to an unavailable note") {
+        return "A saved reference link points to an unavailable note. Update or pause/remove that link in Reference notes, or retry without reference notes. Your activity and notes are preserved.".to_owned();
+    }
+    "Reference notes could not be prepared. Review saved links and source folders in Reference notes, or retry without reference notes. Your activity and notes are preserved.".to_owned()
 }
 
 fn public_context_mapping(mapping: &ContextMapping) -> Value {
@@ -1544,11 +1810,29 @@ async fn refocus_daily_day(
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let window = effective_daily_window(local_date, &profile, frozen_day.as_ref())
         .map_err(ApiError::bad_request)?;
-    let evidence = state
+    let mut evidence = state
         .store
         .get_events_between(window.start_utc, window.end_utc, 500)
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    let received_events = evidence.events.clone();
+    let mut effective_events = evidence.events.clone();
+    state
+        .store
+        .apply_event_metadata_overrides(&profile.id, &mut effective_events)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    evidence.events = effective_events;
     let event_count = evidence.events.len();
+    let event_json = received_events
+        .into_iter()
+        .zip(evidence.events.iter())
+        .map(|(received, effective)| {
+            let mut value = serde_json::to_value(received).unwrap_or(Value::Null);
+            if let Some(object) = value.as_object_mut() {
+                object.insert("effective_metadata".to_owned(), json!(effective.metadata));
+            }
+            value
+        })
+        .collect::<Vec<_>>();
     let manual_entries = state
         .store
         .manual_daily_entries(&profile.id, local_date)
@@ -1663,7 +1947,7 @@ async fn refocus_daily_day(
         "day": frozen_day,
         "generation_attempt": state.store.latest_generation_attempt(&profile.id, local_date).map_err(|e| ApiError::internal(e.to_string()))?,
         "automated_evidence": {
-            "events": evidence.events,
+            "events": event_json,
             "returned_count": event_count,
             "truncated": evidence.truncated,
             "limit": evidence.limit
@@ -2326,6 +2610,7 @@ async fn refocus_daily_apply(
         .filter(|operation| operation.state == "finalized")
     {
         validate_apply_operation_approval(operation, &input)?;
+        cleanup_applied_pending_proposals(&state, operation);
         return Ok(Json(json!({
             "operation": public_apply_operation(operation),
             "destination_path": input.destination_path,
@@ -2686,14 +2971,56 @@ fn execute_daily_apply(
         ));
     }
 
-    state
+    let finalized = state
         .store
         .finalize_apply_operation(
             &operation.id,
             &operation.revision_id,
             &operation.revision_content_hash,
         )
-        .map_err(|error| ApiError::conflict(error.to_string()))
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    cleanup_applied_pending_proposals(state, &finalized);
+    Ok(finalized)
+}
+
+fn cleanup_applied_pending_proposals(state: &AppState, operation: &ApplyOperation) {
+    if operation.state != "finalized" {
+        return;
+    }
+    let Some(proposal_dir) = state.legacy_proposal_dir.as_deref() else {
+        return;
+    };
+    let revision = match state
+        .store
+        .current_proposal_revision(&operation.workspace_id, operation.local_date)
+    {
+        Ok(Some(revision)) if revision.id == operation.revision_id => revision,
+        Ok(_) => return,
+        Err(error) => {
+            tracing::warn!(%error, "reading applied revision for pending proposal cleanup failed");
+            return;
+        }
+    };
+    let content = match serde_json::from_value::<DailyRevisionContent>(revision.content) {
+        Ok(content) => content,
+        Err(error) => {
+            tracing::warn!(%error, "parsing applied revision for pending proposal cleanup failed");
+            return;
+        }
+    };
+    let applied_event_ids = content
+        .workstreams
+        .iter()
+        .flat_map(|workstream| &workstream.evidence_event_ids)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    match migration::cleanup_applied_proposals(proposal_dir, &applied_event_ids) {
+        Ok(cleaned) if cleaned > 0 => {
+            tracing::info!(cleaned_files = cleaned, "removed applied pending proposals");
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "pending proposal cleanup failed after Daily Apply"),
+    }
 }
 
 fn transition_apply(
@@ -2727,6 +3054,18 @@ fn recover_daily_applies(state: &AppState) {
         let result = recover_daily_apply(state, &workspace, operation.clone());
         if let Err(error) = result {
             tracing::error!(operation_id = %operation.id, %error, "recovering Daily Apply operation failed");
+        }
+    }
+    match state.store.list_finalized_apply_operations(500) {
+        Ok(operations) => {
+            for operation in operations {
+                if operation.workspace_id == profile.id {
+                    cleanup_applied_pending_proposals(state, &operation);
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "listing finalized Daily Applies for pending cleanup failed")
         }
     }
 }
@@ -2919,6 +3258,8 @@ fn finalize_recovered_apply(state: &AppState, operation: &ApplyOperation) -> any
                 "Daily file is written but finalization failed: {error}"
             )),
         )?;
+    } else {
+        cleanup_applied_pending_proposals(state, operation);
     }
     Ok(())
 }
@@ -3035,8 +3376,13 @@ fn daily_apply_material(
                 "the frozen Daily template snapshot failed integrity verification",
             ));
         }
+        let rendered_template = daily_writer::render_template_date(
+            std::str::from_utf8(&template.content)
+                .map_err(|_| ApiError::conflict("Daily template must be valid UTF-8"))?,
+            local_date,
+        );
         let plan = daily_writer::plan_managed_block(
-            Some(&template.content),
+            Some(rendered_template.as_bytes()),
             &day.block_id,
             &llm::render_daily_revision_preview(&content, &manual_entries, &snapshot_evidence),
             &format!("Daily log {local_date}"),
@@ -3222,9 +3568,13 @@ fn create_activity_record(state: &AppState, date: NaiveDate) -> Result<ProposalR
     let window =
         effective_daily_window(date, &profile, day.as_ref()).map_err(ApiError::bad_request)?;
     ensure_refocus_daily_day(state, &profile, &workspace, date, &window.destination_path)?;
-    let evidence = state
+    let mut evidence = state
         .store
         .get_events_between(window.start_utc, window.end_utc, 500)
+        .map_err(generation::database_error)?;
+    state
+        .store
+        .apply_event_metadata_overrides(&profile.id, &mut evidence.events)
         .map_err(generation::database_error)?;
     if evidence.truncated {
         return Err(ApiError::unprocessable(
@@ -3665,9 +4015,11 @@ fn without_references_payload(workspace: &InspectedWorkspace) -> Value {
 }
 
 fn preflight_reference_context(payload: &Value) -> Result<(), ApiError> {
-    log_inbox_core::validate_context_snapshot_payload(payload)
-        .map_err(|_| ApiError::invalid_references())?;
-    knowledge::context_snapshot_digest(payload).map_err(|_| ApiError::invalid_references())?;
+    log_inbox_core::validate_context_snapshot_payload(payload).map_err(|error| {
+        ApiError::invalid_references(reference_resolution_message(&error.to_string()))
+    })?;
+    knowledge::context_snapshot_digest(payload)
+        .map_err(|error| ApiError::invalid_references(reference_resolution_message(&error)))?;
     Ok(())
 }
 
@@ -3733,6 +4085,10 @@ async fn generate_daily_candidate_inner(
     let mut evidence = state
         .store
         .get_events_between(window.start_utc, window.end_utc, 500)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    state
+        .store
+        .apply_event_metadata_overrides(&profile.id, &mut evidence.events)
         .map_err(|error| ApiError::internal(error.to_string()))?;
     if evidence.truncated {
         return Err(ApiError::unprocessable(
@@ -3979,7 +4335,11 @@ async fn generate_daily_candidate_inner(
                     "workstream_links": {}
                 }),
             ),
-            Err(_) => return Err(ApiError::invalid_references()),
+            Err(error) => {
+                return Err(ApiError::invalid_references(reference_resolution_message(
+                    &error,
+                )));
+            }
         }
     };
     let payload = desired_context_payload.get_or_insert_with(|| json!({"schema_version":1,"resolver_version":"none","root_binding":workspace.root_binding(),"workstream_links":{},"workstream_evidence":{},"diagnostics":{}}));
@@ -4753,8 +5113,12 @@ fn request_uses_https(headers: &HeaderMap) -> bool {
         .is_some_and(|origin| origin.starts_with("https://"))
 }
 
-async fn dashboard_page() -> Html<&'static str> {
-    Html(include_str!("../assets/daily.html"))
+async fn dashboard_page() -> Response {
+    (
+        [(header::CACHE_CONTROL, "no-cache")],
+        Html(include_str!("../assets/daily.html")),
+    )
+        .into_response()
 }
 
 async fn dashboard_asset(AxumPath(name): AxumPath<String>) -> Response {
@@ -4816,8 +5180,8 @@ impl ApiError {
         self
     }
 
-    fn invalid_references() -> Self {
-        Self::unprocessable("Reference notes could not be prepared. Retry without references; your notes and evidence are preserved.").with_code("reference_context_invalid")
+    fn invalid_references(message: impl Into<String>) -> Self {
+        Self::unprocessable(message).with_code("reference_context_invalid")
     }
     fn unauthorized(message: impl Into<String>) -> Self {
         Self {
@@ -7114,6 +7478,144 @@ mod knowledge_destination_tests {
         )
         .await;
         assert_eq!(stale.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn agent_guidance_reports_coverage_and_evidence_corrections_preserve_ingest() {
+        let (state, profile, date) = generation_test_state();
+        let first = state
+            .store
+            .insert_event(log_inbox_core::models::LogEventInput {
+                source: "codex/test".into(),
+                level: None,
+                timestamp: Some("2026-09-09T11:00:00Z".parse().unwrap()),
+                message: "Started task".into(),
+                metadata: Some(
+                    serde_json::from_value(json!({"task_id":"task-42","event_type":"start"}))
+                        .unwrap(),
+                ),
+                fingerprint: None,
+            })
+            .unwrap();
+        let second = state
+            .store
+            .insert_event(log_inbox_core::models::LogEventInput {
+                source: "codex/test".into(),
+                level: None,
+                timestamp: Some("2026-09-09T12:00:00Z".parse().unwrap()),
+                message: "Finished task".into(),
+                metadata: Some(
+                    serde_json::from_value(json!({"task_id":"task-42","event_type":"complete"}))
+                        .unwrap(),
+                ),
+                fingerprint: None,
+            })
+            .unwrap();
+        let credentials = generate_session_credentials();
+        state
+            .store
+            .create_dashboard_session(
+                &credentials,
+                &[
+                    "logs:read".into(),
+                    "settings:write".into(),
+                    "review:write".into(),
+                ],
+                Utc::now(),
+                Duration::hours(1),
+                Duration::hours(1),
+            )
+            .unwrap();
+        let cookie = format!("log_inbox_session={}", credentials.session_token);
+        let app = build_router(state.clone());
+        let guidance = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/settings/agent-guidance",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(guidance.status(), StatusCode::OK);
+        let guidance = response_json(guidance).await;
+        assert!(
+            guidance["coverage"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["field"] == "task_id")
+        );
+        assert!(guidance["snippet"].as_str().unwrap().contains("task_id"));
+
+        let saved = json_response(
+            app.clone(),
+            "PUT",
+            "/api/v2/settings/agent-guidance",
+            json!({"fields":["task_id","product"]}),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(saved.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(saved).await["fields"],
+            json!(["task_id", "product"])
+        );
+
+        let path = format!("/api/v2/daily/{date}/evidence/{}/metadata", first.id);
+        let corrected = json_response(
+            app.clone(),
+            "PUT",
+            &path,
+            json!({"field":"product","value":"Log Inbox"}),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(corrected.status(), StatusCode::OK);
+        assert_eq!(response_json(corrected).await["matched_events"], 2);
+        let day = json_response(
+            app.clone(),
+            "GET",
+            &format!("/api/v2/daily/{date}"),
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        let day = response_json(day).await;
+        let received = day["automated_evidence"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["id"] == first.id)
+            .unwrap();
+        assert!(received["metadata"].get("product").is_none());
+        assert_eq!(received["effective_metadata"]["product"], "Log Inbox");
+        assert!(
+            state.store.get_events_by_ids(&[first.id.clone()]).unwrap()[0]
+                .metadata
+                .get("product")
+                .is_none()
+        );
+
+        let removed = json_response(
+            app,
+            "DELETE",
+            &path,
+            json!({"field":"product"}),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(removed.status(), StatusCode::OK);
+        assert_eq!(response_json(removed).await["removed"], true);
+        let _ = second;
+        assert_eq!(
+            state.store.agent_metadata_fields(&profile.id).unwrap(),
+            vec!["task_id".to_owned(), "product".to_owned()]
+        );
     }
 
     #[tokio::test]
