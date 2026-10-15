@@ -1,7 +1,10 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEventInput {
@@ -472,6 +475,57 @@ pub struct DailyWorkstream {
 pub struct DailyFact {
     pub text: String,
     pub evidence_event_ids: Vec<String>,
+    /// Exact server-rendered clauses retain source ownership through review.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_clauses: Vec<DailySourceClause>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DailySourceClause {
+    pub text: String,
+    pub evidence_event_id: String,
+}
+
+/// Legacy facts have no clause map. Mapped facts must preserve the exact text,
+/// unique citations and bounds; editing text requires an explicit new fact.
+pub fn daily_source_clauses_are_valid(
+    text: &str,
+    evidence_event_ids: &[String],
+    clauses: &[DailySourceClause],
+) -> bool {
+    if clauses.is_empty() {
+        return true;
+    }
+    if clauses.len() > 107
+        || evidence_event_ids.len() > 107
+        || evidence_event_ids
+            .iter()
+            .any(|id| id.trim().is_empty() || id.trim() != id || id.len() > 256)
+    {
+        return false;
+    }
+    let citations = evidence_event_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let owners = clauses
+        .iter()
+        .map(|clause| clause.evidence_event_id.as_str())
+        .collect::<BTreeSet<_>>();
+    text.chars().count() <= 320
+        && citations.len() == evidence_event_ids.len()
+        && owners.len() == clauses.len()
+        && owners == citations
+        && clauses
+            .iter()
+            .all(|clause| !clause.text.trim().is_empty() && clause.text.chars().count() <= 320)
+        && clauses
+            .iter()
+            .map(|clause| clause.text.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
+            == text
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

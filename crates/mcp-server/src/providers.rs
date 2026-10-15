@@ -1219,21 +1219,36 @@ mod tests {
         use axum::routing::post;
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = calls.clone();
-        let app=Router::new().route("/chat/completions",post(move |Json(body):Json<Value>| {
-            let counted=counted.clone();
-            async move {
-                counted.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
-                assert_eq!(body["response_format"]["type"],"json_schema");
-                assert!(body["messages"][1]["content"].as_str().unwrap().contains("synthetic connection test"));
-                if body.get("max_tokens").is_some() {
-                    assert!(body.get("temperature").is_some());
-                    return (StatusCode::BAD_REQUEST,Json(json!({"error":"use completion tokens"})));
+        let stages = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = stages.clone();
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let counted = counted.clone();
+                let captured = captured.clone();
+                async move {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    assert_eq!(body["response_format"]["type"], "json_schema");
+                    let prompt = body["messages"][1]["content"].as_str().unwrap();
+                    let stage = prompt.lines().next().unwrap().to_owned();
+                    captured.lock().unwrap().push(stage.clone());
+                    assert_eq!(stage, "Stage: fact composition");
+                    if body.get("max_tokens").is_some() {
+                        assert!(body.get("temperature").is_some());
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error":"use completion tokens"})),
+                        );
+                    }
+                    assert_eq!(body["max_completion_tokens"], 1536);
+                    assert!(body.get("temperature").is_none());
+                    (
+                        StatusCode::OK,
+                        Json(crate::knowledge_destination_tests::generation_model_response(&body)),
+                    )
                 }
-                assert_eq!(body["max_completion_tokens"],512);
-                assert!(body.get("temperature").is_none());
-                (StatusCode::OK,Json(json!({"choices":[{"message":{"content":json!({"title":"Connection validation","outcome":["Validated synthetic connection"],"decision":["Selected the standard library"],"trade_off":[],"validation":["Validated the connection test"],"blocker":[],"follow_up":[],"open_questions":[]}).to_string()}}]})))
-            }
-        }));
+            }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1248,6 +1263,10 @@ mod tests {
         config.profile = RequestProfile::MaxCompletionTokens;
         llm::test_compatibility(&config).await.unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            *stages.lock().unwrap(),
+            vec!["Stage: fact composition", "Stage: fact composition"]
+        );
         server.abort();
     }
     #[test]

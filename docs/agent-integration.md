@@ -15,7 +15,7 @@ Send `progress` only for durable milestones, decisions, deployments, or blockers
 
 | Field | Purpose |
 |---|---|
-| `task_id` | Stable ID for the user request or work item; primary grouping key. |
+| `task_id` | Stable ID for the user request; correlates lifecycle events when external identities are absent. |
 | `session_id` | One agent run or continuation; fallback grouping key. |
 | `sequence` | Integer ordering within the task. |
 | `event_type` | `start`, `progress`, `decision`, `validation`, `complete`, `blocked`, or `failed`. |
@@ -30,6 +30,21 @@ Send `progress` only for durable milestones, decisions, deployments, or blockers
 | `commit_message` | Concise human-readable commit subject when one was created. |
 | `tests` or `validation` | Commands or checks and their outcome. |
 | `work_item` or `pull_request` | Durable external identifiers or named URLs. |
+
+Daily prefers repository-scoped work-item identities, then PR identities. Send a
+consistent scalar ID or URL where possible. Nonnegative integer IDs and objects
+with a consistent `id` and/or HTTP(S) `url` are also supported; contradictory
+objects and multi-identity lists do not authorize a merge. A task can inherit its
+one unambiguous external identity across start/completion events. With no external
+identity, an exact feature branch can associate related tasks; common integration
+branches do not. Branch names alone never join distinct explicit work items.
+
+Describe what changed and why in `message`, and retain the actual scope of checks
+in `tests` or `validation`. Keep accepted plans, implementation, verification,
+merge and deployment separate. A completed investigation can still leave the
+underlying defect unresolved. Use explicit `blocker` and `follow_up` metadata for
+remaining work rather than relying on a terminal task status to imply resolution.
+Knowledge excerpts provide background; they are not evidence that work happened.
 
 The product resolver compares normalized repository identifiers with wiki-link targets in the configured product navigation. For example, `CustomerPortal`, `customer-portal`, and `Customer Portal` can match the same existing note. A repository may contain several products, so changed modules and an explicitly confirmed `product` take precedence over guessing from the repository name.
 

@@ -35,6 +35,8 @@ use std::{
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod daily_writer;
+#[cfg(test)]
+mod evaluation;
 mod generation;
 mod history;
 pub mod knowledge;
@@ -5557,6 +5559,59 @@ mod knowledge_destination_tests {
         }
     }
 
+    pub(super) fn generation_model_response(body: &Value) -> Value {
+        const FIELDS: [&str; 6] = [
+            "outcome",
+            "decision",
+            "trade_off",
+            "validation",
+            "blocker",
+            "follow_up",
+        ];
+        let prompt = body["messages"][1]["content"].as_str().unwrap();
+        assert!(prompt.starts_with("Stage: fact composition"));
+        let groups: Value = serde_json::from_str(
+            prompt
+                .split_once("\n\nExtracted evidence groups:\n")
+                .unwrap()
+                .1
+                .split_once("\n\nReturn JSON")
+                .unwrap()
+                .0,
+        )
+        .unwrap();
+        let groups = groups.as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        let mut fields = serde_json::Map::new();
+        for field in FIELDS {
+            let mut slots = serde_json::Map::new();
+            for source in groups[0]["sources"].as_array().unwrap() {
+                let key = source["source_key"].as_str().unwrap();
+                let options = &body["response_format"]["json_schema"]["schema"]["properties"]
+                    [field]["properties"][key]["enum"];
+                if options.is_null() {
+                    continue;
+                }
+                let selected = if options.as_array().unwrap().contains(&Value::Null) {
+                    Value::Null
+                } else {
+                    source["facts"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|fact| fact["field"] == field)
+                        .min_by_key(|fact| fact["rendered_characters"].as_u64().unwrap())
+                        .unwrap()["id"]
+                        .clone()
+                };
+                slots.insert(key.to_owned(), selected);
+            }
+            fields.insert(field.to_owned(), Value::Object(slots));
+        }
+        let content = Value::Object(fields);
+        json!({"choices":[{"message":{"content":content.to_string()}}]})
+    }
+
     fn generation_test_state() -> (AppState, WorkspaceProfile, NaiveDate) {
         let state = test_state();
         let profile = state
@@ -6338,13 +6393,19 @@ mod knowledge_destination_tests {
     async fn model_switch_regenerates_and_attempt_selection_is_frozen() {
         let (mut state, profile, date) = generation_test_state();
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let model = Router::new().route("/chat/completions", post({
-            let captured = captured.clone();
-            move |Json(body): Json<Value>| {
-                captured.lock().unwrap().push(body["model"].as_str().unwrap().to_owned());
-                async move { Json(json!({"choices":[{"message":{"content":json!({"title":"Generation lifecycle", "outcome":["Validated generation lifecycle handling."],"decision":[],"trade_off":[],"validation":[],"blocker":[],"follow_up":[],"open_questions":[]}).to_string()}}]})) }
-            }
-        }));
+        let model = Router::new().route(
+            "/chat/completions",
+            post({
+                let captured = captured.clone();
+                move |Json(body): Json<Value>| {
+                    captured
+                        .lock()
+                        .unwrap()
+                        .push(body["model"].as_str().unwrap().to_owned());
+                    async move { Json(generation_model_response(&body)) }
+                }
+            }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         state.llm_config = Some(llm::LlmConfig::for_test(&format!(
             "http://{}",
@@ -6436,6 +6497,300 @@ mod knowledge_destination_tests {
     }
 
     #[tokio::test]
+    async fn owner_fact_edits_drop_only_changed_source_map_through_http() {
+        let (state, profile, date) = generation_test_state();
+        let event_id = state
+            .store
+            .get_events_between(
+                "2026-09-09T00:00:00Z".parse().unwrap(),
+                "2026-09-10T00:00:00Z".parse().unwrap(),
+                500,
+            )
+            .unwrap()
+            .events[0]
+            .id
+            .clone();
+        let snapshot = state
+            .store
+            .create_evidence_snapshot(&profile.id, date, std::slice::from_ref(&event_id))
+            .unwrap();
+        let content = json!({"schema_version":1,"manual_entry_ids":[],"open_questions":[],"workstreams":[{
+            "id":"work","title":"Reviewed work","evidence_event_ids":[event_id],"canonical_links":[],
+            "outcome":[{"text":"Reported outcome.","evidence_event_ids":[event_id],"source_clauses":[{"text":"Reported outcome.","evidence_event_id":event_id}]}],
+            "validation":[{"text":"Reported check.","evidence_event_ids":[event_id],"source_clauses":[{"text":"Reported check.","evidence_event_id":event_id}]}],
+            "decision":[],"trade_off":[],"blocker":[],"follow_up":[]
+        }]});
+        let revision = state
+            .store
+            .create_proposal_revision(&profile.id, date, Some(&snapshot.id), "generated", &content)
+            .unwrap();
+        let credentials = generate_session_credentials();
+        state
+            .store
+            .create_dashboard_session(
+                &credentials,
+                &["logs:read".into(), "review:write".into()],
+                Utc::now(),
+                Duration::hours(1),
+                Duration::hours(1),
+            )
+            .unwrap();
+        let cookie = format!("log_inbox_session={}", credentials.session_token);
+        let app = build_router(state.clone());
+        let mut edited = content;
+        edited["workstreams"][0]["outcome"][0]["text"] = json!("Owner clarified the outcome.");
+        let rejected = json_response(
+            app.clone(),
+            "PUT",
+            &format!("/api/v2/daily/{date}/candidate"),
+            json!({"expected_revision_id":revision.id,"content":edited}),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            state
+                .store
+                .current_proposal_revision(&profile.id, date)
+                .unwrap()
+                .unwrap()
+                .id,
+            revision.id
+        );
+        edited["workstreams"][0]["outcome"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("source_clauses");
+        let saved = json_response(
+            app,
+            "PUT",
+            &format!("/api/v2/daily/{date}/candidate"),
+            json!({"expected_revision_id":revision.id,"content":edited}),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(saved.status(), StatusCode::OK);
+        let saved = response_json(saved).await;
+        assert_eq!(
+            saved["content"]["workstreams"][0]["outcome"][0]["text"],
+            "Owner clarified the outcome."
+        );
+        assert!(
+            saved["content"]["workstreams"][0]["outcome"][0]
+                .get("source_clauses")
+                .is_none()
+        );
+        assert_eq!(
+            saved["content"]["workstreams"][0]["validation"][0]["source_clauses"],
+            edited["workstreams"][0]["validation"][0]["source_clauses"]
+        );
+    }
+
+    #[tokio::test]
+    async fn packed_source_clauses_follow_evidence_review_through_apply_and_restart() {
+        const ALPHA: &str = "Alpha validation passed.";
+        const BETA: &str = "Beta validation passed.";
+        for disposition in ["omit", "duplicate_of", "superseded_by"] {
+            let (mut state, profile, date) = generation_test_state();
+            let mut ids = Vec::new();
+            for (timestamp, text) in [
+                ("2026-09-09T11:00:00Z", ALPHA),
+                ("2026-09-09T12:00:00Z", BETA),
+            ] {
+                ids.push(
+                    state
+                        .store
+                        .insert_event(log_inbox_core::models::LogEventInput {
+                            timestamp: Some(timestamp.parse().unwrap()),
+                            source: "codex/test".into(),
+                            level: None,
+                            message: "Reported a scoped validation result.".into(),
+                            metadata: Some(
+                                serde_json::from_value(json!({"repo":"alpha", "task_id":"packed-source-review", "tests":[text]}))
+                                    .unwrap(),
+                            ),
+                            fingerprint: None,
+                        })
+                        .unwrap()
+                        .id,
+                );
+            }
+            let model = Router::new().route(
+                "/chat/completions",
+                post(
+                    |Json(body): Json<Value>| async move { Json(generation_model_response(&body)) },
+                ),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            state.llm_config = Some(llm::LlmConfig::for_test(&format!(
+                "http://{}",
+                listener.local_addr().unwrap()
+            )));
+            let server = tokio::spawn(async move {
+                axum::serve(listener, model).await.unwrap();
+            });
+            let revision = generate_daily_candidate(&state, date, false, None)
+                .await
+                .unwrap();
+            let packed_stream = revision.content["workstreams"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|stream| !stream["validation"].as_array().unwrap().is_empty())
+                .unwrap();
+            let validations = packed_stream["validation"].as_array().unwrap();
+            assert_eq!(
+                validations.len(),
+                1,
+                "The regression must exercise a packed fact."
+            );
+            assert!(
+                validations[0]["text"].as_str().unwrap().contains(ALPHA),
+                "{validations:?}"
+            );
+            assert!(
+                validations[0]["text"].as_str().unwrap().contains(BETA),
+                "{validations:?}"
+            );
+            assert_eq!(
+                validations[0]["source_clauses"].as_array().unwrap().len(),
+                2
+            );
+            let credentials = generate_session_credentials();
+            state
+                .store
+                .create_dashboard_session(
+                    &credentials,
+                    &[
+                        "logs:read".into(),
+                        "review:write".into(),
+                        "vault:write".into(),
+                    ],
+                    Utc::now(),
+                    Duration::hours(1),
+                    Duration::hours(1),
+                )
+                .unwrap();
+            let cookie = format!("log_inbox_session={}", credentials.session_token);
+            let csrf = &credentials.csrf_token;
+            let uri = format!("/api/v2/daily/{date}");
+            let app = build_router(state.clone());
+            let snapshot = state
+                .store
+                .snapshot_evidence(revision.snapshot_id.as_deref().unwrap())
+                .unwrap();
+            for evidence in snapshot {
+                let response = json_response(app.clone(), "PUT", &format!("{uri}/evidence/{}", evidence.event_id),
+                    json!({"expected_revision_id":revision.id,"disposition":"include","related_event_id":null,"reason":null}),
+                    Some(&cookie), Some(csrf)).await;
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+            let initial = response_json(
+                json_response(app.clone(), "GET", &uri, json!({}), Some(&cookie), None).await,
+            )
+            .await;
+            assert!(
+                initial["preview_markdown"]
+                    .as_str()
+                    .unwrap()
+                    .contains(ALPHA)
+            );
+            assert!(initial["preview_markdown"].as_str().unwrap().contains(BETA));
+            let related = if disposition == "omit" {
+                Value::Null
+            } else {
+                json!(ids[1])
+            };
+            let response = json_response(app.clone(), "PUT", &format!("{uri}/evidence/{}", ids[0]),
+                json!({"expected_revision_id":revision.id,"disposition":disposition,"related_event_id":related,"reason":"Reviewed source relationship"}),
+                Some(&cookie), Some(csrf)).await;
+            assert_eq!(response.status(), StatusCode::OK, "{disposition}");
+            let reviewed = response_json(
+                json_response(app.clone(), "GET", &uri, json!({}), Some(&cookie), None).await,
+            )
+            .await;
+            // Copy uses this exact server-returned preview_markdown value.
+            let copy_markdown = reviewed["preview_markdown"].as_str().unwrap();
+            assert!(
+                !copy_markdown.contains(ALPHA),
+                "{disposition}: {copy_markdown}"
+            );
+            assert!(
+                copy_markdown.contains(BETA),
+                "{disposition}: {copy_markdown}"
+            );
+            let response = json_response(
+                app.clone(),
+                "GET",
+                &format!("{uri}/apply-preview"),
+                json!({}),
+                Some(&cookie),
+                None,
+            )
+            .await;
+            let status = response.status();
+            let preview = response_json(response).await;
+            assert_eq!(status, StatusCode::OK, "{preview}");
+            assert!(!preview["next_block"].as_str().unwrap().contains(ALPHA));
+            assert!(preview["next_block"].as_str().unwrap().contains(BETA));
+            let response = json_response(app, "POST", &format!("{uri}/apply"), json!({
+                "expected_revision_id":preview["revision_id"], "expected_revision_content_hash":preview["revision_content_hash"],
+                "destination_path":preview["destination_path"], "expected_old_block_hash":preview["expected_old_block_hash"],
+                "intended_new_block_hash":preview["intended_new_block_hash"], "expected_target_exists":preview["expected_target_exists"],
+                "expected_original_content_hash":preview["expected_original_content_hash"], "expected_updated_content_hash":preview["updated_content_hash"]
+            }), Some(&cookie), Some(csrf)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let target = state
+                .workspace
+                .canonical_root()
+                .join(preview["destination_path"].as_str().unwrap());
+            let written = std::fs::read_to_string(&target).unwrap();
+            assert!(!written.contains(ALPHA));
+            assert!(written.contains(BETA));
+            state.store = Store::open(state.store.database_path().to_path_buf()).unwrap();
+            let restarted = build_router(state.clone());
+            let restored = response_json(
+                json_response(restarted, "GET", &uri, json!({}), Some(&cookie), None).await,
+            )
+            .await;
+            assert_eq!(restored["day"]["review_status"], "applied");
+            assert!(
+                !restored["preview_markdown"]
+                    .as_str()
+                    .unwrap()
+                    .contains(ALPHA)
+            );
+            assert!(
+                restored["preview_markdown"]
+                    .as_str()
+                    .unwrap()
+                    .contains(BETA)
+            );
+            assert_eq!(std::fs::read_to_string(target).unwrap(), written);
+            let retained = state
+                .store
+                .current_proposal_revision(&profile.id, date)
+                .unwrap()
+                .unwrap();
+            assert!(
+                retained.content["workstreams"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|stream| stream["id"] == packed_stream["id"])
+                    .unwrap()["validation"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(ALPHA),
+                "Review filters visible clauses without rewriting the frozen revision."
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
     async fn pending_model_cancellation_timeout_and_concurrent_edit_preserve_existing_revision() {
         for scenario in ["cancel", "timeout", "edit", "without_references"] {
             let (mut state, profile, date) = generation_test_state();
@@ -6461,22 +6816,31 @@ mod knowledge_destination_tests {
             .unwrap();
             let entered = Arc::new(tokio::sync::Notify::new());
             let release = Arc::new(tokio::sync::Notify::new());
-            let model = Router::new().route("/chat/completions", post({
-                let entered = entered.clone();
-                let release = release.clone();
-                let captured = captured.clone();
-                move |Json(body): Json<Value>| {
+            let model = Router::new().route(
+                "/chat/completions",
+                post({
                     let entered = entered.clone();
                     let release = release.clone();
                     let captured = captured.clone();
-                    async move {
-                        *captured.lock().unwrap() = Some(body);
-                        entered.notify_one();
-                        release.notified().await;
-                        Json(json!({"choices":[{"message":{"content":json!({"title":"Generation lifecycle", "outcome":["Validated generation lifecycle handling."],"decision":[],"trade_off":[],"validation":[],"blocker":[],"follow_up":[],"open_questions":[]}).to_string()}}]}))
+                    move |Json(body): Json<Value>| {
+                        let entered = entered.clone();
+                        let release = release.clone();
+                        let captured = captured.clone();
+                        async move {
+                            *captured.lock().unwrap() = Some(body.clone());
+                            assert!(
+                                body["messages"][1]["content"]
+                                    .as_str()
+                                    .unwrap()
+                                    .starts_with("Stage: fact composition")
+                            );
+                            entered.notify_one();
+                            release.notified().await;
+                            Json(generation_model_response(&body))
+                        }
                     }
-                }
-            }));
+                }),
+            );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             state.llm_config = Some(llm::LlmConfig::for_test(&format!(
                 "http://{}",
@@ -8105,85 +8469,94 @@ mod knowledge_destination_tests {
     #[tokio::test]
     async fn old_contract_partial_expiry_allows_manual_notes_without_inference() {
         use sha2::{Digest, Sha256};
-        let (mut state, profile, date) = generation_test_state();
-        state.llm_config = Some(llm::LlmConfig::for_test("http://127.0.0.1:9"));
-        let live = state
-            .store
-            .get_events_between(
-                "2026-09-09T00:00:00Z".parse().unwrap(),
-                "2026-09-10T00:00:00Z".parse().unwrap(),
-                500,
-            )
-            .unwrap()
-            .events[0]
-            .clone();
-        let expired = state
-            .store
-            .insert_event(log_inbox_core::models::LogEventInput {
-                timestamp: Some(live.timestamp),
-                source: live.source.clone(),
-                level: None,
-                message: "Earlier retained fact".into(),
-                metadata: None,
-                fingerprint: None,
-            })
-            .unwrap();
-        let snapshot = state
-            .store
-            .create_evidence_snapshot(&profile.id, date, &[live.id.clone(), expired.id.clone()])
-            .unwrap();
-        let revision = state.store.create_proposal_revision(&profile.id, date, Some(&snapshot.id), "generated", &json!({
+        for contract in [
+            "daily-structured-v2-batched",
+            "daily-structured-v4-required-fact-schema",
+            "daily-structured-v5-cited-facts",
+            "daily-structured-v6-source-claims",
+            "daily-structured-v7-source-fact-ledger",
+            "daily-structured-v8-source-card-selection",
+        ] {
+            let (mut state, profile, date) = generation_test_state();
+            state.llm_config = Some(llm::LlmConfig::for_test("http://127.0.0.1:9"));
+            let live = state
+                .store
+                .get_events_between(
+                    "2026-09-09T00:00:00Z".parse().unwrap(),
+                    "2026-09-10T00:00:00Z".parse().unwrap(),
+                    500,
+                )
+                .unwrap()
+                .events[0]
+                .clone();
+            let expired = state
+                .store
+                .insert_event(log_inbox_core::models::LogEventInput {
+                    timestamp: Some(live.timestamp),
+                    source: live.source.clone(),
+                    level: None,
+                    message: "Earlier retained fact".into(),
+                    metadata: None,
+                    fingerprint: None,
+                })
+                .unwrap();
+            let snapshot = state
+                .store
+                .create_evidence_snapshot(&profile.id, date, &[live.id.clone(), expired.id.clone()])
+                .unwrap();
+            let revision = state.store.create_proposal_revision(&profile.id, date, Some(&snapshot.id), "generated", &json!({
             "schema_version":1,"manual_entry_ids":[],"open_questions":[],
             "workstreams":[{"id":"retention","title":"Retained facts","evidence_event_ids":[live.id,expired.id],"canonical_links":[],
                 "outcome":[{"text":"Existing retained outcome","evidence_event_ids":[live.id,expired.id]}],
                 "decision":[],"trade_off":[],"validation":[],"blocker":[],"follow_up":[]}]
         })).unwrap();
-        let config = state.llm_config.as_ref().unwrap();
-        let legacy = json!({"base_url":config.base_url,"model":config.model,"credential_present":config.api_key.is_some(),"profile":config.profile,"contract":"daily-structured-v2-batched"});
-        let provenance = json!({"connection_id":"environment","model":config.model,"fingerprint":format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).unwrap()))});
-        state
-            .store
-            .set_generation_revision_provenance(&revision.id, &provenance)
-            .unwrap();
-        let connection = rusqlite::Connection::open(state.store.database_path()).unwrap();
-        connection
-            .pragma_update(None, "foreign_keys", "ON")
-            .unwrap();
-        connection
-            .execute("DELETE FROM log_events WHERE id = ?1", [&expired.id])
-            .unwrap();
-        assert_eq!(
+            let config = state.llm_config.as_ref().unwrap();
+            let legacy = json!({"base_url":config.base_url,"model":config.model,"credential_present":config.api_key.is_some(),"profile":config.profile,"contract":contract});
+            let provenance = json!({"connection_id":"environment","model":config.model,"fingerprint":format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).unwrap()))});
             state
                 .store
-                .snapshot_evidence(&snapshot.id)
-                .unwrap()
-                .iter()
-                .filter(|item| item.available)
-                .count(),
-            1
-        );
-        let manual = state
-            .store
-            .create_manual_daily_entry(&profile.id, date, "Additional owner context", &[])
-            .unwrap();
-        let amended = generate_daily_candidate(&state, date, false, None)
-            .await
-            .expect("contract-only change must not require inference from partial evidence");
-        assert_eq!(amended.snapshot_id, Some(snapshot.id));
-        assert_eq!(amended.origin, "structured_edit");
-        assert!(
-            serde_json::from_value::<DailyRevisionContent>(amended.content)
-                .unwrap()
-                .manual_entry_ids
-                .contains(&manual.id)
-        );
-        assert_eq!(
-            state
+                .set_generation_revision_provenance(&revision.id, &provenance)
+                .unwrap();
+            let connection = rusqlite::Connection::open(state.store.database_path()).unwrap();
+            connection
+                .pragma_update(None, "foreign_keys", "ON")
+                .unwrap();
+            connection
+                .execute("DELETE FROM log_events WHERE id = ?1", [&expired.id])
+                .unwrap();
+            assert_eq!(
+                state
+                    .store
+                    .snapshot_evidence(&snapshot.id)
+                    .unwrap()
+                    .iter()
+                    .filter(|item| item.available)
+                    .count(),
+                1
+            );
+            let manual = state
                 .store
-                .generation_revision_provenance(&amended.id)
-                .unwrap(),
-            Some(provenance)
-        );
+                .create_manual_daily_entry(&profile.id, date, "Additional owner context", &[])
+                .unwrap();
+            let amended = generate_daily_candidate(&state, date, false, None)
+                .await
+                .expect("contract-only change must not require inference from partial evidence");
+            assert_eq!(amended.snapshot_id, Some(snapshot.id));
+            assert_eq!(amended.origin, "structured_edit");
+            assert!(
+                serde_json::from_value::<DailyRevisionContent>(amended.content)
+                    .unwrap()
+                    .manual_entry_ids
+                    .contains(&manual.id)
+            );
+            assert_eq!(
+                state
+                    .store
+                    .generation_revision_provenance(&amended.id)
+                    .unwrap(),
+                Some(provenance)
+            );
+        }
     }
 
     #[tokio::test]

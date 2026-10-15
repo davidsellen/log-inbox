@@ -1,6 +1,6 @@
 # Daily Engineering Knowledge Roadmap
 
-Status: usable refocused release; personal-pilot validation active. Updated 2026-09-24. Initial baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
+Status: reviewed Daily workflow implemented; generated-summary usefulness and Product KB ingestion remain gated. Updated 2026-10-15. Initial baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
 
 This roadmap defines the target direction, delivered foundation, and remaining delivery order. The [README](../README.md) and runtime specs describe the active Daily release; milestone checkboxes record implemented and pending work.
 
@@ -13,6 +13,8 @@ Keep Log Inbox a single-owner, self-hosted HTTP collector, dashboard, scheduler,
 - **Daily is the product:** date navigation, structured drafts, evidence review, omissions, preview, and Apply.
 - **Reference context is optional shared context:** human-maintained Markdown product/module notes can ground Daily drafts and, later, approved agent reads. It is not a prerequisite for a useful draft and is not an autonomous memory store.
 - **Settings configures the service:** workspace, dates, automation, model connection, retention, security, and integration.
+
+Next queued delivery: [bounded selection and reviewed Product KB ingestion](#next-product-kb-ingestion-delivery). The plan is recorded below; KB ingestion is not implemented.
 
 ### Current delivery: make Daily understandable
 
@@ -27,6 +29,365 @@ Use bounded intake receipt aggregates and content-free timing diagnostics. The o
 The service operates on a workspace available to its Docker host. Signing in from another device does not make that device's local folder available. Synchronization, if needed, remains an explicitly configured external responsibility.
 
 ## Recall and navigation delivery
+
+### Daily quality and shared knowledge deliveries — 2026-10-15
+
+Owner-requested delivery plan, following inspection of 865 retained events, the
+October 13–14 generated revisions and applied notes, and selected canonical notes.
+The database copy passed its integrity check. This section is the task record;
+planned behavior below is not a statement that it has shipped.
+
+Initial local scope: improve Daily first, then accept reviewed plan/implementation knowledge and
+prove bounded agent recall. Keep Markdown canonical, immutable evidence/revisions,
+explicit review, and the ingestion-only credential boundary. No automatic knowledge
+promotion, deployment, or PR publication is included. Starting revision:
+`bee5e40c82198ccafdf3397763d7b1a2f25b1b9b`. Local branch:
+`codex/daily-log-knowledge-deliveries` (the runtime requires this prefix; remote
+collision inspection was unavailable because the local SSH configuration fails its
+ownership check). Publication and merge were subsequently authorized on 2026-10-15; the remote target was verified as `main` at the same starting revision.
+
+1. **Daily identity and summary quality — implemented and validated locally.** Normalize work-item/PR
+   identities across scalar and structured producer formats. Use the same resolver
+   for generation and Knowledge; associate a lifecycle with its unambiguous task
+   identity and use exact feature branches conservatively when explicit identities
+   are absent. Keep different work items and repositories distinct. Give the model
+   useful bounded branch/repository context. Ground new facts in particular events,
+   distinguish plans from implementation and verification, and keep reference-note
+   background out of reported daily accomplishments. Improve the actual reviewed
+   renderer, not a generation-only rendering path.
+   Acceptance: representative numeric/string/object IDs group consistently; branch
+   changes do not split one unambiguous task; common branches and conflicting IDs
+   do not combine unrelated work; unknown/cross-group fact citations fail; pending
+   acceptance stays pending; preview, Copy and Apply use the same reviewed content.
+   Existing saved revisions remain readable and are never rewritten automatically.
+2. **Real-day evaluation — executed; usefulness gate unmet.** Use the October 13–14 evidence
+   as regression cases, including Forms fonts, PR9417 diagnosis and PR9713 follow-up.
+   Compare opt-in drafts with/without Knowledge using the existing frozen comparison
+   mechanism. Measure unsupported claims, lost limitations, duplicate bullets,
+   grouping accuracy, editing effort, latency and model compatibility. Acceptance:
+   no background-only accomplishments or plan-to-implementation upgrades in the
+   inspected sample, preserved actionable gaps, and an owner judgment of usefulness.
+   Deterministic tests cannot substitute for this real-model/human gate.
+3. **Reviewed knowledge capture — pending, depends on 1 and 2.** Add a separate
+   bounded, revisioned knowledge-candidate contract for accepted plans, decisions,
+   implementation results and operational lessons. Retain plan ID/revision,
+   product/module, acceptance actor/source, evidence/artifact references, commit/PR,
+   verification scope and supersession. Distinguish proposed, accepted, implemented,
+   verified, merged and deployed; these are separate facts, not an inferred ladder.
+   Producer-reported human acceptance remains a claim until reviewed. Store candidates
+   without writing Markdown. Present an exact canonical-note change for accept/edit/
+   reject; promotion requires its own approved revision and journaled write.
+   Acceptance: idempotent retry, immutable updates, no plan-only implementation
+   claims, no rejected/superseded content promoted, safe stale-target conflicts and
+   crash recovery. Daily Apply grants no knowledge-write authority. Update storage,
+   domain, API, agent integration and writer-policy specs with that implementation.
+4. **Cited agent recall pilot — pending, depends on 3.** Pilot Sweet Forms and two
+   modules with separately authorized read-only context tools. Return bounded
+   approved content, paths, source digests/revisions, verification scope, unresolved
+   questions and supersession. Recheck collection eligibility on each read and
+   disclose expired/missing evidence. Keep generated Daily prose out of independent
+   proof. Acceptance: an agent can retrieve current decisions/constraints, report new
+   work and propose a knowledge correction without autonomous promotion; rejected,
+   excluded, stale or superseded knowledge cannot masquerade as current truth.
+   Measure useful retrieval, correction rate and maintenance burden before expanding.
+
+Delivery 1 uses a bounded Sol implementation worker and independent Sol review;
+the coordinator owns integration and this record. Subsequent candidate persistence,
+authorization and writer units require Sol ownership and independent review too.
+
+| Scenario / contract | Evidence at delivery revision | State |
+|---|---|---|
+| Historical ID formats and lifecycle/branch grouping | Mixed-format/conflict/task/branch regressions; full-day keys frozen across batches and individual retries | Passed |
+| Knowledge/generation group agreement; conflicting identities | Shared resolver; exact mappings, broad mappings and reviewed aliases covered by Knowledge tests | Passed |
+| Per-fact evidence and context/plan boundaries | Strict source-set/rejection/required-field/prompt tests pass; semantic entailment remains a real-model gate | Structural checks passed |
+| Historical revisions and reviewed render parity | Actual revision-preview heading/omission tests; v2/v4 expired-source manual amendments; existing Apply and browser contracts | Passed |
+| Repository checks | 214 Rust tests passed, 2 explicit benchmarks ignored; Rust format/Clippy and client format passed; 214 Chromium/Firefox browser tests passed; isolated Compose smoke passed generation, Apply and restart recovery | Passed |
+| Complete local task diff | Independent Sol review of all nine files against starting HEAD/base/merge-base; reviewed diff SHA-256 `cccc1ad3b822607212931c8fc824691f01ae23563256c9e4861f4e384c7e9074`; two findings fixed and re-reviewed, no remaining findings | Passed |
+| Real-model usefulness and owner evaluation | October 13/14 exact snapshots, qwen2.5:1.5b, frozen current Knowledge, four counterbalanced arms: 0/4 usable; independent masked diagnostic review; owner judgment/repeatability separate | Benefit not demonstrated |
+
+Stage ledger: plan and Delivery 1 implementation complete; independent review
+passed; integrated tests and isolated Compose smoke passed.
+Initial browser execution required local process permission; the permitted run
+passed. Compose initially could not read the existing Docker buildx configuration;
+the retry uses an empty temporary Docker configuration without modifying owner
+configuration. The isolated test generated/applied disposable Markdown and verified
+restart recovery; its temporary containers, volumes and workspace were cleaned up.
+Full-snapshot grouping is frozen before batching so contradictory
+identities cannot disappear during a subset retry. Generation contract v5 keeps
+safe manual amendments to expired v2/v4 revisions while invalidating ordinary
+generation reuse. No schema migration or new dependencies were introduced. No
+production deployment, production Markdown regeneration or production Apply was
+performed. Real-day evaluation was subsequently executed with the new ignored,
+read-only harness: all four arms failed coverage, with template echoes and no
+complete usable summary. Activity-only retained more recoverable content on
+October 13; October 14 reached outputs were identical. The [observed results](generation-performance.md#observed-result--2026-10-15)
+separate rejected diagnostics from valid daily summaries and document the two
+unreached October 14 groups. No deployment is justified by these model results.
+Remove template echoes and reduce factual-reconstruction burden, then repeat the
+frozen comparison before treating the usefulness gate as passed. Deliveries 3–4
+remain gated; valid citations are not proof of semantic truth.
+
+### Grounding correction and frozen rerun — 2026-10-15
+
+Owner authorized fixing the observed template copying and factual reconstruction
+burden, then repeating the same October 13–14 comparison. This follow-up preserves
+the existing uncommitted delivery work and all evidence gates. Endpoint: integrated
+local fix, independent review, frozen four-arm rerun and source-based assessment;
+no deployment, Daily replacement, Apply or PR publication.
+
+- Remove factual response examples; the provider already receives the JSON schema.
+  Reject known template echoes only on new model output, preserving historical and
+  manual content.
+- Project field-indexed producer claims with original JSON values, including not-run
+  and pending qualifications, plus source-scoped lifecycle/task context. Publish exact
+  required event-ID sets from the same predicates used by coverage validation.
+  Keep whole-snapshot grouping, per-fact IDs and required field coverage unchanged;
+  do not auto-append IDs, fill model omissions or create an activity-record fallback.
+- Bump the generation contract to v6 and preserve expired-v5 manual amendments
+  without permitting old-contract ordinary reuse.
+- Replay the original private manifest after verifying fixture/evidence/context
+  digests. Keep the same qwen model, snapshots, note excerpts, rubric and order.
+  Contract changes require fresh outputs; no current-note resolution in replay.
+- Run focused projection/rejection/replay regressions, repository checks and an
+  independent diff review before assessing the new real-model outputs. Score
+  usefulness and source entailment independently from structural success and retain
+  failures as results. Any further prompt/model iteration is a separate experiment.
+
+Stage ledger: plan, integrated implementation and focused independent diff review
+complete. Workspace checks passed (220 Rust tests, three ignored; formatting,
+Clippy and client checks), as did isolated generation/review/Apply/restart recovery.
+The frozen four-arm rerun and independent non-blind source assessment are complete.
+Known placeholders disappeared, but usable summaries remained zero of four. The
+October 13 Knowledge arm structurally passed with seven misleading state bullets
+out of nine; activity-only truncated. October 14 both arms returned empty content
+and were rejected at the first group. No demonstrated factual usefulness or
+Knowledge benefit; keep KB promotion/agent-memory expansion gated. See
+`docs/generation-performance.md` for results and limitations.
+
+| Changed contract | Scenario and evidence | Status |
+|---|---|---|
+| Template rejection | Exact generated echoes rejected; legitimate similar wording and historical/manual readers preserved | Passed regression tests |
+| Source projection | Typed values and qualifiers retained; terse-message outcome/context metadata preserved without duplicating moved claims | Passed regression tests |
+| Evidence gates | Unknown, cross-group and wrong-field citations still rejected; all required field/event sets retained | Passed regression tests |
+| Frozen replay | Original evidence/context verified without reading current vault notes; tampered manifests and artifact overwrite rejected | Passed deterministic tests |
+| Lifecycle compatibility | Expired v5 manual amendments allowed; ordinary v5 reuse rejected | Passed regression tests |
+| Useful summaries | Same October 13–14 evidence/model/Knowledge, separately stored four-arm trial and source review | Failed usefulness: 0/4 usable; 1/4 structurally accepted |
+
+### Per-source extraction and constrained composition — 2026-10-15
+
+Owner authorized addressing stale-state and blanket-citation failures, extracting
+facts per source before composition and repeating October 13–14. Local endpoint:
+integrated implementation, independent review, frozen rerun and source assessment;
+no Apply, deployment, KB promotion or publication. Preserve prior uncommitted work
+on `codex/daily-log-knowledge-deliveries`, baseline commit
+`bee5e40c82198ccafdf3397763d7b1a2f25b1b9b`.
+
+1. Deterministically extract all eligible bounded source-scoped fact cards from
+   one event at a time, without Knowledge, model pruning or other source events.
+   Validate provenance, complete source boundaries and required fields; assign
+   fact IDs on the server. Assess wider source qualifications separately.
+2. Give the composer only the validated chronological ledger and authorized
+   background. Accept fact selections rather than new factual prose or arbitrary
+   event-ID lists. Render source clauses and timestamps deterministically, so every
+   citation has visible supporting material and earlier states remain historical.
+3. Retain group, snapshot, lifecycle/required-source coverage, placeholder and
+   output-size checks. Missing extraction/selection, unknown or wrong-field facts,
+   stale-only selection and oversized output fail; no clipping or evidence filling.
+4. Bump the contract and retain safe expired-v6/v7/v8 manual amendments. Exercise
+   preparation and composition in compatibility/isolated checks; independently review the
+   complete task diff before freezing it for evaluation.
+5. Replay the original events/model/Knowledge/rubric in fresh private artifacts.
+   Reuse one verified extracted ledger per date across the Knowledge pair to
+   isolate composition context. Record stage failures and source-based accuracy;
+   do not score unreached work or mistake generation completion for usefulness.
+
+Stage ledger: plan recorded; Sol/high bounded planning complete; Sol/medium owns
+the generation pipeline, coordinator owns replay integration and documentation.
+Implementation and independent incremental review complete. Workspace checks
+passed: 230 Rust tests, three ignored, Clippy, formatting and whitespace checks.
+The disposable generation/review/Apply/restart workflow passed with exact source
+content and per-fact citation assertions. Final schema guards require the sole
+available fact field without excluding optional alternatives. The frozen v7
+real-model trial completed: both dates failed at their second source extraction
+because the model copied text against the wrong claim IDs or clipped quotations.
+All four composition arms were blocked by these two shared failures. No summary
+accuracy or Knowledge comparison is possible; no within-trial changes occurred.
+Retained source quotes establish provenance, not
+semantic completeness; selective omission and lost qualifications require the
+independent real-day assessment.
+
+| Contract/scenario | Evidence | Status |
+|---|---|---|
+| Isolated extraction and typed required fields | V9 deterministic all-eligible cards, exact ledger rebuild and required-field rejection; no source model calls | Passed |
+| Negation and bounded input | Indivisible scalar, complete original-source clauses, clipped-prefix regression | Passed |
+| Frozen ledger integrity | Quote, pointer, source digest and timestamp tamper regressions | Passed |
+| Selective citations and historical state | Exact visible selected clauses, latest-field inclusion, strict source slots; packed-source owner exclusions through readable Daily/Copy/Apply/reopen | Passed |
+| Dense required coverage and retained bounds | Nine-source regression, exact BankID FFD packing, all 76 real-source minimum layouts in both contexts; overflow fails without dropping/clipping | Passed |
+| Pipeline lifecycle | Composition cancellation/timeout/concurrent edits/model capture; deterministic source preparation yields cooperatively and has no model fallback | Passed |
+| Provider compatibility and legacy amendments | Both request profiles; expired v2/v4/v5/v6/v7/v8 manual edits; mapped fact edits clear only changed ownership, unchanged CRLF/CR preserved | Passed |
+| Shared evaluation | Manifest/event-bound immutable ledgers, both arms charged preparation time, verified frozen hashes | Passed; all six v9 model responses source-slot-valid |
+| Useful/accurate summaries | Original frozen October 13–14 evidence/model/Knowledge/rubric | V9 failed: 0/4 usable; source availability improved, final accuracy/Knowledge benefit unestablished |
+
+Bounded v8 correction: retain source-local extraction but replace copied quote
+text with selection of server-owned eligible complete-clause IDs. The server
+constructs original-boundary-validated clause cards before inference; the model
+selects IDs only, then the unchanged composer selects ledger fact bundles. No
+stage may write factual prose or arbitrary citations. Preserve all source, latest
+field, required coverage and final-size checks; fail if required source material
+cannot be represented. Repeat checks/review and run a separately identified
+frozen trial, preserving v7 artifacts. This removes the measured text-copying
+burden without accepting mutated quotations. Implementation and independent
+review complete. V8 workspace: 233 tests passed, four ignored; the private-data
+preflight was invoked separately and passed all 32/44 sources without inference.
+Clippy, formatting, whitespace and isolated workflow/restart checks passed.
+Review found and fixed a bare-newline negation inversion; only actual sentence
+or semicolon boundaries split long source strings. The frozen v8 trial completed:
+0/4 usable summaries. October 13 extracted 32 sources/67 facts, then both
+composition arms failed invalid selections. October 14 extraction failed on
+repeated claim IDs at source 40, blocking both arms. All 75 requests returned
+HTTP 200 and normal-stop JSON; transport success did not establish useful output.
+Independent source review also found essential font validation and accepted
+trade-offs pruned before composition. No Knowledge benefit was established.
+
+V9 initial implementation plan (delivered; final outcome below): retain all eligible per-source cards,
+then make one model call per group with source-specific, field-specific choices.
+Every source slot is explicit; required and newest-field sources cannot be null.
+The server renders selected clauses, derives only visible citations and packs
+without dropping or clipping material into the retained four-by-320 bounds.
+Compact historical time labels and deterministic first-fit-decreasing packing
+address measured dense-field capacity. No source-model pruning, copied factual
+prose, generic ID arrays or cross-group choices remain in the proposed contract.
+Repeat integration checks and independent review, then run a separately frozen
+v9 comparison using fresh ledgers and the unchanged evidence/model/Knowledge/rubric.
+Keep negative v7/v8 trials and distinguish ledger coverage from summary quality.
+Initial v9 checks passed 234 Rust tests (four ignored), Clippy and actual-source
+minimum-layout preflight in both contexts. Independent review then found packed
+multi-source facts could retain excluded-source text during review/Apply; this
+blocks freezing until explicit per-clause provenance survives storage/rendering.
+The smoke also exposed a fixture choosing a root tests value while asserting a
+child label. Those server/workflow corrections passed: 239 Rust tests (four
+ignored), actual-source layout preflight and isolated workflow/restart. Follow-up
+review identified two client consumers needing the same contract: readable Daily
+must filter exact clauses, and explicit owner edits must clear stale clause maps
+only on changed facts. Complete that bounded client integration and browser/API
+regressions before freezing the model trial. Client integration is now complete;
+final incremental review has no open findings. Both engines passed the changed
+paths and line-ending preservation. Broad browser run: 216 passed, four artifact
+cleanup collisions passed in an isolated rerun. Clippy, formatting and client style
+checks passed. Final integrated workspace: 240 Rust tests passed, four ignored;
+Clippy, formatting, client style, actual-source preflight and isolated workflow
+passed. Independent review has no open findings in the task's incremental scope.
+
+The frozen v9 trial completed with no runtime/protocol/rubric changes: **0/4
+accepted or usable Daily summaries**. Both ledgers completed (197/266 cards,
+48/67 ms); independent non-blind review found essential material available for
+all twelve rubric topics. All six model responses used valid source slots and
+normal-stop JSON. Both October 13 arms selected identical content requiring
+seven outcome bullets; both October 14 arms passed the initial small group then
+selected identical PR9713 content requiring ten outcome/five follow-up bullets.
+The retained four-bullet checks rejected each arm. Later groups are unreached,
+not scored omissions. Total charged seconds off/on: October13 122.984/143.344;
+October14 190.201/154.970. This improves source retention and citation mechanics,
+not demonstrated final accuracy or Knowledge usefulness. No KB/agent-memory
+promotion or deployment. Remaining gate: informative selection within the output
+budget, evaluated in a separately frozen experiment; do not relax checks to get a
+pass. Private evidence/report: `tmp/evaluations/oct13-14-v9-20261015/`.
+
+Publication follow-up: owner authorized push and merge of these fixes plus the
+queued plan. Full independent review covered all17 intended paths against `main`
+at `bee5e40`, including the evaluation harness; padded typed-source and legacy
+Knowledge matching/ignored-identity regressions were fixed. Publication validation:
+244 Rust tests passed, four ignored; Clippy, Rust/client formatting and all76
+actual-source layout checks passed. Private trial artifacts remain ignored; no
+new real-model quality claim is made. Remote CI and merge outcome are recorded in
+the associated pull request and lifecycle report.
+
+### Next Product KB ingestion delivery
+
+**Queued next; plan only.** Owner authorized publication/merge of the current fixes
+and recording this follow-up. The current comparison remains 0/4 usable; source
+availability and citation correctness do not satisfy the usefulness gate. Coordinator
+owns this record; use bounded Sol implementation and independent Sol review for each
+unit, with durable storage, authorization and recovery assigned to Sol.
+
+- [ ] **1. Constrain useful selection to the output budget.** Keep the complete
+  source ledger. Reserve required/newest-field coverage and qualification-bearing
+  material before optional lifecycle narration. Use actual rendered costs and the
+  existing packer to constrain feasible choices; prompting alone did not work.
+  Decide between feasible layouts and explicitly ranked nominations with auditable
+  admission. If nominations are used, distinguish them from accepted selections;
+  never silently discard accepted facts. Preserve four facts/field ×320 characters,
+  source slots, chronological framing, citations and review exclusions. Mandatory
+  overflow must still fail visibly. No clipping, evidence filling, fabricated
+  citations or automatic activity-record fallback.
+  Acceptance: the actual October13/PR9713 failures fit with useful completed work,
+  every mandatory source and relevant pending/not-run/scope qualifications retained.
+- [ ] **2. Prove usefulness on frozen evidence and obtain owner review.** Independently
+  review before freezing a fresh experiment. Reuse the original October13–14 events,
+  model weights, reviewed Knowledge, twelve-topic rubric and counterbalanced order;
+  share each date's verified ledger across arms and retain all negative trials.
+  Require complete candidates, no unsupported accomplishments or lost material
+  qualifications, useful distinct outcomes and an owner assessment of editing effort.
+  Record accepted/usable arms, omissions, repetition, latency and Knowledge benefit
+  separately. Unreached work is not an omission; structural success is insufficient.
+  If this fails, stop KB runtime expansion and record a separately frozen follow-up.
+- [ ] **3. Specify accepted-plan capture independently of Daily prose.** Contract
+  design may run alongside units1–2; runtime capture/promotion stays gated by their
+  reviewed outcome. Capture directly from original redacted events and reviewed
+  plan/artifact revisions, with product/module, submission key/digest, plan ID/revision,
+  reported acceptance actor/source/time, decisions, constraints, questions, evidence
+  digests, PR/commit and supersession. Keep accepted, implemented, verified, merged
+  and deployed as separate claims. Agent-reported human acceptance requires owner
+  review; Daily generation, terminal task status and Daily Apply grant no KB approval.
+  Initially reuse ingestion-only transport; materialization must deduplicate because
+  `log_activity` itself is not idempotent. No new service or dependencies.
+- [ ] **4. Add immutable candidates and explicit owner review.** After the gate,
+  persist workspace-scoped candidate revisions, source bindings and owner dispositions.
+  Exact key/digest retries return the same candidate; conflicting payloads conflict,
+  and corrections create revisions. Accept/edit/reject binds the exact revision/hash.
+  Reject malformed/cross-workspace input without partial materialization. Stale reviews,
+  rejected/superseded content and expired evidence cannot inherit approval. Ingestion
+  and editing write no Markdown. Direct plan capture must work without Daily generation;
+  producers cannot approve their submissions or upgrade claim authority.
+- [ ] **5. Promote through a separate reviewed canonical write.** Start with one
+  owner-selected existing product/module note in an enabled collection and a distinct
+  owned KB block. Reuse the inspected workspace and journaled writer; preserve human
+  content and Daily blocks. Freeze candidate/approval hashes, target eligibility and
+  expected file/block hashes in exact preview. Require separate KB confirmation under
+  dashboard authentication/CSRF; Daily Apply cannot authorize it. Verify stale targets,
+  concurrent edits, protected paths/symlinks, disk failure, crash/restart and idempotent
+  recovery. Define retention, backup, first-upgrade verification and rollback without
+  losing newly received evidence or unfinished recovery data.
+- [ ] **6. Pilot approved cited agent recall.** After promotion is verified, pilot one
+  product and two modules through separately authorized read-only context tools.
+  Return bounded approved content, canonical paths, current digests/revisions, reviewed
+  provenance, verification scope, questions and supersession. Recheck eligibility and
+  freshness per read. Excluded, stale, rejected or superseded material cannot appear
+  as current approved knowledge. Keep collector credentials ingestion-only; agents
+  report/propose corrections without promotion authority. Measure useful retrieval,
+  corrections and maintenance effort before expanding.
+
+Implementation boundaries: unit1 uses `llm.rs`/`generation.rs`/`evaluation.rs` and
+provider compatibility; units3–4 use core models/store/context storage plus the
+existing ingestion boundary; unit5 uses `main.rs`/`knowledge.rs`/`daily_writer.rs`
+and the native review client. Update the existing domain, storage, API, MCP,
+writer-policy, threat-model and agent-integration specs when those contracts ship.
+Do not introduce a parallel writer or use generated Daily text as independent proof.
+
+| Follow-up scenario | Required evidence | State |
+|---|---|---|
+| Dense optional starts, required-only overflow, qualification elsewhere in source | Actual failing groups, exact cost/layout regressions, independent source review | Pending |
+| Useful bounded Daily and optional Knowledge | Fresh frozen four-arm output, twelve-topic assessment, owner judgment | Pending |
+| Accepted plan versus implementation/verification/merge/deployment | Positive/negative original-source fixtures; no inferred state ladder | Pending |
+| Duplicate/conflicting submission, stale review, rejection/supersession/expiry | Immutable store/API regressions and recovery checks | Pending |
+| Producer authority, cross-workspace scope and CSRF | Negative authorization tests; no producer self-approval | Pending |
+| Exact canonical preview, preservation, concurrent edits, crash/rollback | Browser/API, writer fault injection and disposable restart/upgrade checks | Pending |
+| Approved recall, exclusions/freshness and credential separation | One-product/two-module integration pilot and retrieval assessment | Pending |
+
+Run affected regressions, repository formatting/Clippy/workspace/client/browser
+checks and isolated Compose smoke; run real-model evaluation separately. Endpoint
+now: this queued plan only. Future ingestion, canonical promotion, recall and
+production deployment require their own implemented, reviewed delivery stages.
 
 Keep Daily quiet: one date toolbar and Search history, without a recent-day list or permanent sidebar.
 

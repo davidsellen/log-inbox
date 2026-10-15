@@ -103,3 +103,53 @@ export function preparationRunLabel(run, settings, today) {
     ? "Waiting for automatic preparation"
     : "Paused — automatic preparation is off";
 }
+
+// Match the server's exact source-clause projection for reviewed facts.
+export function reviewedFactText(fact, excluded) {
+  const ids = fact.evidence_event_ids;
+  if (!Array.isArray(ids) || !ids.length || typeof fact.text !== "string")
+    return null;
+  const clauses = fact.source_clauses;
+  if (clauses === undefined || (Array.isArray(clauses) && !clauses.length))
+    return ids.some((id) => excluded.has(id)) ? null : fact.text;
+  if (
+    !Array.isArray(clauses) ||
+    clauses.length > 107 ||
+    ids.length > 107 ||
+    ids.some(
+      (id) =>
+        typeof id !== "string" ||
+        !id.trim() ||
+        id.trim() !== id ||
+        new TextEncoder().encode(id).length > 256,
+    ) ||
+    new Set(ids).size !== ids.length ||
+    [...fact.text].length > 320
+  )
+    return null;
+  const owners = new Set();
+  for (const clause of clauses) {
+    if (
+      !clause ||
+      Object.keys(clause).length !== 2 ||
+      typeof clause.text !== "string" ||
+      !clause.text.trim() ||
+      [...clause.text].length > 320 ||
+      !ids.includes(clause.evidence_event_id) ||
+      owners.has(clause.evidence_event_id)
+    )
+      return null;
+    owners.add(clause.evidence_event_id);
+  }
+  if (
+    owners.size !== ids.length ||
+    clauses.map((clause) => clause.text).join("; ") !== fact.text
+  )
+    return null;
+  const visible = clauses.filter(
+    (clause) => !excluded.has(clause.evidence_event_id),
+  );
+  return visible.length
+    ? visible.map((clause) => clause.text).join("; ")
+    : null;
+}
