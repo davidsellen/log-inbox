@@ -473,11 +473,21 @@ pub fn curate_unresolved_identities(
         .filter(|mapping| mapping.enabled)
         .flat_map(|mapping| mapping.selectors.iter())
         .filter(|selector| selector.operator == "exact")
-        .map(|selector| (selector.field.as_str(), normalize_identity(&selector.value)))
+        .map(|selector| {
+            (
+                selector.field.as_str(),
+                normalize_field_identity(&selector.field, &selector.value),
+            )
+        })
         .collect::<BTreeSet<_>>();
     let ignored = ignored
         .iter()
-        .map(|identity| (identity.field.as_str(), identity.normalized_value.as_str()))
+        .map(|identity| {
+            (
+                identity.field.as_str(),
+                normalize_field_identity(&identity.field, &identity.normalized_value),
+            )
+        })
         .collect::<BTreeSet<_>>();
     let mut candidates = BTreeMap::<(String, String), UnresolvedIdentity>::new();
     let groups = group_events(events);
@@ -494,9 +504,9 @@ pub fn curate_unresolved_identities(
                         && value.len() <= MAX_IDENTITY_BYTES
                 })
         {
-            let normalized_value = normalize_identity(&value);
+            let normalized_value = normalize_field_identity(&field, &value);
             if mapped.contains(&(field.as_str(), normalized_value.clone()))
-                || ignored.contains(&(field.as_str(), normalized_value.as_str()))
+                || ignored.contains(&(field.as_str(), normalized_value.clone()))
             {
                 continue;
             }
@@ -1028,8 +1038,8 @@ fn resolve_group(
     let mut matches = BTreeMap::<String, (BTreeSet<&'static str>, BTreeSet<String>)>::new();
     for entry in catalog.values() {
         for (field, value) in &identities {
-            let normalized = normalize_identity(value);
-            if normalized == normalize_identity(&entry.note.title) {
+            let normalized = normalize_field_identity(field, value);
+            if normalized == normalize_field_identity(field, &entry.note.title) {
                 let matched = matches.entry(entry.note.path.clone()).or_default();
                 matched.0.insert("exact_title");
                 matched.1.insert(field.clone());
@@ -1038,7 +1048,7 @@ fn resolve_group(
                 .note
                 .aliases
                 .iter()
-                .any(|alias| normalize_identity(alias) == normalized)
+                .any(|alias| normalize_field_identity(field, alias) == normalized)
             {
                 let matched = matches.entry(entry.note.path.clone()).or_default();
                 matched.0.insert("exact_alias");
@@ -1047,7 +1057,7 @@ fn resolve_group(
             if entry.note.references.get(field).is_some_and(|references| {
                 references
                     .iter()
-                    .any(|reference| normalize_identity(reference) == normalized)
+                    .any(|reference| normalize_field_identity(field, reference) == normalized)
             }) {
                 let matched = matches.entry(entry.note.path.clone()).or_default();
                 matched.0.insert("exact_reference");
@@ -1079,9 +1089,10 @@ fn resolve_group(
 
 fn group_events(events: &[StoredLogEvent]) -> BTreeMap<String, Vec<&StoredLogEvent>> {
     let mut groups = BTreeMap::<String, Vec<&StoredLogEvent>>::new();
+    let keys = llm::event_group_keys(events);
     for event in events {
         groups
-            .entry(llm::event_group_key(event))
+            .entry(keys[&event.id].clone())
             .or_default()
             .push(event);
     }
@@ -1101,14 +1112,14 @@ fn selector_matches_event(
     selector: &log_inbox_core::models::LinkSelector,
     event: &StoredLogEvent,
 ) -> bool {
-    let expected = normalize_identity(&selector.value);
+    let expected = normalize_field_identity(&selector.field, &selector.value);
     group_identities(&[event])
         .iter()
         .any(|(candidate_field, value)| {
             if candidate_field != &selector.field {
                 return false;
             }
-            let candidate = normalize_identity(value);
+            let candidate = normalize_field_identity(candidate_field, value);
             match selector.operator.as_str() {
                 "exact" => candidate == expected,
                 "contains" => candidate.contains(&expected),
@@ -1134,7 +1145,12 @@ fn group_identities(events: &[&StoredLogEvent]) -> Vec<(String, String)> {
             ("branch", "branch"),
         ] {
             if let Some(value) = event.metadata.get(source_field) {
-                for value in json_scalar_strings(value) {
+                let values = match field {
+                    "work_item" => llm::reference_identity(value, "ado").into_iter().collect(),
+                    "pull_request" => llm::reference_identity(value, "pr").into_iter().collect(),
+                    _ => json_scalar_strings(value),
+                };
+                for value in values {
                     identities.insert((field.to_owned(), value));
                 }
             }
@@ -1167,6 +1183,15 @@ fn json_scalar_strings(value: &JsonValue) -> Vec<String> {
         JsonValue::Array(values) => values.iter().flat_map(json_scalar_strings).collect(),
         _ => Vec::new(),
     }
+}
+
+fn normalize_field_identity(field: &str, value: &str) -> String {
+    let label = match field {
+        "work_item" => "ado",
+        "pull_request" => "pr",
+        _ => return normalize_identity(value),
+    };
+    llm::reference_identity(&JsonValue::String(value.to_owned()), label).unwrap_or_default()
 }
 
 fn normalize_identity(value: &str) -> String {
@@ -1442,6 +1467,109 @@ mod tests {
             ))
             .is_err()
         );
+    }
+
+    #[test]
+    fn normalized_external_titles_and_aliases_preserve_exact_resolution() {
+        for (field, label) in [("work_item", "ADO"), ("pull_request", "PR")] {
+            for alias in [false, true] {
+                let note = if alias {
+                    format!("---\naliases: ['{label} 42']\n---\n# Reference\n")
+                } else {
+                    format!("# {label} 42\n")
+                };
+                let (_root, workspace) = workspace(&[("Products/Reference.md", &note)]);
+                for value in [
+                    json!(format!("{label} 42")),
+                    json!(42),
+                    json!("https://example.test/items/42"),
+                    json!({"id": 42, "url": "https://example.test/items/42"}),
+                ] {
+                    let mut source = event("source", "unrelated", "");
+                    source.metadata.remove("work_item");
+                    source.metadata.insert(field.into(), value.clone());
+                    let resolution =
+                        resolve_knowledge(&workspace, &[collection("workspace")], &[], &[source])
+                            .unwrap()
+                            .unwrap();
+                    assert_eq!(
+                        resolution.vault_context["candidate_notes"],
+                        json!(["[[Products/Reference]]"]),
+                        "{field}, alias={alias}, value={value}"
+                    );
+                    assert_eq!(
+                        resolution.snapshot_payload["resolved_groups"][0]["reason"],
+                        if alias { "exact_alias" } else { "exact_title" }
+                    );
+                }
+                let other_field = if field == "work_item" {
+                    "pull_request"
+                } else {
+                    "work_item"
+                };
+                let mut source = event("source", "unrelated", "");
+                source.metadata.remove("work_item");
+                source.metadata.insert(other_field.into(), json!(42));
+                let resolution =
+                    resolve_knowledge(&workspace, &[collection("workspace")], &[], &[source])
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(resolution.vault_context["candidate_notes"], json!([]));
+            }
+        }
+        let (_root, workspace) = workspace(&[
+            ("Products/One.md", "# ADO 42\n"),
+            ("Products/Two.md", "---\naliases: ['42']\n---\n# Other\n"),
+        ]);
+        let resolution = resolve_knowledge(
+            &workspace,
+            &[collection("workspace")],
+            &[],
+            &[event("source", "unrelated", "42")],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(resolution.vault_context["candidate_notes"], json!([]));
+    }
+
+    #[test]
+    fn curation_preserves_historical_external_ignores_and_exact_mappings() {
+        for (field, label) in [("work_item", "ADO"), ("pull_request", "PR")] {
+            for value in [
+                format!("{label} 42"),
+                "https://example.test/items/42".to_owned(),
+            ] {
+                let mut source = event("source", "unrelated", "");
+                source.metadata.remove("work_item");
+                source.metadata.insert(field.into(), json!(42));
+                let sources = [source];
+                let initial = curate_unresolved_identities(&sources, &[], &[], None, 20);
+                assert!(initial.identities.iter().any(|item| item.field == field));
+                let ignored = log_inbox_core::models::IgnoredContextIdentity {
+                    id: "ignored".into(),
+                    workspace_id: "workspace".into(),
+                    field: field.into(),
+                    value: value.clone(),
+                    normalized_value: value.to_lowercase(),
+                    source_identity: None,
+                    source_digest: None,
+                    created_at: Utc::now(),
+                };
+                for review in [
+                    curate_unresolved_identities(&sources, &[], &[ignored], None, 20),
+                    curate_unresolved_identities(
+                        &sources,
+                        &[mapping(field, &value, "Products/Reference.md")],
+                        &[],
+                        None,
+                        20,
+                    ),
+                ] {
+                    assert!(!review.identities.iter().any(|item| item.field == field));
+                    assert!(review.identities.iter().any(|item| item.field == "repo"));
+                }
+            }
+        }
     }
 
     #[test]
@@ -1861,6 +1989,57 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(resolution.vault_context["candidate_notes"], json!([]));
+    }
+
+    #[test]
+    fn grouping_and_exact_mapping_share_normalized_task_lifecycle_identities() {
+        let (_root, workspace) =
+            workspace(&[("Products/Alpha.md", "---\nado: ['ADO 42']\n---\n# Alpha\n")]);
+        let mut start = event("start", "repo", "");
+        start.metadata.remove("work_item");
+        start.metadata.insert("task_id".into(), json!("task"));
+        start.metadata.insert("branch".into(), json!("main"));
+        let mut done = event("done", "repo", "");
+        done.metadata.insert("task_id".into(), json!("task"));
+        done.metadata.insert("branch".into(), json!("fix/change"));
+        done.metadata.insert(
+            "work_item".into(),
+            json!({"id":42,"url":"https://host/_workitems/edit/42"}),
+        );
+        let events = [start, done];
+        let groups = group_events(&events);
+        assert_eq!(groups.len(), 1);
+        let keys = llm::event_group_keys(&events);
+        assert!(groups.contains_key(&keys["start"]));
+        assert_eq!(keys["start"], keys["done"]);
+        for value in ["42", "ADO 42", "https://host/_workitems/edit/42"] {
+            let reviewed = mapping("work_item", value, "Products/Alpha.md");
+            assert!(mapping_matches(&reviewed, groups.values().next().unwrap()));
+            let result =
+                resolve_knowledge(&workspace, &[collection("workspace")], &[reviewed], &events)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                result.vault_context["candidate_notes"],
+                json!(["[[Products/Alpha]]"])
+            );
+        }
+        let result = resolve_knowledge(&workspace, &[collection("workspace")], &[], &events)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.vault_context["candidate_notes"],
+            json!(["[[Products/Alpha]]"])
+        );
+        let mut ambiguous = events[1].clone();
+        ambiguous
+            .metadata
+            .insert("work_item".into(), json!([42, 43]));
+        assert!(
+            !group_identities(&[&ambiguous])
+                .iter()
+                .any(|(field, _)| field == "work_item")
+        );
     }
 
     #[test]

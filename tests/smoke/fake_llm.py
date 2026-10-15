@@ -1,5 +1,4 @@
 import json
-import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -17,25 +16,43 @@ class Handler(BaseHTTPRequestHandler):
             (item.get("content", "") for item in messages if item.get("role") == "user"),
             "",
         )
-        evidence = prompt.partition("Evidence groups:\n")[2].partition(
-            "\n\nReturn JSON"
-        )[0]
-        group = re.search(r'"group_id"\s*:\s*"([^"]+)"', evidence)
-        if not group:
+        fields = ("outcome", "decision", "trade_off", "validation", "blocker", "follow_up")
+        try:
+            if not prompt.startswith("Stage: fact composition"):
+                raise ValueError("Unknown generation stage")
+            groups = json.loads(
+                prompt.split("\n\nExtracted evidence groups:\n", 1)[1].split(
+                    "\n\nReturn JSON", 1
+                )[0]
+            )
+            if len(groups) != 1:
+                raise ValueError("Expected one evidence group")
+            properties = request["response_format"]["json_schema"]["schema"]["properties"]
+            result = {}
+            for field in fields:
+                slots = {}
+                for source in groups[0]["sources"]:
+                    key = source["source_key"]
+                    schema = properties[field]["properties"].get(key)
+                    if schema is None:
+                        continue
+                    if None in schema["enum"]:
+                        slots[key] = None
+                    else:
+                        candidates = [fact for fact in source["facts"] if fact["field"] == field]
+                        selected = min(
+                            candidates,
+                            key=lambda fact: (
+                                not fact["reported"].startswith("tests.0: "),
+                                fact["rendered_characters"],
+                            ),
+                        )
+                        slots[key] = selected["id"]
+                result[field] = slots
+        except (ValueError, KeyError, IndexError, TypeError):
             self.send_error(422)
             return
-        content = json.dumps(
-            {
-                "title": "Compose smoke workflow",
-                "outcome": ["Validated the live Daily workflow."],
-                "decision": [],
-                "trade_off": [],
-                "validation": ["The live Compose smoke test passed."],
-                "blocker": [],
-                "follow_up": [],
-                "open_questions": [],
-            }
-        )
+        content = json.dumps(result)
         body = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

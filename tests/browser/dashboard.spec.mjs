@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { readableManagedBlock, isPlainLinkClick, preparationRunLabel } from "../../crates/mcp-server/assets/daily-helpers.js";
+import { readableManagedBlock, isPlainLinkClick, preparationRunLabel, reviewedFactText } from "../../crates/mcp-server/assets/daily-helpers.js";
 
 test("Link interception preserves browser modifier and non-primary behavior", () => {
   expect(isPlainLinkClick({ button: 0 })).toBe(true);
@@ -1091,6 +1091,110 @@ test("Readable drafts honor evidence decisions and preserve references and quest
   await page.route("**/api/v2/daily/2026-09-08",route=>{const data=dailyResponse("2026-09-08",{evidenceDisposition:disposition});const workstream=data.current_revision.content.workstreams[0];data.current_revision.content.workstreams.push({...workstream,id:"kept",title:"Retained work",canonical_links:["Products/Alpha.md"],outcome:[{text:"Keep this supported fact",evidence_event_ids:["evt_keep"]}]});data.current_revision.content.open_questions=["Who owns the follow-up?"];return route.fulfill({json:data});});
   await openDaily(page);
   for(const choice of ["omit","duplicate_of","superseded_by"]){disposition=choice;await page.reload();await expect(page.locator("#readable-draft")).not.toContainText("Built a predictable Daily review.");await expect(page.locator("#readable-draft")).not.toContainText("Daily workflow");await expect(page.locator("#readable-draft")).toContainText("Keep this supported fact");await expect(page.locator("#readable-draft")).toContainText("Products/Alpha.md");await expect(page.locator("#readable-draft")).toContainText("Who owns the follow-up?");}
+});
+
+test("Readable mapped clauses align with Copy and Apply after evidence exclusions",async({page})=>{
+  await mockDaily(page);
+  let disposition="omit";
+  const alpha="09:00Z: Alpha check passed.";
+  const beta="10:00Z: Beta check passed.";
+  await page.route("**/api/v2/daily/2026-09-08",route=>{
+    const data=dailyResponse("2026-09-08",{evidenceDisposition:disposition});
+    data.current_snapshot.event_ids.push("evt_keep");
+    data.current_snapshot_evidence.push({event_id:"evt_keep",available:true,disposition:"include"});
+    data.current_revision.content.workstreams[0].outcome=[
+      {text:`${alpha}; ${beta}`,evidence_event_ids:["evt_1","evt_keep"],source_clauses:[{text:alpha,evidence_event_id:"evt_1"},{text:beta,evidence_event_id:"evt_keep"}]},
+      {text:"Legacy mixed-source prose",evidence_event_ids:["evt_1","evt_keep"]},
+      {text:"Malformed mapped prose",evidence_event_ids:["evt_keep"],source_clauses:[{text:"Different text",evidence_event_id:"evt_keep"}]}
+    ];
+    data.preview_markdown=`### Automated activity\n\n- **Outcome:** ${beta}`;
+    return route.fulfill({json:data});
+  });
+  await page.route("**/api/v2/daily/2026-09-08/apply-preview",route=>route.fulfill({json:{workspace_id:"workspace_fixture",revision_id:"revision_1",destination_path:"Journal/day.md",block_id:"day_fixture",next_block:`<!-- log-inbox:daily:day_fixture:begin -->\n${beta}\n<!-- log-inbox:daily:day_fixture:end -->`,previous_block:null}}));
+  await openDaily(page);
+  for(const choice of ["omit","duplicate_of","superseded_by"]){
+    disposition=choice;await page.reload();
+    const draft=page.locator("#readable-draft");
+    await expect(draft).toContainText(beta);await expect(draft).not.toContainText(alpha);
+    await expect(draft).not.toContainText("Legacy mixed-source prose");await expect(draft).not.toContainText("Malformed mapped prose");
+    await page.evaluate(()=>Object.defineProperty(navigator,"clipboard",{configurable:true,value:{writeText:async text=>{window.copiedDraft=text;}}}));
+    await page.getByRole("button",{name:"Copy draft",exact:true}).click();
+    await expect.poll(()=>page.evaluate(()=>window.copiedDraft)).toContain(beta);
+    expect(await page.evaluate(()=>window.copiedDraft)).not.toContain(alpha);
+    await page.getByRole("button",{name:"Review & save"}).click();
+    await expect(page.locator("#apply-after")).toContainText(beta);await expect(page.locator("#apply-after")).not.toContainText(alpha);
+    await page.getByRole("button",{name:"Close Apply preview"}).click();
+  }
+});
+
+test("Readable mapped activity clauses use the same exclusion rules",async({page})=>{
+  await mockDaily(page);
+  let disposition="omit";
+  await page.route("**/api/v2/daily/2026-09-08",route=>{
+    const data=dailyResponse("2026-09-08",{evidenceDisposition:disposition});
+    data.current_revision.content={schema_version:2,manual_entry_ids:[],open_questions:[],workstreams:[{id:"activity",title:"Reported activity",evidence_event_ids:["evt_1","kept"],activity:[
+      {text:"Excluded source clause; Retained source clause",evidence_event_ids:["evt_1","kept"],source_clauses:[{text:"Excluded source clause",evidence_event_id:"evt_1"},{text:"Retained source clause",evidence_event_id:"kept"}]},
+      {text:"Legacy mixed activity",evidence_event_ids:["evt_1","kept"]}
+    ]}]};
+    return route.fulfill({json:data});
+  });
+  await openDaily(page);
+  for(const choice of ["omit","duplicate_of","superseded_by"]){
+    disposition=choice;await page.reload();
+    await expect(page.locator("#readable-draft")).toContainText("Retained source clause");
+    await expect(page.locator("#readable-draft")).not.toContainText("Excluded source clause");
+    await expect(page.locator("#readable-draft")).not.toContainText("Legacy mixed activity");
+  }
+});
+
+test("Mapped fact edits clear only the changed provenance map",async({page})=>{
+  const requests=await mockDaily(page);
+  const data=dailyResponse();
+  const clauses=[{text:"Built a predictable Daily review.",evidence_event_id:"evt_1"}];
+  data.current_revision.content.workstreams[0].outcome[0].source_clauses=clauses;
+  const validationText="Checked\r\nthe\rworkflow.";
+  data.current_revision.content.workstreams[0].validation=[{text:validationText,evidence_event_ids:["evt_1"],source_clauses:[{text:validationText,evidence_event_id:"evt_1"}]}];
+  await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:data}));
+  await openDaily(page);
+  await page.getByRole("button",{name:"Edit draft",exact:true}).click();
+  await page.getByLabel("Workstream 1 title").fill("Owner title");
+  await page.getByRole("button",{name:"Save edits"}).click();
+  await expect.poll(()=>requests.filter(request=>request.method==="PUT"&&request.path.endsWith("/candidate")).length).toBe(1);
+  const unchanged=requests.filter(request=>request.method==="PUT"&&request.path.endsWith("/candidate"))[0].body.content.workstreams[0];
+  expect(unchanged.outcome[0].source_clauses).toEqual(clauses);
+  expect(unchanged.validation[0].text).toBe(validationText);
+  expect(unchanged.validation[0].source_clauses).toEqual(data.current_revision.content.workstreams[0].validation[0].source_clauses);
+  await expect(page.getByRole("button",{name:"Edit draft",exact:true})).toBeVisible();
+  await page.getByRole("button",{name:"Edit draft",exact:true}).click();
+  await page.locator('#candidate textarea[data-field="outcome"]').fill("Owner rewrote the result.");
+  await page.getByRole("button",{name:"Save edits"}).click();
+  await expect.poll(()=>requests.filter(request=>request.method==="PUT"&&request.path.endsWith("/candidate")).length).toBe(2);
+  const edited=requests.filter(request=>request.method==="PUT"&&request.path.endsWith("/candidate"))[1].body.content.workstreams[0];
+  expect(edited.outcome[0].text).toBe("Owner rewrote the result.");
+  expect(edited.outcome[0]).not.toHaveProperty("source_clauses");
+  expect(edited.validation[0].source_clauses).toEqual(unchanged.validation[0].source_clauses);
+});
+
+test("Reviewed fact projection rejects malformed maps and preserves legacy evidence rules",()=>{
+  const valid={text:"A; B",evidence_event_ids:["a","b"],source_clauses:[{text:"A",evidence_event_id:"a"},{text:"B",evidence_event_id:"b"}]};
+  expect(reviewedFactText(valid,new Set())).toBe("A; B");
+  expect(reviewedFactText(valid,new Set(["a"]))).toBe("B");
+  expect(reviewedFactText(valid,new Set(["a","b"]))).toBeNull();
+  for(const change of [
+    {text:"Changed"},
+    {source_clauses:[{text:"A",evidence_event_id:"a"},{text:"B",evidence_event_id:"a"}]},
+    {source_clauses:[{text:"A",evidence_event_id:"a"}]},
+    {source_clauses:null},
+    {source_clauses:[{text:"A",evidence_event_id:"a",unexpected:true},{text:"B",evidence_event_id:"b"}]},
+    {evidence_event_ids:["a","a"]},
+    {text:"x".repeat(321)},
+    {evidence_event_ids:["😀".repeat(65)],source_clauses:[{text:"A; B",evidence_event_id:"😀".repeat(65)}]},
+  ])expect(reviewedFactText({...valid,...change},new Set())).toBeNull();
+  const legacy={text:"Owner rewritten prose",evidence_event_ids:["a","b"]};
+  expect(reviewedFactText(legacy,new Set())).toBe(legacy.text);
+  expect(reviewedFactText(legacy,new Set(["a"]))).toBeNull();
+  const unicode="😀".repeat(320);
+  expect(reviewedFactText({text:unicode,evidence_event_ids:["a"],source_clauses:[{text:unicode,evidence_event_id:"a"}]},new Set())).toBe(unicode);
 });
 
 test("Daily restores running preparation, prevents duplicate starts and cancels it", async ({ page }) => {

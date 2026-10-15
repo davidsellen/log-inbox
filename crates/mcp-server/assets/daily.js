@@ -5,6 +5,7 @@ import {
   el,
   action,
   identityLabel,
+  reviewedFactText,
 } from "./daily-helpers.js";
 import { createNavigation } from "./daily-navigation.js";
 import { createReferenceNotes } from "./daily-references.js";
@@ -1374,9 +1375,14 @@ async function saveCandidate() {
       content.workstreams[index].title = input.value;
     });
   document.querySelectorAll("#candidate textarea").forEach((input) => {
-    content.workstreams[Number(input.dataset.workstream)][input.dataset.field][
-      Number(input.dataset.fact)
-    ].text = input.value;
+    const fact =
+      content.workstreams[Number(input.dataset.workstream)][
+        input.dataset.field
+      ][Number(input.dataset.fact)];
+    if (fact.text.replace(/\r\n?/g, "\n") !== input.value) {
+      fact.text = input.value;
+      delete fact.source_clauses;
+    }
   });
   try {
     await api(`/api/v2/daily/${state.date}/candidate`, {
@@ -1589,9 +1595,9 @@ function renderCandidate(content) {
   );
   if (content.schema_version === 2) {
     for (const workstream of content.workstreams) {
-      const entries = (workstream.activity || []).filter((entry) =>
-        entry.evidence_event_ids.some((id) => !excluded.has(id)),
-      );
+      const entries = (workstream.activity || [])
+        .map((entry) => reviewedFactText(entry, excluded))
+        .filter((text) => text !== null);
       if (!entries.length) continue;
       const group = document.createElement("details");
       group.className = "workstream";
@@ -1604,7 +1610,7 @@ function renderCandidate(content) {
         ),
       );
       for (const entry of entries)
-        group.append(el("p", "evidence-message", entry.text));
+        group.append(el("p", "evidence-message", entry));
       root.append(group);
     }
     const attempt = state.data.generation_attempt;
@@ -1629,14 +1635,14 @@ function renderCandidate(content) {
     section.append(el("h3", "", workstream.title));
     let count = 0;
     for (const [key, label] of Object.entries(fieldLabels)) {
-      const facts = (workstream[key] || []).filter((fact) =>
-        (fact.evidence_event_ids || []).some((id) => !excluded.has(id)),
-      );
+      const facts = (workstream[key] || [])
+        .map((fact) => reviewedFactText(fact, excluded))
+        .filter((text) => text !== null);
       if (!facts.length) continue;
       count += facts.length;
       section.append(el("strong", "", label));
       const list = document.createElement("ul");
-      for (const fact of facts) list.append(el("li", "", fact.text));
+      for (const text of facts) list.append(el("li", "", text));
       section.append(list);
     }
     if (!count) continue;

@@ -42,6 +42,29 @@ Use several different work types rather than repeating one repository/task shape
 
 ## Exit review
 
+### Daily quality regression sample
+
+For the October 2026 quality delivery, include these cases in the real-model review.
+Use synthetic equivalents when testing another provider; do not export private
+historical evidence merely to run a benchmark.
+
+| Evidence pattern | Required reading of the resulting draft |
+|---|---|
+| One work item has numeric, string, URL and object IDs across planning, implementation and deployment sessions | One coherent workstream; distinct work items remain distinct even on the same branch |
+| Investigation completes; configuration defect confirmed, probable cause, successful login still pending | Diagnosis is complete, resolution remains unverified |
+| Remediation plan accepted; no implementation or tests performed | Accepted plan only; no implementation or passed-test claim |
+| Product note describes CRM ownership; event reports a Forms authentication investigation | Only the investigation is reported as daily work; product background supplies terminology only |
+| Earlier tests were not run; later narrow checks pass | Each validation keeps its actual scope; no inferred full acceptance |
+| Earlier blocker followed by a later event that does not resolve it | The blocker remains visible; terminal task status alone does not close it |
+| Two facts have different sources and one source is omitted during review | Only the fact with no remaining included support disappears |
+
+Record unsupported accomplishments, lost pending states, duplicate bullets, mistaken
+groups, review effort and elapsed generation time for both reference-context arms.
+Per-fact event citations prove membership and make inspection possible; they do not
+prove semantic entailment. A deterministic schema test passing is not evidence that
+a model preserves these meanings. Keep the real-model and owner-evaluation gates
+pending until those results are actually observed.
+
 The M3 pilot passes after ten active days with no database repair, manual proposal-folder cleanup, data-loss issue, or authorization blocker. Summarize recurring corrections and operational problems before changing defaults.
 
 The M4 context evaluation passes only when representative blind comparisons show improved usefulness or reduced editing with manageable latency and setup effort. A neutral or negative result is valid: Knowledge remains optional, and the comparison evidence should guide whether retrieval expands at all.

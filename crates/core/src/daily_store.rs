@@ -3091,6 +3091,14 @@ fn validate_workstream_evidence(
                 !fact.text.trim().is_empty() && !fact.evidence_event_ids.is_empty(),
                 "daily fact requires text and evidence"
             );
+            anyhow::ensure!(
+                crate::models::daily_source_clauses_are_valid(
+                    &fact.text,
+                    &fact.evidence_event_ids,
+                    &fact.source_clauses
+                ),
+                "daily fact source clauses must match its text, evidence and bounds"
+            );
             for event_id in &fact.evidence_event_ids {
                 anyhow::ensure!(
                     workstream_evidence.contains(event_id.as_str()),
@@ -3172,6 +3180,50 @@ mod tests {
         without_context_content: DailyRevisionContent,
     }
 
+    #[test]
+    fn stored_clause_maps_require_exact_text_unique_sources_and_bounds() {
+        let value = serde_json::json!({"schema_version":1,"manual_entry_ids":[],"workstreams":[{"id":"work","title":"Reported checks","evidence_event_ids":["a","b"],"validation":[{"text":"A; B","evidence_event_ids":["a","b"],"source_clauses":[{"text":"A","evidence_event_id":"a"},{"text":"B","evidence_event_id":"b"}]}]}]});
+        let content: DailyRevisionContent = serde_json::from_value(value.clone()).unwrap();
+        validate_workstream_evidence(&content.workstreams, &["a".into(), "b".into()]).unwrap();
+        let mut cases = Vec::new();
+        let mut bad = value.clone();
+        bad["workstreams"][0]["validation"][0]["text"] = serde_json::json!("Changed prose");
+        cases.push(bad);
+        let mut bad = value.clone();
+        bad["workstreams"][0]["validation"][0]["source_clauses"][1]["evidence_event_id"] =
+            serde_json::json!("a");
+        cases.push(bad);
+        let mut bad = value.clone();
+        bad["workstreams"][0]["validation"][0]["source_clauses"][1]["text"] =
+            serde_json::json!("x".repeat(321));
+        cases.push(bad);
+        for bad in cases {
+            let content: DailyRevisionContent = serde_json::from_value(bad).unwrap();
+            assert!(
+                validate_workstream_evidence(&content.workstreams, &["a".into(), "b".into()])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("source clauses")
+            );
+        }
+        let mut legacy = value;
+        legacy["workstreams"][0]["validation"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("source_clauses");
+        let legacy: DailyRevisionContent = serde_json::from_value(legacy).unwrap();
+        assert!(
+            legacy.workstreams[0].validation[0]
+                .source_clauses
+                .is_empty()
+        );
+        assert!(
+            serde_json::to_value(&legacy).unwrap()["workstreams"][0]["validation"][0]
+                .get("source_clauses")
+                .is_none()
+        );
+    }
+
     fn comparison_content(
         event_id: &str,
         title: &str,
@@ -3187,6 +3239,7 @@ mod tests {
                 outcome: vec![DailyFact {
                     text: format!("{title} outcome"),
                     evidence_event_ids: vec![event_id.to_owned()],
+                    source_clauses: Vec::new(),
                 }],
                 decision: Vec::new(),
                 trade_off: Vec::new(),
