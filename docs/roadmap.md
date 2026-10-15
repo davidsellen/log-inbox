@@ -144,7 +144,7 @@ Complete-day regeneration requires complete evidence coverage. After expiry, do 
 - Treat retrieved notes and events as untrusted data. The model cannot choose destinations, authorize links, resolve evidence, or Apply. Sanitize preview HTML/URLs and avoid implicit remote-image loads.
 - Make redaction metadata-key-aware and value-aware; redact diagnostic/model errors too. Do not promise arbitrary logs are secret-free.
 - Consent must cover logs and excerpts sent to nonlocal LLMs and data returned to remote MCP clients. A local configured LLM does not make every integration local.
-- Configure one active OpenAI-compatible connection with capability/schema testing. Use synthetic connection tests, endpoint/redirect validation, and renewed consent for changed providers or data categories.
+- Configure named OpenAI-compatible connections with one saved default and captured per-attempt choices, plus capability/schema testing. Use synthetic connection tests, endpoint/redirect validation, and renewed consent for changed providers or data categories.
 - Encrypt stored model credentials using reviewed authenticated encryption and a separately mounted master key; never return stored credentials to the browser. Specify key backup, loss and rotation. Docker secret injection is not host encryption.
 - Bound total prompt size, events, documents, chunks, response size, retries and concurrency. Test real-model usefulness separately from deterministic workflow correctness.
 
@@ -226,7 +226,7 @@ Exit gate: representative cases show improved factual usefulness or reduced edit
 
 ### M5 — Broader Integration, Only When Justified
 
-- [ ] Add UI-managed local/custom model presets, connection/capability testing, encrypted credentials, explicit egress consent and bounded guided preferences.
+- [x] Add UI-managed local/custom model presets, connection/capability testing, encrypted credentials and explicit activity-egress consent. Saved defaults and one-attempt Daily choices are documented in [generation models](generation-models.md). Reference excerpts remain local; broader cloud-excerpt consent and guided preferences remain gated.
 - [ ] Add versioned configuration import/export without secrets or Markdown content; review destination changes after import.
 - [ ] Add the optional first-run host setup helper for workspace validation, identity/security generation and Compose startup; no ongoing workflow features.
 - [ ] Add structured MCP generation/inspection interfaces for tested clients only if the M4 read-only context slice proves useful; separately gate approved-revision Apply with revocable `vault:write`.

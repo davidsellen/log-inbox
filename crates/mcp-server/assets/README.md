@@ -9,6 +9,7 @@ Start with `daily.js`: its imports show the feature boundaries, its wiring block
 | `daily.js` | Session/API access, selected day, draft/evidence editing, generation, Apply and polling |
 | `daily-navigation.js` | URL/history, view changes, dialog lifecycle and discard guards |
 | `daily-references.js` | Reference collections, links, search and their form state |
+| `daily-generation.js` | Provider/model settings, temporary Daily choices and nonsecret model labels |
 | `daily-settings.js` | Destination, scheduling, retention and migration forms |
 | `daily-helpers.js` | Stateless DOM, date and label helpers |
 

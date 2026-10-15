@@ -1090,6 +1090,32 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        if current < 27 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                "CREATE TABLE generation_settings (
+                workspace_id TEXT PRIMARY KEY REFERENCES workspace_profiles(id) ON DELETE CASCADE,
+                settings_json TEXT NOT NULL
+            );
+            CREATE TABLE generation_provenance (
+                kind TEXT NOT NULL CHECK(kind IN ('attempt','revision','comparison')),
+                record_id TEXT NOT NULL,
+                provenance_json TEXT NOT NULL,
+                PRIMARY KEY(kind,record_id)
+            );
+            CREATE TRIGGER generation_revision_provenance_delete AFTER DELETE ON proposal_revisions BEGIN
+                DELETE FROM generation_provenance WHERE kind='revision' AND record_id=OLD.id;
+            END;
+            CREATE TRIGGER generation_attempt_provenance_delete AFTER DELETE ON generation_attempts BEGIN
+                DELETE FROM generation_provenance WHERE kind='attempt' AND record_id=OLD.id;
+            END;
+            CREATE TRIGGER generation_comparison_provenance_delete AFTER DELETE ON context_comparisons BEGIN
+                DELETE FROM generation_provenance WHERE kind='comparison' AND record_id=OLD.id;
+            END;",
+            )?;
+            transaction.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES(27,'generation connections and provenance',?1)", params![Utc::now().to_rfc3339()])?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -2629,10 +2655,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 26);
+        assert_eq!(store.schema_version().expect("version reads"), 27);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 26);
+        assert_eq!(store.schema_version().expect("version remains"), 27);
     }
 
     #[test]
@@ -2700,7 +2726,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 26);
+        assert_eq!(verification.schema_version, 27);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());

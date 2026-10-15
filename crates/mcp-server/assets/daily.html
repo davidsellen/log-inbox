@@ -30,16 +30,19 @@
     <main class="shell" id="main-shell">
       <section id="login-panel" class="card" hidden>
         <h1>Open your Daily log</h1>
-        <p class="subtle">
-          Enter the owner secret configured for this Log Inbox. It stays in this
-          request and is never stored by the page.
+        <p class="subtle" id="login-help">
+          Use the dashboard owner secret configured for Log Inbox. Activity API
+          keys and model API keys cannot sign in. The secret is never stored by
+          this page.
         </p>
+        <p id="login-error" class="notice error" role="alert" hidden></p>
         <form id="login-form" class="field">
           <label for="owner-secret">Owner secret</label
           ><input
             id="owner-secret"
             type="password"
             autocomplete="current-password"
+            aria-describedby="login-help login-error"
             required
           /><label class="check-field"
             ><input id="remember-login" type="checkbox" /><span
@@ -102,6 +105,35 @@
                   <button id="generate" class="primary">Create draft</button>
                 </div>
               </div>
+              <div
+                id="generation-model-control"
+                class="generation-model-control"
+              >
+                <span id="next-generation-model" class="subtle"></span>
+                <button type="button" id="generation-model-change">
+                  Change model
+                </button>
+                <div id="generation-model-options" hidden>
+                  <label class="field"
+                    >Model for this attempt<select
+                      id="generation-model-picker"
+                    ></select
+                  ></label>
+                  <button type="button" id="generation-model-reset">
+                    Use saved default
+                  </button>
+                  <button type="button" id="generation-manage-link">
+                    Manage models in Settings
+                  </button>
+                </div>
+                <p
+                  id="generation-model-notice"
+                  class="subtle"
+                  role="status"
+                ></p>
+                <p id="draft-generation-model" class="subtle" hidden></p>
+                <p id="attempt-generation-model" class="subtle" hidden></p>
+              </div>
               <section
                 id="generation-status"
                 class="notice"
@@ -112,6 +144,9 @@
                 <button id="view-generation" hidden>View running day</button>
                 <button id="cancel-generation" hidden>Cancel generation</button>
                 <button id="retry-generation" hidden>Retry preparation</button>
+                <button id="generation-repair-settings" hidden>
+                  Generation settings
+                </button>
                 <button id="browse-activity">Browse activity</button>
                 <details id="generation-error" hidden>
                   <summary>Error details</summary>
@@ -378,6 +413,11 @@
             >Markdown destination</a
           >
           <a
+            href="?view=settings&amp;section=generation"
+            data-settings-link="generation"
+            >Generation</a
+          >
+          <a
             href="?view=settings&amp;section=preparation"
             data-settings-link="preparation"
             >Preparation &amp; retention</a
@@ -387,10 +427,155 @@
           >Settings section<select id="settings-section-select">
             <option value="general">General</option>
             <option value="destination">Markdown destination</option>
+            <option value="generation">Generation</option>
             <option value="preparation">Preparation &amp; retention</option>
           </select></label
         >
         <div class="settings-content">
+          <section
+            data-settings-section="generation"
+            class="card"
+            aria-labelledby="settings-generation-title"
+            hidden
+          >
+            <h2 id="settings-generation-title" tabindex="-1">Generation</h2>
+            <p id="generation-settings-notice" role="status"></p>
+            <p
+              id="generation-settings-unsaved"
+              class="subtle"
+              role="status"
+            ></p>
+            <button type="button" id="generation-reload-settings">
+              Refresh model settings
+            </button>
+            <form id="generation-default-form" class="settings-section">
+              <label class="field"
+                >Default model<select id="generation-default" required></select
+              ></label>
+              <p id="generation-default-help" class="subtle"></p>
+              <button type="submit" id="generation-save-default">
+                Save default
+              </button>
+            </form>
+            <details id="generation-timing-history" class="settings-section">
+              <summary>Generation timing history</summary>
+              <p class="subtle">
+                Saved across restarts for later model comparisons. Times cover
+                the whole attempt, including preparation and internal retries.
+                Workload sizes vary; speed does not measure draft quality.
+                Compatibility tests are excluded.
+              </p>
+              <button type="button" id="generation-history-refresh">
+                Refresh timing history
+              </button>
+              <button type="button" id="generation-history-export" disabled>
+                Download timing records
+              </button>
+              <p id="generation-history-status" role="status"></p>
+              <ul
+                id="generation-history-list"
+                class="generation-history-list"
+              ></ul>
+            </details>
+            <details id="generation-manage-connections">
+              <summary>Manage connections and models</summary>
+              <p class="subtle">
+                Requests originate from the Log Inbox service. In Docker,
+                localhost means the app container. Models must already be
+                installed or available on their server.
+              </p>
+              <label class="field"
+                >Connection<select id="generation-connection-list"></select
+              ></label>
+              <form id="generation-connection-form" class="settings-section">
+                <label class="field"
+                  >Connection name<input
+                    id="generation-connection-name"
+                    required
+                    maxlength="100"
+                    autocomplete="off"
+                /></label>
+                <label class="field"
+                  >API base URL<input
+                    id="generation-endpoint"
+                    type="url"
+                    required
+                    placeholder="http://ollama:11434/v1"
+                    autocomplete="off"
+                /></label>
+                <label class="field"
+                  >API key (optional)<input
+                    id="generation-api-key"
+                    type="password"
+                    autocomplete="new-password"
+                /></label>
+                <p id="generation-credential-help" class="subtle"></p>
+                <label class="check-field"
+                  ><input id="generation-clear-key" type="checkbox" />Remove
+                  stored API key</label
+                >
+                <div class="actions">
+                  <button id="generation-save-connection" type="submit">
+                    Save connection</button
+                  ><button
+                    id="generation-delete-connection"
+                    type="button"
+                    hidden
+                  >
+                    Remove connection
+                  </button>
+                </div>
+              </form>
+              <section id="generation-consent" hidden>
+                <h3>Allow external generation</h3>
+                <p>
+                  Activity messages and link metadata will be sent to this
+                  service for generation. Your manual-note prose and
+                  reference-note excerpts remain local. This also allows
+                  scheduled preparation if you save an external model as the
+                  default.
+                </p>
+                <label class="check-field"
+                  ><input id="generation-consent-confirm" type="checkbox" />I
+                  allow this connection to receive activity and link
+                  metadata.</label
+                >
+                <button id="generation-consent-button" type="button">
+                  Allow external generation
+                </button>
+              </section>
+              <section
+                id="generation-model-tools"
+                class="settings-section"
+                hidden
+              >
+                <h3>Models</h3>
+                <p id="generation-saved-models" class="subtle"></p>
+                <button type="button" id="generation-discover-models">
+                  Find available models
+                </button>
+                <form id="generation-model-test-form">
+                  <label class="field"
+                    >Model ID<input
+                      id="generation-model-id"
+                      list="generation-discovered-models"
+                      required
+                      maxlength="200"
+                      autocomplete="off"
+                  /></label>
+                  <datalist id="generation-discovered-models"></datalist>
+                  <p class="subtle">
+                    Testing sends synthetic activity only and verifies the same
+                    structured output used for Daily drafts.
+                  </p>
+                  <button type="submit" id="generation-test-model">
+                    Test &amp; save model
+                  </button>
+                </form>
+              </section>
+            </details>
+          </section>
+
           <section
             data-settings-section="general"
             class="card"
@@ -644,13 +829,24 @@
           below.
         </p>
         <section>
-          <h3>Current managed block</h3>
+          <h3>Current content</h3>
           <pre id="apply-before"></pre>
         </section>
         <section>
-          <h3>Approved managed block</h3>
+          <h3>Approved content</h3>
           <pre id="apply-after"></pre>
         </section>
+        <details id="apply-technical-details">
+          <summary>Technical details</summary>
+          <p>
+            The exact Markdown includes hidden ownership comments used for safe
+            updates.
+          </p>
+          <h3>Current Markdown</h3>
+          <pre id="apply-before-raw"></pre>
+          <h3>Approved Markdown</h3>
+          <pre id="apply-after-raw"></pre>
+        </details>
         <div class="dialog-actions">
           <button type="button" id="cancel-apply">Cancel</button
           ><button type="button" id="confirm-apply" class="primary">

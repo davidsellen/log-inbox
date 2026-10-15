@@ -1229,6 +1229,7 @@ impl Store {
             origin,
             content,
             None,
+            None,
         )
     }
 
@@ -1248,6 +1249,7 @@ impl Store {
             Some(context_snapshot_id),
             origin,
             content,
+            None,
             None,
         )
     }
@@ -1273,6 +1275,7 @@ impl Store {
             origin,
             content,
             Some(Some(expected_current_revision_id)),
+            None,
         )
     }
 
@@ -1299,6 +1302,7 @@ impl Store {
             origin,
             content,
             Some(Some(expected_current_revision_id)),
+            None,
         )
     }
 
@@ -1323,6 +1327,31 @@ impl Store {
             origin,
             content,
             Some(expected_current_revision_id),
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_generated_revision_if_current_with_provenance(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        snapshot_id: Option<&str>,
+        context_snapshot_id: Option<&str>,
+        origin: &str,
+        content: &Value,
+        expected_current_revision_id: Option<&str>,
+        provenance: &Value,
+    ) -> Result<ProposalRevision> {
+        self.create_proposal_revision_internal(
+            workspace_id,
+            local_date,
+            snapshot_id,
+            context_snapshot_id,
+            origin,
+            content,
+            Some(expected_current_revision_id),
+            Some(provenance),
         )
     }
 
@@ -1336,6 +1365,7 @@ impl Store {
         origin: &str,
         content: &Value,
         expected_current_revision_id: Option<Option<&str>>,
+        generation_provenance: Option<&Value>,
     ) -> Result<ProposalRevision> {
         anyhow::ensure!(
             matches!(
@@ -1413,6 +1443,11 @@ impl Store {
             "INSERT INTO proposal_revisions (id, workspace_id, local_date, snapshot_id, revision_number, origin, content_json, content_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![id, workspace_id, local_date.to_string(), snapshot_id, revision_number, origin, content_json, content_hash, now],
         )?;
+        if let Some(provenance) = generation_provenance.filter(|value| !value.is_null()) {
+            transaction.execute("INSERT INTO generation_provenance(kind,record_id,provenance_json) VALUES('revision',?1,?2)",params![id,serde_json::to_string(provenance)?])?;
+        } else if matches!(origin, "structured_edit" | "manual" | "advanced_markdown") {
+            transaction.execute("INSERT INTO generation_provenance(kind,record_id,provenance_json) SELECT 'revision',?1,p.provenance_json FROM generation_provenance p JOIN daily_days d ON d.current_revision_id=p.record_id WHERE p.kind='revision' AND d.workspace_id=?2 AND d.local_date=?3",params![id,workspace_id,local_date.to_string()])?;
+        }
         if let Some(context_snapshot_id) = context_snapshot_id {
             transaction.execute(
                 "INSERT INTO proposal_context_snapshots (revision_id, context_snapshot_id) VALUES (?1, ?2)",
@@ -1450,6 +1485,30 @@ impl Store {
         without_context_content: &DailyRevisionContent,
         model_fingerprint: &str,
         contract_fingerprint: &str,
+    ) -> Result<ContextComparison> {
+        self.create_context_comparison_with_provenance(
+            workspace_id,
+            local_date,
+            source_revision_id,
+            context_content,
+            without_context_content,
+            model_fingerprint,
+            contract_fingerprint,
+            &Value::Null,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_context_comparison_with_provenance(
+        &self,
+        workspace_id: &str,
+        local_date: NaiveDate,
+        source_revision_id: &str,
+        context_content: &DailyRevisionContent,
+        without_context_content: &DailyRevisionContent,
+        model_fingerprint: &str,
+        contract_fingerprint: &str,
+        provenance: &Value,
     ) -> Result<ContextComparison> {
         validate_comparison_fingerprint(model_fingerprint, "model")?;
         validate_comparison_fingerprint(contract_fingerprint, "contract")?;
@@ -1579,6 +1638,9 @@ impl Store {
                 now,
             ],
         )?;
+        if !provenance.is_null() {
+            transaction.execute("INSERT OR IGNORE INTO generation_provenance(kind,record_id,provenance_json) SELECT 'comparison',id,?1 FROM context_comparisons WHERE id=?2",params![serde_json::to_string(provenance)?,comparison_id])?;
+        }
         transaction.commit()?;
         let comparison = self
             .context_comparison_for_revision(source_revision_id)?
@@ -1798,6 +1860,7 @@ impl Store {
                 now,
             ],
         )?;
+        transaction.execute("INSERT INTO generation_provenance(kind,record_id,provenance_json) SELECT 'revision',?1,provenance_json FROM generation_provenance WHERE kind='comparison' AND record_id=?2",params![promoted_revision_id,comparison_id])?;
         if selected_kind == "context" {
             transaction.execute(
                 "INSERT INTO proposal_context_snapshots (revision_id, context_snapshot_id) VALUES (?1, ?2)",
@@ -3230,6 +3293,52 @@ mod tests {
             .expect("comparison creates")
     }
 
+    #[test]
+    fn comparison_provenance_promotes_atomically_with_either_arm() {
+        for arm in ["a", "b"] {
+            let fixture = context_comparison_fixture();
+            let provenance = serde_json::json!({"provider":"Comparison provider","model":"second","fingerprint":"a".repeat(64)});
+            let comparison = fixture
+                .store
+                .create_context_comparison_with_provenance(
+                    &fixture.profile.id,
+                    fixture.date,
+                    &fixture.source.id,
+                    &fixture.context_content,
+                    &fixture.without_context_content,
+                    &"a".repeat(64),
+                    &"b".repeat(64),
+                    &provenance,
+                )
+                .unwrap();
+            assert_eq!(
+                fixture
+                    .store
+                    .generation_comparison_provenance(&comparison.id)
+                    .unwrap(),
+                Some(provenance.clone())
+            );
+            let decided = fixture
+                .store
+                .decide_context_comparison(
+                    &comparison.id,
+                    &fixture.source.id,
+                    arm,
+                    "same",
+                    "same",
+                    None,
+                )
+                .unwrap();
+            let revision = decided.decision.unwrap().promoted_revision_id;
+            assert_eq!(
+                fixture
+                    .store
+                    .generation_revision_provenance(&revision)
+                    .unwrap(),
+                Some(provenance)
+            );
+        }
+    }
     #[test]
     fn context_comparison_creation_is_blind_immutable_and_idempotent() {
         let fixture = context_comparison_fixture();

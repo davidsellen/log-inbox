@@ -1,5 +1,8 @@
 services:
   fake-llm:
+    networks:
+      default:
+        aliases: [ollama]
     image: python:3.13-alpine
     command: ["python", "/app/fake_llm.py"]
     volumes:
@@ -42,7 +45,7 @@ services:
       LOG_INBOX_ALLOWED_HOSTS: 127.0.0.1:8788
       LOG_INBOX_ALLOWED_ORIGINS: http://127.0.0.1:8788
       LOG_INBOX_WORKSPACE_DIR: /workspace
-      LOG_INBOX_LLM_BASE_URL: http://fake-llm:8000/v1
+      LOG_INBOX_LLM_BASE_URL: http://ollama:8000/v1
       LOG_INBOX_LLM_MODEL: smoke-model
       LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS: 10
     ports:

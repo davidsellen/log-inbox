@@ -46,3 +46,7 @@ docker compose -f docker-compose.yml -f docker-compose.migrate.yml up --build
 ```
 
 The override mounts explicitly configured legacy sources under `/migration`. Review and commit the migration in Settings, then return to ordinary Compose. Those mounts are never document destinations or runtime fallbacks.
+
+## Optional encrypted provider credentials
+
+Ordinary Compose startup is unchanged. For UI-managed API keys, use `docker-compose.providers.yml` alongside the default file and set `LOG_INBOX_LLM_MASTER_KEY_HOST_FILE` to a separately protected host key file. It is mounted read-only as a Docker secret and provided through `LOG_INBOX_LLM_MASTER_KEY_FILE`. Do not put the key in the Markdown workspace, repository or app-data volume. No-key local connections and environment-only keys work without this override. See [Choosing generation models](../generation-models.md) for provisioning, backup, loss and rotation.

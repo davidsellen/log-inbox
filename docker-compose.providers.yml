@@ -1,0 +1,12 @@
+# Optional: UI-managed API keys. Keep the host master key outside the repository,
+# Markdown workspace, and app-data backup. See docs/generation-models.md.
+services:
+  mcp:
+    environment:
+      LOG_INBOX_LLM_MASTER_KEY_FILE: /run/secrets/log_inbox_provider_master_key
+    secrets:
+      - log_inbox_provider_master_key
+
+secrets:
+  log_inbox_provider_master_key:
+    file: ${LOG_INBOX_LLM_MASTER_KEY_HOST_FILE:?Set the host path of the provider master key}

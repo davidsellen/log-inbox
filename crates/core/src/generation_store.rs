@@ -123,6 +123,47 @@ impl Store {
         Ok(self.connect()?.query_row(&format!("SELECT {ATTEMPT_COLUMNS} FROM generation_attempts WHERE workspace_id=?1 AND local_date=?2 ORDER BY started_at DESC,rowid DESC LIMIT 1"),params![workspace_id,local_date.to_string()],attempt_from_row).optional()?)
     }
 
+    /// Bounded, workspace-scoped timing history. Attempts already outlive raw evidence retention.
+    /// Deliberately omit errors and arbitrary provenance, which may contain private diagnostics.
+    pub fn generation_history(&self, workspace_id: &str, limit: usize) -> Result<Vec<Value>> {
+        anyhow::ensure!(
+            (1..=100).contains(&limit),
+            "generation history limit must be between 1 and 100"
+        );
+        let conn = self.connect()?;
+        let mut statement=conn.prepare("SELECT a.id,a.local_date,a.operation_type,a.state,a.started_at,a.finished_at,a.timeout_seconds,a.reference_mode,a.completed_groups,a.total_groups,a.failure_code,p.provenance_json
+            FROM generation_attempts a LEFT JOIN generation_provenance p ON p.kind='attempt' AND p.record_id=a.id
+            WHERE a.workspace_id=?1 ORDER BY a.started_at DESC,a.rowid DESC LIMIT ?2")?;
+        let records=statement.query_map(params![workspace_id,limit as i64],|row| {
+            let state:String=row.get(3)?;
+            let started_at:String=row.get(4)?;
+            let finished_at:Option<String>=row.get(5)?;
+            let elapsed_ms=if state=="running" {None}else {
+                finished_at.as_deref().and_then(|finished| {
+                    let started=DateTime::parse_from_rfc3339(&started_at).ok()?;
+                    let finished=DateTime::parse_from_rfc3339(finished).ok()?;
+                    let elapsed=finished.signed_duration_since(started).num_milliseconds();
+                    (elapsed>=0).then_some(elapsed)
+                })
+            };
+            let total_groups:i64=row.get(9)?;
+            let provenance:Option<String>=row.get(11)?;
+            let model_selection=provenance.as_deref().and_then(|text|serde_json::from_str::<Value>(text).ok()).and_then(|provenance| {
+                let mut selected=serde_json::Map::new();
+                for field in ["connection_id","provider","model","profile","configuration_digest"] {
+                    if let Some(value)=provenance.get(field).and_then(Value::as_str).filter(|value|!value.is_empty() && value.len()<=256) {
+                        if field=="configuration_digest" && (value.len()!=64 || !value.bytes().all(|byte|byte.is_ascii_hexdigit())) {continue;}
+                        selected.insert(field.to_owned(),json!(value));
+                    }
+                }
+                (!selected.is_empty()).then_some(Value::Object(selected))
+            });
+            let failure_code=row.get::<_,Option<String>>(10)?.filter(|code|!code.is_empty() && code.len()<=64 && code.bytes().all(|byte|byte.is_ascii_lowercase()||byte.is_ascii_digit()||byte==b'_'));
+            Ok(json!({"id":row.get::<_,String>(0)?,"local_date":row.get::<_,String>(1)?,"operation_type":row.get::<_,String>(2)?,"state":state,"started_at":started_at,"finished_at":finished_at,"elapsed_ms":elapsed_ms,"timeout_seconds":row.get::<_,i64>(6)?,"reference_mode":row.get::<_,String>(7)?,"completed_groups":row.get::<_,i64>(8)?,"total_groups":total_groups,"failure_code":failure_code,"inference_progress":if total_groups>0 {"recorded"}else{"unknown_or_not_recorded"},"model_selection":model_selection}))
+        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
     pub fn active_generation_attempt(&self) -> Result<Option<Value>> {
         Ok(self.connect()?.query_row(&format!("SELECT {ATTEMPT_COLUMNS} FROM generation_attempts WHERE state='running' LIMIT 1"),[],attempt_from_row).optional()?)
     }
@@ -205,6 +246,155 @@ fn attempt_from_row(row: &Row<'_>) -> rusqlite::Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timing_history_keeps_backward_or_invalid_clock_durations_unknown() {
+        let (store, workspace, date) = fixture();
+        let now = Utc::now();
+        let attempt = store
+            .create_generation_attempt(&workspace, date, "manual", 1200, now)
+            .unwrap();
+        let id = attempt["id"].as_str().unwrap();
+        store
+            .finish_generation_attempt(id, "succeeded", None, now)
+            .unwrap();
+        assert_eq!(
+            store.generation_history(&workspace, 100).unwrap()[0]["elapsed_ms"],
+            0
+        );
+        for (started, finished) in [
+            ("2026-10-15T10:00:01Z", Some("2026-10-15T10:00:00Z")),
+            ("invalid-start-clock", Some("2026-10-15T10:00:00Z")),
+            ("2026-10-15T10:00:00Z", Some("invalid-finish-clock")),
+            ("2026-10-15T10:00:00Z", None),
+        ] {
+            store
+                .connect()
+                .unwrap()
+                .execute(
+                    "UPDATE generation_attempts SET started_at=?2,finished_at=?3 WHERE id=?1",
+                    params![id, started, finished],
+                )
+                .unwrap();
+            let records = store.generation_history(&workspace, 100).unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0]["state"], "succeeded");
+            assert!(
+                records[0]["elapsed_ms"].is_null(),
+                "invalid or backward clocks must not become a misleading zero duration"
+            );
+        }
+    }
+
+    #[test]
+    fn durable_model_timing_history_is_workspace_scoped_bounded_and_safe() {
+        let (store, workspace, date) = fixture();
+        let start = Utc::now();
+        let first = store
+            .create_generation_attempt_with_references(
+                &workspace, date, "manual", 1200, "none", start,
+            )
+            .unwrap();
+        let first_id = first["id"].as_str().unwrap();
+        store.set_generation_attempt_provenance(first_id,&json!({"connection_id":"provider-one","provider":"Local","model":"test-model","profile":"max_tokens","configuration_digest":"a".repeat(64),"api_key":"private-history-sentinel","prompt":"private-history-sentinel","nested":{"secret":"private-history-sentinel"}})).unwrap();
+        store
+            .update_generation_attempt_progress(first_id, 2, 2, false)
+            .unwrap();
+        store
+            .finish_generation_attempt(
+                first_id,
+                "succeeded",
+                None,
+                start + chrono::Duration::milliseconds(1500),
+            )
+            .unwrap();
+        let other = store
+            .create_pending_workspace_profile(
+                "other-binding",
+                "UTC",
+                "Daily",
+                "{date}.md",
+                None,
+                "markdown",
+            )
+            .unwrap();
+        let outside = store
+            .create_generation_attempt(
+                &other.id,
+                date,
+                "scheduled",
+                1200,
+                start + chrono::Duration::seconds(2),
+            )
+            .unwrap();
+        store
+            .finish_generation_attempt(
+                outside["id"].as_str().unwrap(),
+                "succeeded",
+                None,
+                start + chrono::Duration::seconds(3),
+            )
+            .unwrap();
+        let legacy = store
+            .create_generation_attempt(
+                &workspace,
+                date,
+                "scheduled",
+                1200,
+                start + chrono::Duration::seconds(4),
+            )
+            .unwrap();
+        store
+            .finish_generation_attempt_with_failure(
+                legacy["id"].as_str().unwrap(),
+                "failed",
+                Some("private-history-sentinel"),
+                Some("model_failed"),
+                start + chrono::Duration::seconds(5),
+            )
+            .unwrap();
+        let running = store
+            .create_generation_attempt(
+                &workspace,
+                date,
+                "manual",
+                1200,
+                start + chrono::Duration::seconds(6),
+            )
+            .unwrap();
+        let reopened = Store::open(store.database_path().to_owned()).unwrap();
+        let records = reopened.generation_history(&workspace, 100).unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0]["id"], running["id"]);
+        assert!(records[0]["elapsed_ms"].is_null());
+        assert_eq!(records[1]["elapsed_ms"], 1000);
+        assert!(records[1]["model_selection"].is_null());
+        assert_eq!(records[1]["failure_code"], "model_failed");
+        assert_eq!(records[1]["inference_progress"], "unknown_or_not_recorded");
+        assert_eq!(records[2]["elapsed_ms"], 1500);
+        assert_eq!(records[2]["model_selection"]["model"], "test-model");
+        assert_eq!(records[2]["reference_mode"], "none");
+        assert_eq!(records[2]["inference_progress"], "recorded");
+        assert!(
+            !serde_json::to_string(&records)
+                .unwrap()
+                .contains("private-history-sentinel")
+        );
+        assert!(records.iter().all(|record| record.get("error").is_none()));
+        assert_eq!(reopened.generation_history(&workspace, 2).unwrap().len(), 2);
+        assert_eq!(
+            reopened.generation_history(&other.id, 100).unwrap().len(),
+            1
+        );
+        assert!(
+            reopened
+                .generation_history("unknown-workspace", 100)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(reopened.generation_history(&workspace, 0).is_err());
+        assert!(reopened.generation_history(&workspace, 101).is_err());
+    }
 
     #[test]
     fn legacy_failures_keep_actionable_recovery_after_upgrade() {

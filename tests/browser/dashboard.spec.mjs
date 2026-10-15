@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { isPlainLinkClick } from "../../crates/mcp-server/assets/daily-helpers.js";
+import { readableManagedBlock, isPlainLinkClick } from "../../crates/mcp-server/assets/daily-helpers.js";
 
 test("Link interception preserves browser modifier and non-primary behavior", () => {
   expect(isPlainLinkClick({ button: 0 })).toBe(true);
@@ -18,6 +18,7 @@ const dailyAssets = Object.fromEntries(await Promise.all([
   "daily-helpers.js",
   "daily-references.js",
   "daily-settings.js",
+  "daily-generation.js",
   "daily-history.js",
   "daily.css"
 ].map(async name => [
@@ -195,6 +196,7 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
       knowledgeState.ignored = knowledgeState.ignored.filter(item => item.id !== ignoredMatch[1]);
       return route.fulfill({ status: 204 });
     }
+    if (url.pathname === "/api/v2/settings/generation" && request.method() === "GET") return route.fulfill({ json: { connections: [], default: null, credential_storage_available: false } });
     if (url.pathname === "/api/v2/settings/dashboard" && request.method() === "PUT") return route.fulfill({ json: request.postDataJSON() });
     if (url.pathname === "/api/v2/knowledge/folders" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ folders: ["Products/Alpha", "Products/Beta"], limit: 20 }) });
     if (url.pathname === "/api/v2/knowledge/collections/preview" && request.method() === "POST") {
@@ -1654,7 +1656,10 @@ test("Daily can restore a previously excluded excerpt without changing its link"
     snapshot: { id: "context_3", snapshot_digest: "f".repeat(64), created_at: "2026-09-08T10:00:00Z", resolver_version: "exact-v2", used_note_count: 1, resolved_group_count: 1, excerpt_count: 0, diagnostics: {} },
     workstreams: [{ id: "source:codex%2Ffedora|task:test", notes: [{ path: "Products/Alpha.md", title: "Alpha", canonical_link: "[[Products/Alpha]]", attached: true, reason: "saved_mapping", matched_fields: ["product"], excluded: true, excerpt: null }] }]
   } });
+  await mockGenerationSettings(page);
   await openDaily(page);
+  await page.locator("#generation-model-change").click();
+  await page.locator("#generation-model-picker").selectOption({label:"Local / large"});
 
   await page.locator("#context-card > summary").click();
   await expect(page.locator("#context-card")).toContainText("Not sent for this revision.");
@@ -1663,6 +1668,7 @@ test("Daily can restore a previously excluded excerpt without changing its link"
   await choice.check();
   await page.getByRole("button", { name: "Regenerate with adjustments" }).click();
   const generation = requests.find(request => request.path.endsWith("/generate") && request.method === "POST");
+  expect(generation.body).toMatchObject({connection_id:"environment",model:"large"});
   expect(generation.body.context_exclusions).toEqual([]);
   expect(generation.body.expected_revision_id).toBe("revision_1");
 });
@@ -1866,4 +1872,270 @@ test("Knowledge explains an unavailable review without rendering a boolean", asy
   await expect(page.locator("#knowledge-content")).not.toContainText(
     "Names could not be reviewed: true",
   );
+});
+
+function generationSettingsFixture() {
+  return {
+    connections: [
+      {id:"environment",name:"Local",base_url:"http://ollama:11434/v1",read_only:true,credential_present:false,external:false,consent:true,models:[{id:"small",profile:"max_tokens",tested:true},{id:"large",profile:"max_tokens",tested:true}]},
+      {id:"cloud",name:"Cloud",base_url:"https://models.example/v1",read_only:false,credential_present:true,external:true,consent:false,models:[{id:"remote",profile:"max_completion_tokens",tested:true}]},
+    ],
+    default:{connection_id:"environment",model:"small"},
+    credential_storage_available:false,
+  };
+}
+async function mockGenerationSettings(page, settings=generationSettingsFixture()) {
+  await page.route("**/api/v2/settings/generation", route=>route.fulfill({json:settings}));
+  return settings;
+}
+
+test("Today is quiet except failed generation and interrupted Apply, including after status-only polling", async({page})=>{
+  await mockDaily(page);
+  await page.clock.install();
+  let today="2026-09-08";
+  const days=["in_review","missed","notes_unreviewed","scheduled","generating","update_available","generation_failed","apply_attention"].map(status=>({local_date:"2026-09-08",status}));
+  await page.route("**/api/v2/daily/overview",route=>route.fulfill({json:{today,days}}));
+  await openDaily(page);
+  await expect(page.locator("#attention-summary")).toHaveText("Needs attention (2)");
+  await page.locator("#attention-panel summary").click();
+  await expect(page.locator(".attention-item")).toHaveCount(2);
+  today="2026-09-09";
+  await page.clock.runFor(11000);
+  await expect(page.locator("#attention-summary")).toHaveText("Needs attention (8)");
+  await expect(page.locator("#day")).toHaveValue("2026-09-08");
+});
+
+test("Apply reading hides only ownership wrappers and retains exact raw review",async({page})=>{
+  await mockDaily(page);await openDaily(page);
+  await page.getByRole("button",{name:"Review & save"}).click();
+  await expect(page.locator("#apply-before")).toHaveText("Old");
+  await expect(page.locator("#apply-after")).toHaveText("Reviewed Daily");
+  await expect(page.locator("#apply-after-raw")).toBeHidden();
+  await page.locator("#apply-technical-details summary").click();
+  await expect(page.locator("#apply-after-raw")).toContainText("<!-- log-inbox:daily:day_fixture:begin -->");
+});
+
+test("Model override survives navigation and Settings while draft provenance stays distinct",async({page})=>{
+  await mockDaily(page);await mockGenerationSettings(page);
+  await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:{...dailyResponse(),generation_provenance:{connection_id:"environment",provider:"Local",model:"small"}}}));
+  await openDaily(page);
+  await expect(page.locator("#next-generation-model")).toContainText("Local / small");
+  await expect(page.locator("#draft-generation-model")).toHaveText("Generated with Local / small");
+  await page.locator("#generation-model-change").click();
+  await expect(page.locator("#generation-model-picker")).toBeFocused();
+  await page.locator("#generation-model-picker").selectOption({label:"Local / large"});
+  await page.locator("#settings").click();
+  await settingsSection(page,"generation");
+  await expect(page.locator("#generation-default")).toHaveValue(JSON.stringify({connection_id:"environment",model:"small"}));
+  await page.locator("#close-settings").click();
+  await expect(page.locator("#next-generation-model")).toContainText("Local / large · this attempt only");
+  await page.locator("#previous-day").click();
+  await page.locator("#next-day").click();
+  await expect(page.locator("#next-generation-model")).toContainText("Local / large");
+  await page.reload();
+  await expect(page.locator("#next-generation-model")).toContainText("Local / small · saved default");
+});
+
+test("Retry uses the failed model unless a different model is explicitly chosen",async({page})=>{
+  await mockDaily(page);await mockGenerationSettings(page);
+  const attempt={id:"failed_attempt",state:"failed",local_date:"2026-09-08",model_selection:{connection_id:"environment",provider:"Local",model:"large"},error:"Service unavailable"};
+  await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:{...dailyResponse(),generation_attempt:attempt}}));
+  const bodies=[];
+  await page.route("**/api/v2/daily/2026-09-08/generate",route=>{bodies.push(route.request().postDataJSON());return route.fulfill({status:503,json:{error:"Unavailable"}});});
+  await openDaily(page);
+  await page.locator("#retry-generation").click();
+  await expect.poll(()=>bodies[0]).toMatchObject({connection_id:"environment",model:"large"});
+  await page.locator("#generation-model-change").click();
+  await page.locator("#generation-model-picker").selectOption({label:"Local / small"});
+  await page.locator("#retry-generation").click();
+  await expect.poll(()=>bodies[1]).toMatchObject({connection_id:"environment",model:"small"});
+});
+
+test("Model-only regeneration confirms before replacing structured edits",async({page})=>{
+  await mockDaily(page);await mockGenerationSettings(page);
+  await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:dailyResponse("2026-09-08",{origin:"structured_edit"})}));
+  let sent=0;
+  await page.route("**/api/v2/daily/2026-09-08/generate",route=>{sent++;return route.fulfill({status:503,json:{error:"Unavailable"}});});
+  await openDaily(page);
+  await page.locator("#generation-model-change").click();
+  await page.locator("#generation-model-picker").selectOption({label:"Local / large"});
+  page.once("dialog",dialog=>dialog.dismiss());
+  await page.locator("#generate").click();
+  expect(sent).toBe(0);
+  page.once("dialog",dialog=>dialog.accept());
+  await page.locator("#generate").click();
+  await expect.poll(()=>sent).toBe(1);
+});
+
+test("Cloud default requires consent and model settings failure leaves Daily usable",async({page})=>{
+  await mockDaily(page);const settings=await mockGenerationSettings(page);
+  await page.route("**/api/v2/settings/generation/connections/cloud/consent",route=>{settings.connections[1].consent=true;return route.fulfill({json:{saved:true}});});
+  await openDaily(page);await page.locator("#settings").click();await settingsSection(page,"generation");
+  await page.locator("#generation-default").selectOption({label:"Cloud / remote"});
+  await expect(page.locator("#generation-save-default")).toBeDisabled();
+  await expect(page.locator("#generation-default-help")).toContainText("scheduled preparation");
+  await page.locator("#generation-manage-connections summary").click();
+  // Keep the unsaved default choice while choosing the connection to authorize.
+  page.once("dialog",dialog=>dialog.accept());
+  await page.locator("#generation-connection-list").selectOption("cloud");
+  await expect(page.locator("#generation-credential-help")).toContainText("never returned");
+  await expect(page.locator("#generation-api-key")).toHaveValue("");
+  await page.locator("#generation-consent-confirm").check();
+  await page.locator("#generation-consent-button").click();
+  await expect(page.locator("#generation-save-default")).toBeEnabled();
+  page.once("dialog",dialog=>dialog.accept());
+  await page.locator("#close-settings").click();
+  await page.route("**/api/v2/settings/generation",route=>route.fulfill({status:503,json:{error:"Provider settings unavailable"}}));
+  await page.reload();
+  await expect(page.locator("#daily-app")).toBeVisible();
+  await expect(page.locator("#copy-draft")).toBeEnabled();
+  await expect(page.locator("#review-apply")).toBeEnabled();
+});
+
+test("Readable wrapper removal preserves fenced marker examples and nonmatching blocks",()=>{
+  const begin="<!-- log-inbox:daily:day_x:begin -->";const end="<!-- log-inbox:daily:day_x:end -->";
+  const body=`Example\n\`\`\`markdown\n${begin}\n${end}\n\`\`\``;
+  expect(readableManagedBlock(`${begin}\n${body}\n${end}`,"day_x")).toBe(body);
+  expect(readableManagedBlock(body,"day_x")).toBe(body);
+  expect(readableManagedBlock(`${begin}\r\nBody\r\n${end}`,"day_x")).toBe("Body");
+  expect(readableManagedBlock(`${begin}\nBody\n${end}\n`,"day_x")).toBe("Body");
+  expect(readableManagedBlock(`${begin}\r\nBody\r\n${end}\r\n`,"day_x")).toBe("Body");
+  expect(readableManagedBlock(`${begin}\nBody\n${end}`,"different")).toContain(begin);
+});
+
+
+test("Unsaved new connection remains Add mode when saving a different default",async({page})=>{
+  await mockDaily(page);const settings=await mockGenerationSettings(page);const writes=[];
+  await page.route("**/api/v2/settings/generation/default",route=>{settings.default=route.request().postDataJSON();return route.fulfill({json:{saved:true}});});
+  await page.route("**/api/v2/settings/generation/connections",route=>{writes.push({method:route.request().method(),body:route.request().postDataJSON()});return route.fulfill({json:{saved:true,id:"new"}});});
+  await openDaily(page);await page.locator("#settings").click();await settingsSection(page,"generation");
+  await page.locator("#generation-manage-connections summary").click();
+  await page.locator("#generation-connection-list").selectOption("");
+  await page.locator("#generation-connection-name").fill("New server");
+  await page.locator("#generation-endpoint").fill("https://new.example/v1");
+  await page.locator("#generation-default").selectOption({label:"Local / large"});
+  await page.locator("#generation-save-default").click();
+  await expect(page.locator("#generation-settings-notice")).toContainText("Default saved");
+  await expect(page.locator("#generation-connection-list")).toHaveValue("");
+  await expect(page.locator("#generation-connection-name")).toHaveValue("New server");
+  await page.locator("#generation-save-connection").click();
+  await expect.poll(()=>writes).toEqual([{method:"POST",body:{name:"New server",base_url:"https://new.example/v1"}}]);
+});
+
+
+test("Successful one-attempt model choice returns to the saved default",async({page})=>{
+  await mockDaily(page);await mockGenerationSettings(page);
+  let completed=false;
+  const attempt={id:"chosen_attempt",local_date:"2026-09-08",state:"running",model_selection:{connection_id:"environment",provider:"Local",model:"large"}};
+  await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:{...dailyResponse(),...(completed?{generation_attempt:{...attempt,state:"succeeded"},generation_provenance:attempt.model_selection}:{})}}));
+  await page.route("**/api/v2/daily/2026-09-08/generate",route=>{completed=true;return route.fulfill({status:202,json:{attempt}});});
+  await openDaily(page);
+  await page.locator("#generation-model-change").click();
+  await page.locator("#generation-model-picker").selectOption({label:"Local / large"});
+  await page.locator("#generate").click();
+  await expect(page.locator("#next-generation-model")).toContainText("Local / small · saved default");
+  await expect(page.locator("#draft-generation-model")).toHaveText("Generated with Local / large");
+});
+
+test("Generation settings stays readable and operable on a narrow screen",async({page},testInfo)=>{
+  await page.setViewportSize({width:375,height:812});
+  await mockDaily(page);await mockGenerationSettings(page);
+  await openDaily(page);
+  await page.locator("#settings").click();
+  await settingsSection(page,"generation");
+  await expect(page.locator("#settings-generation-title")).toBeFocused();
+  await page.locator("#generation-manage-connections summary").click();
+  await page.locator("#generation-connection-list").selectOption("");
+  await page.locator("#generation-connection-name").fill("Another model server");
+  await page.locator("#generation-endpoint").fill("https://models.example/v1");
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);
+  await expect(page.locator("#generation-save-connection")).toBeEnabled();
+  await expect(page.locator("#generation-settings-unsaved")).toContainText("Unsaved connection");
+  await page.screenshot({path:testInfo.outputPath("generation-mobile.png"),fullPage:true});
+});
+
+test("Expired activity preserves safe amendments while explicit model changes reach the server",async({page})=>{
+  await mockDaily(page);await mockGenerationSettings(page);
+  const data=dailyResponse();data.automated_evidence.events=[];data.current_snapshot={id:"retained_snapshot"};data.generation_provenance={connection_id:"environment",provider:"Local",model:"small"};
+  await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:data}));
+  const bodies=[];
+  await page.route("**/api/v2/daily/2026-09-08/generate",route=>{bodies.push(route.request().postDataJSON());return route.fulfill({status:409,json:{error:"Source evidence expired; existing draft preserved"}});});
+  await openDaily(page);await page.locator("#generate").click();
+  await expect.poll(()=>bodies.length).toBe(1);
+  expect(bodies[0].connection_id).toBeUndefined();
+  await page.locator("#generation-model-change").click();await page.locator("#generation-model-picker").selectOption({label:"Local / large"});
+  await page.locator("#generate").click();
+  await expect.poll(()=>bodies[1]).toMatchObject({connection_id:"environment",model:"large"});
+});
+
+
+test("Model discovery uses a browser Origin-bearing authenticated POST",async({page})=>{
+  await mockDaily(page);await mockGenerationSettings(page);
+  let received;
+  await page.route("**/api/v2/settings/generation/connections/environment/models",route=>{
+    received={method:route.request().method(),origin:route.request().headers().origin,csrf:route.request().headers()["x-csrf-token"]};
+    if(received.method!=="POST"||received.origin!=="http://daily.log-inbox.test"||!received.csrf)return route.fulfill({status:403,json:{error:"Origin header is required"}});
+    return route.fulfill({json:{models:["small","large"]}});
+  });
+  await openDaily(page);await page.locator("#settings").click();await settingsSection(page,"generation");
+  await page.locator("#generation-manage-connections summary").click();await page.locator("#generation-discover-models").click();
+  await expect(page.locator("#generation-settings-notice")).toContainText("2 models found");
+  expect(received).toEqual({method:"POST",origin:"http://daily.log-inbox.test",csrf:"csrf_fixture"});
+});
+
+
+test("Failed sign-in explains owner-secret mismatch visibly and permits a successful retry",async({page})=>{
+  await mockDaily(page);let wrong=true;
+  await page.route("**/api/v2/auth/login",route=>wrong?route.fulfill({status:401,json:{error:"owner secret is not valid"}}):route.fallback());
+  await page.goto("http://daily.log-inbox.test/");
+  await page.getByLabel("Owner secret",{exact:true}).fill("synthetic wrong key");
+  await page.getByRole("button",{name:"Sign in",exact:true}).click();
+  await expect(page.locator("#login-error")).toBeVisible();
+  await expect(page.locator("#login-error")).toContainText("Activity and model API keys",{ignoreCase:true});
+  await expect(page.locator("#daily-app")).toBeHidden();
+  await expect(page.getByRole("button",{name:"Sign in",exact:true})).toBeEnabled();
+  wrong=false;await page.getByLabel("Owner secret",{exact:true}).fill("fixture owner secret");
+  await page.getByRole("button",{name:"Sign in",exact:true}).click();
+  await expect(page.locator("#daily-app")).toBeVisible();
+  await expect(page.locator("#login-error")).toBeHidden();
+});
+
+
+test("Generation timing history is keyboard accessible, safe on narrow screens and downloadable", async ({ page }) => {
+  await mockDaily(page);
+  await mockGenerationSettings(page);
+  await page.setViewportSize({width:390,height:844});
+  await page.route("**/api/v2/settings/generation/history", route => route.fulfill({json:{limit:100,attempts:[
+    {id:"attempt_one",local_date:"2026-10-14",state:"succeeded",started_at:"2026-10-15T08:39:15Z",finished_at:"2026-10-15T08:46:11Z",elapsed_ms:416000,completed_groups:15,total_groups:15,reference_mode:"configured",model_selection:{provider:"Local",model:"qwen2.5:1.5b"}},
+    {id:"legacy",local_date:"2026-10-13",state:"interrupted",elapsed_ms:null,completed_groups:0,total_groups:0,reference_mode:"none",model_selection:null},
+    {id:"hostile",local_date:"2026-10-12",state:"failed",elapsed_ms:1000,completed_groups:0,total_groups:1,model_selection:{provider:"Local",model:"<img src=x onerror=alert(1)>"}}
+  ]}}));
+  await openDaily(page);await page.locator("#settings").click();
+  await settingsSection(page,"generation");
+  const summary=page.locator("#generation-timing-history summary");
+  await summary.focus();await page.keyboard.press("Enter");
+  await expect(page.locator("#generation-history-list li")).toHaveCount(3);
+  await expect(page.locator("#generation-history-list")).toContainText("6m 56s");
+  await expect(page.locator("#generation-history-list")).toContainText("Unknown model (older attempt)");
+  await expect(page.locator("#generation-history-list")).toContainText("No recorded model progress");
+  await expect(page.locator("#generation-history-list img")).toHaveCount(0);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);
+  const download=page.waitForEvent("download");await page.locator("#generation-history-export").click();
+  const downloaded=await download;
+  expect(downloaded.suggestedFilename()).toBe("generation-timing-records.json");
+  const exported=JSON.parse(await readFile(await downloaded.path(),"utf8"));
+  expect(exported.attempts).toHaveLength(3);
+  expect(exported.attempts[0]).toMatchObject({elapsed_ms:416000,model_selection:{model:"qwen2.5:1.5b"},total_groups:15});
+});
+
+test("Timing history failure is isolated and refresh recovers without changing the draft", async ({ page }) => {
+  await mockDaily(page);await mockGenerationSettings(page);let failed=true;
+  await page.route("**/api/v2/settings/generation/history",route=>failed?route.fulfill({status:503,json:{error:"unavailable"}}):route.fulfill({json:{attempts:[],limit:100}}));
+  await openDaily(page);await page.locator("#settings").click();await settingsSection(page,"generation");
+  await page.locator("#generation-timing-history summary").click();
+  await expect(page.locator("#generation-history-status")).toContainText("could not be loaded");
+  failed=false;await page.locator("#generation-history-refresh").click();
+  await expect(page.locator("#generation-history-status")).toHaveText("No generation timing records yet. New attempts will appear here.");
+  await page.getByRole("button",{name:"Back to Daily",exact:false}).click();
+  await expect(page.locator("#draft-card")).toBeVisible();
 });

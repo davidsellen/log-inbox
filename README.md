@@ -110,6 +110,10 @@ The override accepts the three host paths documented in `.env.migration.example`
 The operation is journaled and idempotent. If interrupted, opening Settings exposes the same operation for safe completion. Its verified SQLite backup follows the separately disclosed recovery-retention window.
 After it completes, restart with ordinary `docker compose up --build`; the migration mounts are no longer needed.
 
+## Generation models
+
+Use **Settings → Generation** to save tested local or cloud models and choose a default. Daily can select another model for one attempt. Existing environment configuration remains available; external generation requires explicit activity-data consent, and reference-note excerpts stay local. See [Choosing generation models](docs/generation-models.md) for connection setup, optional encrypted API-key storage, and recovery.
+
 ## Configuration
 
 The essential settings are:
@@ -119,6 +123,7 @@ The essential settings are:
 - `LOG_INBOX_WORKSPACE_HOST_DIR`: host path of the existing Markdown workspace.
 - `LOG_INBOX_WORKSPACE_DIR`: container mount path, normally `/workspace`.
 - `LOG_INBOX_ALLOWED_HOSTS` and `LOG_INBOX_ALLOWED_ORIGINS`: exact dashboard request boundaries.
+- Optional `LOG_INBOX_LLM_MASTER_KEY_FILE`: separately mounted encryption key for UI-managed provider credentials; no-key connections and environment API keys do not need it.
 - `LOG_INBOX_LLM_BASE_URL`, `LOG_INBOX_LLM_MODEL`, `LOG_INBOX_LLM_CONTEXT_LENGTH` (default `32768`), `LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS` (default `1200`), and optional `LOG_INBOX_LLM_API_KEY`: model connection used for draft generation. The context and timeout must accommodate the bounded evidence prompt and CPU inference time.
 
 The collector and dashboard bind to loopback by default. Put them behind an authenticated secure route before allowing nonlocal access.

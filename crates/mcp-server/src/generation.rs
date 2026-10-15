@@ -27,6 +27,8 @@ pub(super) struct Attempt {
     date: NaiveDate,
     pub workspace_id: String,
     pub reference_mode: ReferenceMode,
+    pub model: Option<providers::ResolvedModel>,
+    model_captured: bool,
     operation: String,
     stage_clock: Mutex<(String, std::time::Instant)>,
     pub save_retries: Arc<Mutex<u8>>,
@@ -82,6 +84,33 @@ pub(super) fn save_with_retries<T>(
 }
 
 impl Attempt {
+    pub fn model_provenance(&self) -> Value {
+        self.model
+            .as_ref()
+            .map(|m| {
+                let mut value = m.provenance.clone();
+                value["fingerprint"] = json!(m.fingerprint);
+                value
+            })
+            .unwrap_or(Value::Null)
+    }
+
+    pub fn capture_model(
+        &mut self,
+        selected: Option<providers::ResolvedModel>,
+    ) -> Result<(), ApiError> {
+        if self.model_captured {
+            return Err(ApiError::conflict("Generation model already captured"));
+        }
+        self.model = selected;
+        self.model_captured = true;
+        self.state
+            .store
+            .set_generation_attempt_provenance(&self.id, &self.model_provenance())
+            .map_err(database_error)?;
+        Ok(())
+    }
+
     pub fn save<T>(&self, operation: impl FnMut() -> anyhow::Result<T>) -> Result<T, ApiError> {
         save_with_retries(&self.id, self.deadline, &self.save_retries, operation)
     }
@@ -225,6 +254,8 @@ pub(super) fn begin_with_references(
             date,
             workspace_id: profile.id,
             reference_mode,
+            model: None,
+            model_captured: false,
             operation: operation.to_owned(),
             stage_clock: Mutex::new(("preparing".to_owned(), std::time::Instant::now())),
             save_retries: Arc::new(Mutex::new(0)),
@@ -241,7 +272,14 @@ pub(super) async fn run(
     mut attempt: Attempt,
     _guard: tokio::sync::OwnedMutexGuard<()>,
 ) -> Result<ProposalRevision, ApiError> {
-    let result = generate_daily_candidate_inner(state, date, replace, context, &mut attempt).await;
+    let result = async {
+        if !attempt.model_captured {
+            let selected = resolve_for_day(state, date, None, None).await?;
+            attempt.capture_model(selected)?;
+        }
+        generate_daily_candidate_inner(state, date, replace, context, &mut attempt).await
+    }
+    .await;
     let terminal = attempt.finish(&result)?;
     if state
         .store
@@ -297,4 +335,32 @@ pub(super) async fn cancel(
     Ok(Json(
         json!({"attempt": attempt, "cancel_requested": requested}),
     ))
+}
+
+// Manual-only records must remain usable even when a provider requires repair.
+pub(super) async fn resolve_for_day(
+    state: &AppState,
+    date: NaiveDate,
+    connection_id: Option<&str>,
+    model: Option<&str>,
+) -> Result<Option<providers::ResolvedModel>, ApiError> {
+    let profile = active_refocus_workspace(state)?;
+    if connection_id.is_none() && model.is_none() {
+        let day = state
+            .store
+            .daily_day(&profile.id, date)
+            .map_err(database_error)?;
+        let window =
+            effective_daily_window(date, &profile, day.as_ref()).map_err(ApiError::bad_request)?;
+        if state
+            .store
+            .get_events_between(window.start_utc, window.end_utc, 1)
+            .map_err(database_error)?
+            .events
+            .is_empty()
+        {
+            return Ok(None);
+        }
+    }
+    providers::resolve(state, &profile.id, connection_id, model).await
 }

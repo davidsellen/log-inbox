@@ -1,6 +1,7 @@
 import { $, el, action, isPlainLinkClick } from "./daily-helpers.js";
 // Settings owns destination, automation, and migration forms and requests.
 export function createSettings({
+  generationModels,
   app,
   api,
   selectDay,
@@ -209,7 +210,8 @@ export function createSettings({
     }
   }
   function showSection(section) {
-    section = forms[section] ? section : "general";
+    section = forms[section] || section === "generation" ? section : "general";
+    if (section === "generation") void generationModels.load();
     app.settingsSection = section;
     for (const panel of document.querySelectorAll("[data-settings-section]"))
       panel.hidden = panel.dataset.settingsSection !== section;
@@ -300,7 +302,7 @@ export function createSettings({
         const guidance = message.includes("omitted evidence")
           ? "The model left out evidence links. Retry the day after checking that the source events are still available."
           : message.includes("structured schema")
-            ? "The model returned the wrong shape. Retry once; if it repeats, disable automatic preparation and check the configured local model."
+            ? "The model returned the wrong shape. Retry once; if it repeats, disable automatic preparation and check the selected model."
             : "Preparation could not complete. Retry the day manually to see the full error.";
         detail.append(el("p", "", guidance));
         if (run.last_error) {
@@ -313,6 +315,7 @@ export function createSettings({
         row.append(detail);
         const actions = el("div", "actions");
         actions.append(
+          action("Generation settings", () => openSettings("generation")),
           action("Open day", () => selectDay(run.local_date)),
           action(
             "Retry now",
@@ -636,13 +639,17 @@ export function createSettings({
     openSettings,
     prepare,
     showSection,
-    hasChanges: () => Object.keys(forms).some(dirty) || agentGuidanceDirty(),
+    hasChanges: () =>
+      Object.keys(forms).some(dirty) ||
+      agentGuidanceDirty() ||
+      generationModels.hasChanges(),
     pageNotice,
     discard: () => {
+      generationModels.discard();
       state.initialized = false;
     },
     get saving() {
-      return state.saving;
+      return state.saving || generationModels.saving;
     },
     get workspaceSettings() {
       return state.workspaceSettings;

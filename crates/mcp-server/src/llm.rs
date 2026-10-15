@@ -36,7 +36,7 @@ impl Drop for ModelRequestTiming {
         );
     }
 }
-pub const DAILY_GENERATION_CONTRACT: &str = "daily-structured-v2-batched";
+pub const DAILY_GENERATION_CONTRACT: &str = "daily-structured-v4-required-fact-schema";
 const CONTEXT_METADATA_KEYS: &[&str] = &[
     "event_type",
     "entry_kind",
@@ -64,16 +64,79 @@ const CONTEXT_METADATA_KEYS: &[&str] = &[
     "workstream",
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestProfile {
+    #[default]
+    MaxTokens,
+    MaxCompletionTokens,
+}
+
+fn shared_request_gate() -> Arc<Semaphore> {
+    static GATE: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| Arc::new(Semaphore::new(1))).clone()
+}
+
+#[derive(Clone)]
 pub struct LlmConfig {
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
+    pub profile: RequestProfile,
+    pub pinned_addresses: Vec<std::net::SocketAddr>,
     request_timeout: Duration,
     request_gate: Arc<Semaphore>,
 }
 
+impl std::fmt::Debug for LlmConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmConfig")
+            .field("model", &self.model)
+            .field("profile", &self.profile)
+            .finish_non_exhaustive()
+    }
+}
 impl LlmConfig {
+    pub fn connection(
+        base_url: String,
+        api_key: Option<String>,
+        model: String,
+        profile: RequestProfile,
+    ) -> Self {
+        Self {
+            base_url,
+            api_key,
+            model,
+            profile,
+            pinned_addresses: Vec::new(),
+            request_timeout: Duration::from_secs(
+                std::env::var("LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS)
+                    .clamp(5, 1800),
+            ),
+            request_gate: shared_request_gate(),
+        }
+    }
+    pub fn client(&self) -> Result<reqwest::Client, String> {
+        let mut builder = reqwest::Client::builder()
+            .timeout(self.request_timeout)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none());
+        if !self.pinned_addresses.is_empty() {
+            let url = reqwest::Url::parse(&self.base_url)
+                .map_err(|_| "Invalid model endpoint".to_owned())?;
+            builder = builder.resolve_to_addrs(
+                url.host_str().ok_or("Missing model host")?,
+                &self.pinned_addresses,
+            );
+        }
+        builder
+            .build()
+            .map_err(|_| "Unable to create model client".to_owned())
+    }
+
     pub fn timeout_seconds(&self) -> u64 {
         self.request_timeout.as_secs()
     }
@@ -94,7 +157,9 @@ impl LlmConfig {
             api_key,
             model,
             request_timeout: Duration::from_secs(request_timeout),
-            request_gate: Arc::new(Semaphore::new(1)),
+            profile: RequestProfile::MaxTokens,
+            pinned_addresses: Vec::new(),
+            request_gate: shared_request_gate(),
         })
     }
 
@@ -105,7 +170,9 @@ impl LlmConfig {
             api_key: None,
             model: "test".to_owned(),
             request_timeout: Duration::from_secs(5),
-            request_gate: Arc::new(Semaphore::new(1)),
+            profile: RequestProfile::MaxTokens,
+            pinned_addresses: Vec::new(),
+            request_gate: shared_request_gate(),
         }
     }
 }
@@ -129,12 +196,35 @@ pub fn knowledge_text_stays_local(config: &LlmConfig) -> bool {
 }
 
 pub fn generation_configuration_digest(config: &LlmConfig) -> String {
-    let value = json!({
+    generation_configuration_digest_with_contract(config, DAILY_GENERATION_CONTRACT, true)
+}
+
+/// Recognize only the legacy v2 contract when checking whether historical evidence expired.
+/// This does not authorize normal generation-cache reuse after a contract change.
+pub fn generation_configuration_matches_legacy_contract(
+    config: &LlmConfig,
+    fingerprint: &str,
+) -> bool {
+    const PREVIOUS: &str = "daily-structured-v2-batched";
+    generation_configuration_digest_with_contract(config, PREVIOUS, true) == fingerprint
+        || (config.profile == RequestProfile::MaxTokens
+            && generation_configuration_digest_with_contract(config, PREVIOUS, false)
+                == fingerprint)
+}
+fn generation_configuration_digest_with_contract(
+    config: &LlmConfig,
+    contract: &str,
+    include_profile: bool,
+) -> String {
+    let mut value = json!({
         "base_url": config.base_url,
         "model": config.model,
         "credential_present": config.api_key.is_some(),
-        "contract": DAILY_GENERATION_CONTRACT,
+        "contract": contract,
     });
+    if include_profile {
+        value["profile"] = json!(config.profile);
+    }
     format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&value).expect("LLM configuration serializes"))
@@ -397,11 +487,15 @@ fn deduplicate_fact_field(facts: &mut Vec<StructuredFact>) {
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<ChatChoice>,
+    #[serde(default)]
+    usage: Value,
 }
 
 #[derive(Debug, Deserialize)]
 struct ChatChoice {
     message: ChatMessage,
+    #[serde(default)]
+    finish_reason: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -429,6 +523,7 @@ struct PromptEvent<'a> {
 #[derive(Serialize)]
 struct DailyPromptGroup<'a> {
     group_id: String,
+    required_nonempty_arrays: Vec<&'static str>,
     events: Vec<DailyPromptEvent<'a>>,
 }
 
@@ -521,11 +616,7 @@ async fn suggest_automated_summary_once(
         .acquire()
         .await
         .map_err(|_| "LLM request queue closed".to_owned())?;
-    let client = reqwest::Client::builder()
-        .timeout(config.request_timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| error.to_string())?;
+    let client = config.client()?;
 
     if args.mode == "daily-consolidation" {
         let groups = event_groups(&events, &args);
@@ -545,8 +636,27 @@ async fn suggest_automated_summary_once(
                 prompt_bytes = prompt.len(),
                 "LLM daily batch started"
             );
-            let content = request_model(&client, config, prompt, &group_ids).await?;
-            let parsed = parse_daily_batch(&content, &batch_args, &batch);
+            let (parsed, response_bytes) = match request_model(
+                &client,
+                config,
+                prompt,
+                &group_ids,
+                &required_daily_fact_arrays(batch.iter()),
+            )
+            .await
+            {
+                Ok(content) => (
+                    parse_daily_batch(&content, &batch_args, &batch),
+                    Some(content.len()),
+                ),
+                Err(error)
+                    if count > 1
+                        && daily_model_failure_code(&error) == Some("model_output_truncated") =>
+                {
+                    (Err(error), None)
+                }
+                Err(error) => return Err(error),
+            };
             match parsed {
                 Ok(mut draft) => {
                     workstreams.append(&mut draft.workstreams);
@@ -567,25 +677,49 @@ async fn suggest_automated_summary_once(
                         let ids = event_groups(&single, &single_args)
                             .into_keys()
                             .collect::<Vec<_>>();
-                        let content = request_model(&client, config, prompt, &ids).await?;
-                        let mut draft = parse_daily_batch(&content, &single_args, &single)?;
+                        let content = request_model(
+                            &client,
+                            config,
+                            prompt,
+                            &ids,
+                            &required_daily_fact_arrays(single.iter()),
+                        )
+                        .await?;
+                        let mut draft = parse_daily_batch(&content, &single_args, &single)
+                            .map_err(|error| {
+                                safe_daily_validation_failure(
+                                    &error,
+                                    1,
+                                    single.len(),
+                                    Some(content.len()),
+                                )
+                            })?;
                         workstreams.append(&mut draft.workstreams);
                         open_questions.append(&mut draft.open_questions);
                         progress(workstreams.len(), groups.len(), true)?;
                     }
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(safe_daily_validation_failure(
+                        &error,
+                        count,
+                        batch.len(),
+                        response_bytes,
+                    ));
+                }
             }
         }
         let draft = StructuredDailyDraft {
             workstreams,
             open_questions,
         };
-        return daily_proposal(draft, &args, &events, &config.base_url);
+        return daily_proposal(draft, &args, &events, &config.base_url).map_err(|error| {
+            safe_daily_validation_failure(&error, groups.len(), events.len(), None)
+        });
     }
 
     let prompt = build_prompt(&args, &events)?;
-    let content = request_model(&client, config, prompt, &[]).await?;
+    let content = request_model(&client, config, prompt, &[], &[]).await?;
     parse_proposal(&content, &args, &events, &config.base_url)
 }
 
@@ -594,6 +728,7 @@ async fn request_model(
     config: &LlmConfig,
     prompt: String,
     group_ids: &[String],
+    required_arrays: &[&str],
 ) -> Result<String, String> {
     let group_count = group_ids.len();
     let daily = group_count > 0;
@@ -604,6 +739,11 @@ async fn request_model(
     };
     let response_format = if daily {
         let mut format = batch_response_format(group_count);
+        if group_count == 1 {
+            for field in required_arrays {
+                format["json_schema"]["schema"]["properties"][*field]["minItems"] = json!(1);
+            }
+        }
         if group_count > 1 {
             format["json_schema"]["schema"]["properties"]["workstreams"]["items"]["properties"]["id"]
                 ["enum"] = json!(group_ids);
@@ -613,30 +753,43 @@ async fn request_model(
         json!({ "type": "json_object" })
     };
     let temperature = if daily { 0.0 } else { 0.2 };
+    let mut body = json!({
+        "model": config.model,
+        "temperature": temperature,
+        "max_tokens": if daily { (512 * group_count).min(2048) } else { 2048 },
+        "response_format": response_format,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You summarize bounded redacted log events into concise Markdown proposals. Return only JSON matching the requested schema. Never include raw stack traces, secrets, or long log dumps."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    });
+    if config.profile == RequestProfile::MaxCompletionTokens {
+        let object = body.as_object_mut().expect("request object");
+        let limit = object.remove("max_tokens").expect("token limit");
+        object.remove("temperature");
+        object.insert("max_completion_tokens".to_owned(), limit);
+    }
     let mut request = client
         .post(format!("{}/chat/completions", config.base_url))
-        .json(&json!({
-            "model": config.model,
-            "temperature": temperature,
-            "max_tokens": if daily { (512 * group_count).min(2048) } else { 2048 },
-            "response_format": response_format,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You summarize bounded redacted log events into concise Markdown proposals. Return only JSON matching the requested schema. Never include raw stack traces, secrets, or long log dumps."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
-        }));
+        .json(&body);
 
     if let Some(api_key) = &config.api_key {
         request = request.bearer_auth(api_key);
     }
 
-    let mut response = request.send().await.map_err(|error| error.to_string())?;
+    let mut response = request.send().await.map_err(|error| {
+        if error.is_timeout() {
+            "Model request timed out".to_owned()
+        } else {
+            "Model connection failed".to_owned()
+        }
+    })?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("LLM provider returned HTTP {status}"));
@@ -648,25 +801,157 @@ async fn request_model(
         return Err("LLM response exceeded the configured size limit".to_owned());
     }
     let mut response_bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "Model response transfer failed".to_owned())?
+    {
         if response_bytes.len() + chunk.len() > MAX_LLM_RESPONSE_BYTES {
             return Err("LLM response exceeded the configured size limit".to_owned());
         }
         response_bytes.extend_from_slice(&chunk);
     }
-    let chat: ChatResponse = serde_json::from_slice(&response_bytes)
-        .map_err(|error| format!("LLM response envelope was invalid: {error}"))?;
-    let content = chat
+    let chat: ChatResponse = serde_json::from_slice(&response_bytes).map_err(|_| {
+        tracing::warn!(
+            failure_kind = "response_envelope",
+            group_count,
+            response_bytes = response_bytes.len(),
+            "Model response rejected"
+        );
+        DAILY_ENVELOPE_ERROR.to_owned()
+    })?;
+    let choice = chat
         .choices
         .first()
-        .map(|choice| choice.message.content.clone())
-        .ok_or_else(|| "LLM response did not include a choice".to_owned())?;
+        .ok_or_else(|| DAILY_ENVELOPE_ERROR.to_owned())?;
+    let finish_reason = match choice.finish_reason.as_str() {
+        None => "unspecified",
+        Some("stop") => "stop",
+        Some("length") => "length",
+        Some("content_filter") => "content_filter",
+        Some("tool_calls") => "tool_calls",
+        Some(_) => "other",
+    };
+    tracing::info!(
+        group_count,
+        response_bytes = response_bytes.len(),
+        completion_bytes = choice.message.content.len(),
+        finish_reason,
+        prompt_tokens = ?chat.usage.get("prompt_tokens").and_then(|value| value.as_u64()),
+        completion_tokens = ?chat.usage.get("completion_tokens").and_then(|value| value.as_u64()),
+        "LLM response received"
+    );
     timing.completed = true;
-    Ok(content)
+    if finish_reason == "length" {
+        return Err(DAILY_TRUNCATED_ERROR.to_owned());
+    }
+    Ok(choice.message.content.clone())
+}
+
+/// Exercise the same production prompt, schema request and strict parser with synthetic evidence.
+pub async fn test_compatibility(config: &LlmConfig) -> Result<(), String> {
+    let event = StoredLogEvent {
+        id: "compatibility-event".to_owned(),
+        received_at: chrono::Utc::now(),
+        timestamp: chrono::Utc::now(),
+        source: "synthetic/test".to_owned(),
+        level: "info".to_owned(),
+        message: "Validated the synthetic connection test.".to_owned(),
+        metadata: Map::from_iter([
+            ("task_id".to_owned(), json!("compatibility")),
+            ("event_type".to_owned(), json!("complete")),
+        ]),
+        fingerprint: None,
+        truncated: false,
+        reviewed: false,
+    };
+    let mut decision = event.clone();
+    decision.id = "compatibility-decision".to_owned();
+    decision.message =
+        "Selected the standard library to avoid an unnecessary dependency.".to_owned();
+    decision
+        .metadata
+        .insert("event_type".to_owned(), json!("decision"));
+    decision
+        .metadata
+        .insert("decision".to_owned(), json!("Use the standard library"));
+    let mut validation = event.clone();
+    validation.id = "compatibility-validation".to_owned();
+    validation.message = "The synthetic regression check passed.".to_owned();
+    validation.metadata.insert(
+        "tests".to_owned(),
+        json!(["Synthetic regression check passed"]),
+    );
+    let args = SuggestMarkdownSummaryArgs {
+        vault_context: json!({}),
+        mode: "daily-consolidation".to_owned(),
+        task: None,
+    };
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        suggest_automated_summary_once(
+            Some(config),
+            args,
+            vec![event, decision, validation],
+            &|_, _, _| Ok(()),
+        ),
+    )
+    .await
+    .map_err(|_| "Model compatibility test timed out".to_owned())??;
+    Ok(())
+}
+
+const DAILY_ENVELOPE_ERROR: &str = "Model provider returned an invalid response envelope. Retry when the provider is ready. No existing draft was replaced.";
+const DAILY_TRUNCATED_ERROR: &str = "Model output was truncated at its token limit. Retry with another tested model. No existing draft was replaced.";
+const DAILY_SCHEMA_ERROR: &str = "Daily model output did not match the required response schema. Retry with another tested model. No existing draft was replaced.";
+const DAILY_DECISION_ERROR: &str = "Daily model output omitted required decision evidence. Retry with another tested model. No existing draft was replaced.";
+const DAILY_VALIDATION_ERROR: &str = "Daily model output omitted required validation evidence. Retry with another tested model. No existing draft was replaced.";
+const DAILY_GROUP_ERROR: &str = "Daily model output did not preserve the supplied evidence groups. Retry with another tested model. No existing draft was replaced.";
+const DAILY_CONTENT_ERROR: &str = "Daily model output contained an invalid or empty factual workstream. Retry with another tested model. No existing draft was replaced.";
+
+/// Only these fixed messages are safe to persist or expose as detailed model failures.
+pub fn daily_model_failure_code(error: &str) -> Option<&'static str> {
+    match error {
+        DAILY_ENVELOPE_ERROR => Some("model_response_invalid"),
+        DAILY_TRUNCATED_ERROR => Some("model_output_truncated"),
+        DAILY_SCHEMA_ERROR => Some("model_schema_invalid"),
+        DAILY_DECISION_ERROR | DAILY_VALIDATION_ERROR => Some("model_lifecycle_coverage"),
+        DAILY_GROUP_ERROR => Some("model_group_identity"),
+        DAILY_CONTENT_ERROR => Some("model_content_invalid"),
+        _ => None,
+    }
+}
+fn safe_daily_validation_failure(
+    error: &str,
+    group_count: usize,
+    event_count: usize,
+    response_bytes: Option<usize>,
+) -> String {
+    let (kind, message) = if error.contains("decision evidence") {
+        ("decision_coverage", DAILY_DECISION_ERROR)
+    } else if error.contains("validation evidence") {
+        ("validation_coverage", DAILY_VALIDATION_ERROR)
+    } else {
+        match batch_failure_kind(error) {
+            "schema" => ("schema", DAILY_SCHEMA_ERROR),
+            "group_identity" => ("group_identity", DAILY_GROUP_ERROR),
+            _ => ("content_validation", DAILY_CONTENT_ERROR),
+        }
+    };
+    tracing::warn!(
+        failure_kind = kind,
+        group_count,
+        event_count,
+        response_bytes,
+        "Daily model output rejected. No existing draft was replaced."
+    );
+    message.to_owned()
 }
 
 fn batch_failure_kind(error: &str) -> &'static str {
-    if error.contains("decision evidence") || error.contains("validation evidence") {
+    if error == DAILY_TRUNCATED_ERROR {
+        "output_truncated"
+    } else if error.contains("decision evidence") || error.contains("validation evidence") {
         "lifecycle_coverage"
     } else if error.contains("workstream ID") || error.contains("evidence groups") {
         "group_identity"
@@ -874,7 +1159,7 @@ fn build_prompt(
     {
         (
             r#"{"workstreams":[{"id":"exact supplied group_id","title":"Concise workstream name","outcome":["Supported fact"],"decision":[],"trade_off":[],"validation":[],"blocker":[],"follow_up":[]}],"open_questions":[]}"#,
-            "- Return exactly one workstream for each supplied group_id. Never merge groups or move facts between groups.\n- Return concise fact strings only; no event IDs or Markdown.\n- Preserve distinct outcomes, decisions, validation, blockers and follow-up; omit unsupported facts. Include at least one factual item per group.\n- Events with decision metadata require a Decision fact; events with tests or validation metadata require a Validation fact.",
+            "- Return exactly one workstream for each supplied group_id. Never merge groups or move facts between groups.\n- Return concise fact strings only; no event IDs or Markdown.\n- Preserve distinct outcomes, decisions, validation, blockers and follow-up; omit unsupported facts. Include at least one factual item per group.\n- Each evidence group's required_nonempty_arrays lists exact JSON field names that must contain supported facts. Other arrays may be empty. Put required validation facts in validation and required decisions in decision; do not place them only in outcome. Never invent facts to fill an array.",
         )
     } else if args.mode == "daily-consolidation" {
         (
@@ -888,7 +1173,7 @@ fn build_prompt(
   "follow_up": [],
   "open_questions": []
 }"#,
-            "- Summarize this one supplied evidence group. The server already owns its identity and evidence IDs; do not return either.\n- Return concise fact strings only.\n- Use the adaptive factual fields and omit unsupported facts. Arrays may be empty, but include at least one factual item.\n- Merge repetitive lifecycle facts while retaining distinct outcomes, decisions, trade-offs, validation, blockers, and follow-up.\n- Events carrying decision metadata must support a Decision fact; events carrying tests or validation metadata must support a Validation fact.\n- Do not choose links, references, or write Markdown; the server renders reviewed Markdown.",
+            "- Summarize this one supplied evidence group. The server already owns its identity and evidence IDs; do not return either.\n- Return concise fact strings only.\n- Use the adaptive factual fields and omit unsupported facts. Arrays may be empty except those named in required_nonempty_arrays, but include at least one factual item.\n- Merge repetitive lifecycle facts while retaining distinct outcomes, decisions, trade-offs, validation, blockers, and follow-up.\n- The evidence group's required_nonempty_arrays lists exact JSON field names that must contain supported facts. Put required validation facts in validation and required decisions in decision; do not place them only in outcome. Never invent facts to fill an array.\n- Do not choose links, references, or write Markdown; the server renders reviewed Markdown.",
         )
     } else {
         (
@@ -904,6 +1189,18 @@ fn build_prompt(
         )
     };
 
+    let response_shape = if args.mode == "daily-consolidation"
+        && event_groups(events, args).len() == 1
+    {
+        let mut example: Value =
+            serde_json::from_str(response_shape).expect("static single-group example is JSON");
+        for field in required_daily_fact_arrays(events.iter()) {
+            example[field] = json!([format!("Supported {field} fact from the supplied evidence")]);
+        }
+        serde_json::to_string_pretty(&example).expect("response example serializes")
+    } else {
+        response_shape.to_owned()
+    };
     let prompt = format!(
         r#"Task: {task}
 Mode: {mode}
@@ -1075,6 +1372,7 @@ fn daily_prompt_groups<'a>(
         .into_iter()
         .map(|(group_id, events)| DailyPromptGroup {
             group_id,
+            required_nonempty_arrays: required_daily_fact_arrays(events.iter().copied()),
             events: events
                 .into_iter()
                 .map(|event| {
@@ -1394,19 +1692,13 @@ fn validate_durable_lifecycle_evidence(
         let workstream = workstreams
             .get(group_id.as_str())
             .expect("workstream groups were validated");
-        if (metadata_has_content(&event.metadata, "decision")
-            || metadata_value_is(&event.metadata, "event_type", "decision"))
-            && !field_cites_event(&workstream.decision, &event.id)
-        {
+        if requires_decision_fact(event) && !field_cites_event(&workstream.decision, &event.id) {
             return Err(format!(
                 "daily draft omitted decision evidence from {}",
                 event.id
             ));
         }
-        if (metadata_has_content(&event.metadata, "validation")
-            || metadata_has_content(&event.metadata, "tests")
-            || metadata_value_is(&event.metadata, "event_type", "validation"))
-            && !field_cites_event(&workstream.validation, &event.id)
+        if requires_validation_fact(event) && !field_cites_event(&workstream.validation, &event.id)
         {
             return Err(format!(
                 "daily draft omitted validation evidence from {}",
@@ -1415,6 +1707,31 @@ fn validate_durable_lifecycle_evidence(
         }
     }
     Ok(())
+}
+
+fn required_daily_fact_arrays<'a>(
+    events: impl IntoIterator<Item = &'a StoredLogEvent>,
+) -> Vec<&'static str> {
+    let mut decision = false;
+    let mut validation = false;
+    for event in events {
+        decision |= requires_decision_fact(event);
+        validation |= requires_validation_fact(event);
+    }
+    [("decision", decision), ("validation", validation)]
+        .into_iter()
+        .filter_map(|(field, required)| required.then_some(field))
+        .collect()
+}
+
+fn requires_decision_fact(event: &StoredLogEvent) -> bool {
+    metadata_has_content(&event.metadata, "decision")
+        || metadata_value_is(&event.metadata, "event_type", "decision")
+}
+fn requires_validation_fact(event: &StoredLogEvent) -> bool {
+    metadata_has_content(&event.metadata, "validation")
+        || metadata_has_content(&event.metadata, "tests")
+        || metadata_value_is(&event.metadata, "event_type", "validation")
 }
 
 fn field_cites_event(facts: &[StructuredFact], event_id: &str) -> bool {
@@ -2082,6 +2399,377 @@ fn default_mode() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_fingerprint_matching_requires_exact_previous_contract_and_configuration() {
+        let config = LlmConfig::for_test("http://localhost:11434/v1");
+        let digest = |profile: Option<RequestProfile>| {
+            let mut value = json!({"base_url":config.base_url,"model":config.model,"credential_present":false,"contract":"daily-structured-v2-batched"});
+            if let Some(profile) = profile {
+                value["profile"] = json!(profile);
+            }
+            format!("{:x}", Sha256::digest(serde_json::to_vec(&value).unwrap()))
+        };
+        let legacy = digest(Some(RequestProfile::MaxTokens));
+        let original = digest(None);
+        assert!(generation_configuration_matches_legacy_contract(
+            &config, &legacy
+        ));
+        assert!(generation_configuration_matches_legacy_contract(
+            &config, &original
+        ));
+        assert!(!generation_configuration_matches_legacy_contract(
+            &config,
+            &generation_configuration_digest(&config)
+        ));
+        for changed in [
+            {
+                let mut c = config.clone();
+                c.model = "different".to_owned();
+                c
+            },
+            {
+                let mut c = config.clone();
+                c.base_url = "https://other.example/v1".to_owned();
+                c
+            },
+            {
+                let mut c = config.clone();
+                c.api_key = Some("different-credential-presence".to_owned());
+                c
+            },
+            {
+                let mut c = config.clone();
+                c.profile = RequestProfile::MaxCompletionTokens;
+                c
+            },
+        ] {
+            assert!(!generation_configuration_matches_legacy_contract(
+                &changed, &legacy
+            ));
+            assert!(!generation_configuration_matches_legacy_contract(
+                &changed, &original
+            ));
+        }
+        let mut completion_config = config.clone();
+        completion_config.profile = RequestProfile::MaxCompletionTokens;
+        assert!(generation_configuration_matches_legacy_contract(
+            &completion_config,
+            &digest(Some(RequestProfile::MaxCompletionTokens))
+        ));
+    }
+
+    #[tokio::test]
+    async fn single_group_request_schema_requires_only_evidence_backed_fact_arrays() {
+        use axum::{Json, Router, routing::post};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let app=Router::new().route("/chat/completions",post(move |Json(body):Json<Value>| {
+            let observed=observed.clone();
+            async move {
+                let index=observed.fetch_add(1,Ordering::SeqCst);
+                let decision=index==1||index==3;let validation=index==2||index==3;
+                let properties=&body["response_format"]["json_schema"]["schema"]["properties"];
+                for (field,required) in [("decision",decision),("validation",validation)] {
+                    assert_eq!(properties[field]["maxItems"],4);
+                    assert_eq!(properties[field].get("minItems"),required.then_some(&json!(1)));
+                }
+                assert!(properties["outcome"].get("minItems").is_none());
+                assert_eq!(body["max_tokens"],512);
+                let prompt=body["messages"][1]["content"].as_str().unwrap();
+                let example=prompt.split_once("Return JSON with this exact shape:\n").unwrap().1.split_once("\n\nRules:").unwrap().0;
+                let example:Value=serde_json::from_str(example).unwrap();
+                assert_eq!(!example["decision"].as_array().unwrap().is_empty(),decision);
+                assert_eq!(!example["validation"].as_array().unwrap().is_empty(),validation);
+                let content=json!({"title":"Synthetic result","outcome":["Completed synthetic work"],"decision":if decision {vec!["Selected standard library"]}else{vec![]},"trade_off":[],"validation":if validation {vec!["Regression check passed"]}else{vec![]},"blocker":[],"follow_up":[],"open_questions":[]});
+                Json(json!({"choices":[{"message":{"content":content.to_string()}}]}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = LlmConfig::for_test(&format!("http://{address}"));
+        for metadata in [
+            json!({}),
+            json!({"decision":"Selected standard library"}),
+            json!({"event_type":"validation","tests":"Regression check passed"}),
+            json!({"event_type":"decision","validation":"Regression check passed"}),
+        ] {
+            let event:StoredLogEvent=serde_json::from_value(json!({"id":"synthetic-request","received_at":Utc::now(),"timestamp":Utc::now(),"source":"synthetic","level":"info","message":"Completed synthetic work","metadata":metadata,"fingerprint":null,"truncated":false,"reviewed":false})).unwrap();
+            generate_automated_daily_summary_with_progress(
+                Some(&config),
+                SuggestMarkdownSummaryArgs {
+                    mode: "daily-consolidation".to_owned(),
+                    task: None,
+                    vault_context: json!({}),
+                },
+                vec![event],
+                |_, _, _| Ok(()),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 4);
+        server.abort();
+    }
+
+    #[test]
+    fn prompt_required_arrays_match_lifecycle_validation_and_are_scoped_per_group() {
+        let args = SuggestMarkdownSummaryArgs {
+            mode: "daily-consolidation".to_owned(),
+            task: None,
+            vault_context: json!({}),
+        };
+        let cases = [
+            (json!({"event_type":"validation"}), vec!["validation"]),
+            (json!({"event_type":"VALIDATION"}), vec!["validation"]),
+            (
+                json!({"validation":"Validated navigation"}),
+                vec!["validation"],
+            ),
+            (json!({"tests":["Regression passed"]}), vec!["validation"]),
+            (json!({"event_type":"decision"}), vec!["decision"]),
+            (json!({"decision":"Use standard library"}), vec!["decision"]),
+            (
+                json!({"decision":"Use standard library","tests":"Not run"}),
+                vec!["decision", "validation"],
+            ),
+            (
+                json!({"event_type":"complete","tests":[],"validation":"","decision":false}),
+                vec![],
+            ),
+        ];
+        for (metadata, expected) in cases {
+            let event:StoredLogEvent=serde_json::from_value(json!({"id":"synthetic-required","received_at":Utc::now(),"timestamp":Utc::now(),"source":"synthetic","level":"info","message":"Synthetic lifecycle evidence","metadata":metadata,"fingerprint":null,"truncated":false,"reviewed":false})).unwrap();
+            let mut unrelated = event.clone();
+            unrelated.id = "synthetic-unrelated".to_owned();
+            unrelated.metadata = Map::new();
+            let events = vec![event, unrelated];
+            let required_id = resolved_event_group_key(&events[0], &args);
+            let projected = daily_prompt_groups(&args, &events);
+            assert_eq!(
+                projected
+                    .iter()
+                    .find(|group| group.group_id == required_id)
+                    .unwrap()
+                    .required_nonempty_arrays,
+                expected
+            );
+            assert!(
+                projected
+                    .iter()
+                    .find(|group| group.group_id != required_id)
+                    .unwrap()
+                    .required_nonempty_arrays
+                    .is_empty()
+            );
+            let single_prompt = build_prompt(&args, &events[..1]).unwrap();
+            assert!(
+                single_prompt
+                    .contains("Arrays may be empty except those named in required_nonempty_arrays")
+            );
+            assert!(single_prompt.contains("exact JSON field names"));
+        }
+        assert_eq!(
+            DAILY_GENERATION_CONTRACT,
+            "daily-structured-v4-required-fact-schema"
+        );
+    }
+
+    #[test]
+    fn terminal_daily_diagnostics_are_fixed_and_do_not_expose_model_or_evidence_text() {
+        let cases = [
+            (
+                "LLM daily draft did not match the structured schema: unknown field private-model-text",
+                "model_schema_invalid",
+            ),
+            (
+                "daily draft omitted decision evidence from private-event",
+                "model_lifecycle_coverage",
+            ),
+            (
+                "daily draft omitted validation evidence from private-event",
+                "model_lifecycle_coverage",
+            ),
+            (
+                "daily draft invented workstream ID: private-group",
+                "model_group_identity",
+            ),
+            (
+                "workstream private-group has no factual fields",
+                "model_content_invalid",
+            ),
+        ];
+        for (raw, expected) in cases {
+            let safe = safe_daily_validation_failure(raw, 1, 3, Some(100));
+            assert_eq!(daily_model_failure_code(&safe), Some(expected));
+            assert!(!safe.contains("private"));
+            assert!(safe.contains("No existing draft was replaced."));
+        }
+        assert_eq!(
+            daily_model_failure_code("arbitrary provider-controlled error"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_length_finish_reason_is_actionable_even_when_content_is_valid_json() {
+        use axum::{Json, Router, routing::post};
+        let app=Router::new().route("/chat/completions",post(|| async {
+            Json(json!({"choices":[{"finish_reason":"length","message":{"content":"{\"private-model-output\":true}"}}],"usage":{"prompt_tokens":850,"completion_tokens":512}}))
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = LlmConfig::for_test(&format!("http://{address}"));
+        let result = request_model(
+            &config.client().unwrap(),
+            &config,
+            "bounded synthetic prompt".to_owned(),
+            &["synthetic-group".to_owned()],
+            &[],
+        )
+        .await;
+        server.abort();
+        let error = result.unwrap_err();
+        assert_eq!(
+            daily_model_failure_code(&error),
+            Some("model_output_truncated")
+        );
+        assert!(!error.contains("private-model-output"));
+        assert!(error.contains("token limit"));
+    }
+
+    #[tokio::test]
+    async fn malformed_optional_telemetry_is_ignored_and_invalid_envelopes_are_safe() {
+        use axum::{Json, Router, routing::post};
+        use std::sync::Mutex;
+        let sentinel = "private-provider-telemetry-sentinel";
+        let content=json!({"title":"Synthetic result","outcome":["Completed synthetic work"],"decision":[],"trade_off":[],"validation":[],"blocker":[],"follow_up":[],"open_questions":[]}).to_string();
+        let replies = Arc::new(Mutex::new(std::collections::VecDeque::from([
+            json!({"choices":[{"message":{"content":content},"finish_reason":{"bad":sentinel}}],"usage":{"prompt_tokens":sentinel,"completion_tokens":[sentinel]}}),
+            json!({"choices":[{"message":{"content":content}}],"usage":sentinel}),
+            json!({"choices":sentinel}),
+            json!({"choices":[{"message":sentinel}]}),
+            json!({"choices":[{"message":{"content":[sentinel]}}]}),
+            json!({"choices":[]}),
+        ])));
+        let returned = replies.clone();
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let returned = returned.clone();
+                async move { Json(returned.lock().unwrap().pop_front().unwrap()) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = LlmConfig::for_test(&format!("http://{address}"));
+        let client = config.client().unwrap();
+        for index in 0..6 {
+            let result = request_model(
+                &client,
+                &config,
+                "Synthetic prompt".to_owned(),
+                &["synthetic-group".to_owned()],
+                &[],
+            )
+            .await;
+            if index < 2 {
+                assert_eq!(result.unwrap(), content);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    daily_model_failure_code(&error),
+                    Some("model_response_invalid")
+                );
+                assert!(!error.contains(sentinel));
+            }
+        }
+        assert!(replies.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_batch_transport_does_not_trigger_single_group_retries() {
+        use axum::{Json, Router, http::StatusCode, routing::post};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let observed = observed.clone();
+                async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error":"temporarily unavailable"})),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = LlmConfig::for_test(&format!("http://{address}"));
+        let events=(0..2).map(|i|serde_json::from_value::<StoredLogEvent>(json!({"id":format!("synthetic-{i}"),"received_at":Utc::now(),"timestamp":Utc::now(),"source":"synthetic","level":"info","message":"Synthetic work completed","metadata":{},"fingerprint":null,"truncated":false,"reviewed":false})).unwrap()).collect();
+        let result = generate_automated_daily_summary_with_progress(
+            Some(&config),
+            SuggestMarkdownSummaryArgs {
+                mode: "daily-consolidation".to_owned(),
+                task: None,
+                vault_context: json!({}),
+            },
+            events,
+            |_, _, _| Ok(()),
+        )
+        .await;
+        assert!(result.unwrap_err().contains("HTTP 503"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn compatibility_checks_required_decision_and_validation_facts_in_one_group() {
+        use axum::{Json, Router, routing::post};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let app=Router::new().route("/chat/completions",post(move |Json(body):Json<Value>| {
+            let observed=observed.clone();
+            async move {
+                let call=observed.fetch_add(1,Ordering::SeqCst);
+                assert_eq!(body["max_tokens"],512);
+                let prompt=body["messages"][1]["content"].as_str().unwrap();
+                assert!(prompt.contains("Synthetic regression check passed"));
+                assert!(prompt.contains("Use the standard library"));
+                let content=json!({"title":"Synthetic lifecycle verification","outcome":["Completed synthetic work"],"decision":if call==0 {vec![]}else{vec!["Selected the standard library"]},"trade_off":[],"validation":if call==1 {vec![]}else{vec!["Regression check passed"]},"blocker":[],"follow_up":[],"open_questions":[]});
+                // Missing optional finish_reason/usage remains compatible with legacy providers.
+                Json(json!({"choices":[{"message":{"content":content.to_string()}}]}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = LlmConfig::for_test(&format!("http://{address}"));
+        let decision = test_compatibility(&config).await.unwrap_err();
+        assert_eq!(
+            daily_model_failure_code(&decision),
+            Some("model_lifecycle_coverage")
+        );
+        assert!(decision.contains("decision evidence"));
+        let validation = test_compatibility(&config).await.unwrap_err();
+        assert_eq!(
+            daily_model_failure_code(&validation),
+            Some("model_lifecycle_coverage")
+        );
+        assert!(validation.contains("validation evidence"));
+        test_compatibility(&config).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
     use super::*;
     use chrono::{DateTime, Utc};
     use serde::Deserialize;
@@ -2492,7 +3180,7 @@ mod tests {
                                 let mut draft = StructuredDailyDraft {workstreams:vec![],open_questions:vec![]};
                                 for (id, group) in event_groups(&events,&args) {
                                     let prompt = build_prompt(&args,&group)?;
-                                    let content = request_model(&client,&config,prompt,std::slice::from_ref(&id)).await?;
+                                    let content = request_model(&client,&config,prompt,std::slice::from_ref(&id),&required_daily_fact_arrays(group.iter())).await?;
                                     let (workstream,mut questions) = parse_single_daily_workstream(&content,&id,&group)?;
                                     draft.workstreams.push(workstream);
                                     draft.open_questions.append(&mut questions);
@@ -2608,6 +3296,13 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_batch_falls_back_once_and_reports_validated_progress() {
+        exercise_batch_fallback(false).await;
+    }
+    #[tokio::test]
+    async fn truncated_batch_falls_back_once_to_valid_single_groups() {
+        exercise_batch_fallback(true).await;
+    }
+    async fn exercise_batch_fallback(truncated: bool) {
         use axum::{Json, Router, routing::post};
         use std::sync::{
             Mutex,
@@ -2623,7 +3318,7 @@ mod tests {
                 let content = if index == 0 { json!({"workstreams":[],"open_questions":[]}) } else {
                     json!({"title":"Navigation","outcome":["Implemented navigation"],"decision":[],"trade_off":[],"validation":[],"blocker":[],"follow_up":[],"open_questions":[]})
                 };
-                Json(json!({"choices":[{"message":{"content":content.to_string()}}]}))
+                Json(json!({"choices":[{"finish_reason":if truncated && index==0 {"length"}else{"stop"},"message":{"content":content.to_string()}}]}))
             }
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

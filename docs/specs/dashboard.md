@@ -27,7 +27,7 @@ Automated evidence opens in a bounded scrollable panel, including when preparati
 
 ## Settings
 
-Settings is a URL-addressable full page with General, Markdown destination, and Preparation & retention sections. General includes activity-source health and workspace-scoped agent metadata recommendations with recent source-level coverage and copyable agent guidance. Desktop uses native section links; small screens use a labelled section selector. Only one section is visible at a time. Section changes preserve edits and replace the current history entry; Back to Daily restores the selected date, scroll position and unsaved Daily draft without refreshing the page. Leaving with unsaved settings asks once for confirmation. Escape does not dismiss a page.
+Settings is a URL-addressable full page with General, Markdown destination, Generation, and Preparation & retention sections. General includes activity-source health and workspace-scoped agent metadata recommendations with recent source-level coverage and copyable agent guidance. Desktop uses native section links; small screens use a labelled section selector. Only one section is visible at a time. Section changes preserve edits and replace the current history entry; Back to Daily restores the selected date, scroll position and unsaved Daily draft without refreshing the page. Leaving with unsaved settings asks once for confirmation. Escape does not dismiss a page.
 
 Daily evidence shows post-redaction incoming metadata on demand. Owner corrections are stored as reversible workspace overlays associated with a task, session, or single event; they inform future grouping and generation while preserving received evidence and existing revisions.
 
@@ -45,7 +45,7 @@ Settings also exposes a reviewed, idempotent migration when legacy database or p
 
 ## History search and day navigation
 
-Previous/next, the native date picker, Today and Search history are the primary Daily navigation surface. The recent-day list and its client module have been removed. An expandable **Needs attention** list uses the overview statuses to link directly to recent failed, unreviewed, stale or interrupted days; applied and dismissed days are not listed. An applied day shows **Applied to Markdown** and does not continue to display generation-ready messaging. Today uses the profile-local date and keeps unsaved edits when already on that day; changing dates retains the discard guard. Browser Back/Forward and returning from Settings preserve the existing navigation behavior. The backend overview still supplies profile-local Today, active generation and intake status; existing preference APIs remain compatible.
+Previous/next, the native date picker, Today and Search history are the primary Daily navigation surface. The recent-day list and its client module have been removed. An expandable **Needs attention** list uses the overview statuses to link directly to recent failed, unreviewed, stale or interrupted days; applied and dismissed days are not listed. Today lists only failed generation and interrupted Apply; ordinary preparation/review/update states remain quiet. Status polling refreshes the attention list without replacing pending edits. An applied day shows **Applied to Markdown** and does not continue to display generation-ready messaging. Today uses the profile-local date and keeps unsaved edits when already on that day; changing dates retains the discard guard. Browser Back/Forward and returning from Settings preserve the existing navigation behavior. The backend overview still supplies profile-local Today, active generation and intake status; existing preference APIs remain compatible.
 
 Search history opens a read-only modal, not another tab. Submit a literal phrase, identifier or error string to search all retained non-deleted manual notes, automated messages/sources and readable current drafts. Applied drafts are searchable while their app content is retained. Internal metadata, superseded revisions, reference-note collections and saved Markdown files are excluded; the overview lookback does not limit search. Empty results therefore do not prove work never happened.
 
@@ -83,3 +83,11 @@ Folder discovery is a bounded typeahead inside collection path fields. It return
 - The collector exposes only the ingestion-oriented `log_activity` MCP tool. Structured MCP inspection and separately authorized Apply remain future roadmap work.
 
 The authoritative route and state contracts are in [Refocused Dashboard API](refocus-api.md) and [Daily domain](daily-domain.md).
+
+## Generation selection
+
+Daily distinguishes the next provider/model from the model that generated the displayed draft. A compact Change model disclosure offers saved, tested models; overrides stay in per-day session memory through navigation and Settings, and are consumed on successful generation. Retry uses the failed selection unless the owner explicitly changes it. Ordinary generation, reference adjustment and comparisons use captured selections consistently. Model-only replacement still requires confirmation for structured edits.
+
+Settings → Generation saves the default for manual and scheduled work. Manage connections and models is secondary setup with endpoint/key forms, discovery/manual model IDs, synthetic tests and connection-specific external-data consent. Generation-settings failures never block existing Daily review or Apply. Credentials are never returned to the browser; no-key local setup needs no master key. Details and operations are in [Choosing generation models](../generation-models.md).
+
+Apply review hides only the exact generated ownership boundary pair in the readable before/after content, including writer-returned trailing line endings. Technical details exposes the unchanged exact marked Markdown. Draft previews and Copy retain their existing marker-free output.

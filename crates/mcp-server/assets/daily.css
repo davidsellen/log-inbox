@@ -725,6 +725,10 @@ dialog::backdrop {
 .check-field input {
   margin-top: 4px;
 }
+.check-field input[type="checkbox"] {
+  width: auto;
+  flex: 0 0 auto;
+}
 .knowledge-head {
   display: flex;
   justify-content: space-between;
@@ -993,4 +997,44 @@ dialog::backdrop {
     padding-left: 16px;
     padding-right: 16px;
   }
+}
+
+.generation-model-control {
+  margin: 0.75rem 0;
+}
+.generation-model-control > p {
+  margin: 0.4rem 0;
+}
+#generation-model-options {
+  max-width: 100%;
+  margin-top: 0.5rem;
+}
+#generation-model-options select,
+#generation-default,
+#generation-connection-list {
+  width: 100%;
+  min-width: 0;
+}
+#generation-model-options button {
+  margin: 0.25rem 0;
+}
+#generation-manage-connections {
+  margin-top: 1rem;
+}
+#generation-manage-connections form,
+#generation-consent {
+  margin-top: 1rem;
+}
+
+.generation-history-list {
+  list-style: none;
+  padding: 0;
+}
+.generation-history-list li {
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.generation-history-list p {
+  margin: 0.35rem 0;
 }

@@ -60,3 +60,11 @@ Accepted redacted content is stored completely. Ingestion rejects values above t
 `context_comparisons` stores an opt-in blind pair generated from one exact evidence snapshot and model/contract fingerprint: one arm uses the frozen Knowledge context and one omits it. Arm identity is hidden while open. A single categorical decision records usefulness, expected editing burden, the selected arm, and an optional short note; selection atomically promotes that validated arm as a new immutable proposal revision. Comparisons never write Markdown.
 
 Legacy `vault_link_rules`, semantic destination preferences, and catalog records are migration inputs only and have no runtime API or writer authority.
+
+## Generation configuration (migration 27)
+
+`generation_settings` stores a workspace-scoped JSON document for named compatible connections, encrypted optional credentials, tested per-model request profiles, endpoint-bound consent, environment-model tests and the saved default. Environment secrets remain outside SQLite. `generation_provenance` stores insert-once nonsecret model configuration by attempt, revision or comparison ID. Deletion triggers follow existing retention of those records.
+
+Generated revision publication and its provenance are one SQLite transaction. Structured edits and manual-note amendments inherit generating-model provenance; comparison creation freezes its own model and promotion copies that model atomically. Legacy records remain readable without provenance. Additive migration preserves old workspace data; back up before upgrading and restore a matched old database/app for rollback. Master keys must be backed up separately from app storage; see [generation operations](../generation-models.md).
+
+Generation timing history reads the existing durable `generation_attempts` and attempt-provenance records. It derives terminal elapsed milliseconds from stored start/finish timestamps and retains earlier runs when raw activity expires. The workspace-scoped history API returns a bounded recent window with allowlisted nonsecret provenance; it does not persist prompts or model responses or require an additional migration.

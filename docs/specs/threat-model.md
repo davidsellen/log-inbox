@@ -75,3 +75,11 @@ Automated raw evidence and detailed audit records default to 30 days. Unhandled 
 ## Acceptance Threats
 
 Tests must cover session fixation, expiry/revocation, missing or cross-session CSRF, hostile Origin/Host, scope escalation, producer manual-author spoofing, unsafe preview URLs, prompt-injected destination changes, symlink/path escape, changed managed blocks, and replayed Apply requests. Any unauthorized write, secret disclosure, or silent loss of user-owned Markdown blocks release.
+
+## UI-managed generation connections
+
+Named OpenAI-compatible connections and tested models are owner-managed with existing session/CSRF/scope boundaries. External activity egress requires endpoint-specific consent, renewed on endpoint changes; a cloud default also authorizes scheduled activity generation. Reference-note excerpts and manual-note prose remain local. Legacy nonlocal environment endpoints require consent before new generation.
+
+Only loopback and the private Compose `ollama` hostname accept HTTP. Other endpoints require HTTPS and public routable addresses. DNS results are validated and pinned per attempt; unsafe/private/link-local/metadata destinations, URL credentials, redirects and proxy environment routing are rejected. Discovery and synthetic tests are bounded and never use real-day activity.
+
+UI API keys use XChaCha20Poly1305 with random nonces and workspace/connection/endpoint-associated data. The master key is a separately mounted secret file, never a database field. Responses disclose only credential presence, and errors omit provider bodies and secrets. No-key local connections and environment credentials do not require a master key. Missing/wrong master keys block affected operations while retaining drafts; backup/loss/rotation procedures are in [generation operations](../generation-models.md).

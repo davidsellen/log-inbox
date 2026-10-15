@@ -8,6 +8,8 @@ import {
 } from "./daily-helpers.js";
 import { createNavigation } from "./daily-navigation.js";
 import { createReferenceNotes } from "./daily-references.js";
+import { readableManagedBlock } from "./daily-helpers.js";
+import { createGenerationModels } from "./daily-generation.js";
 import { createSettings } from "./daily-settings.js";
 import { createHistory } from "./daily-history.js";
 // Daily owns the selected day, draft edits, generation, and polling.
@@ -122,7 +124,7 @@ async function boot() {
     $("login-panel").hidden = true;
     $("unlock").hidden = Boolean(state.csrf);
     $("settings").hidden = false;
-    $("settings").disabled = false;
+    $("settings").disabled = true;
     await settings.loadWorkspaceSettings();
     if (
       !settings.workspaceSettings.active_profile ||
@@ -143,6 +145,7 @@ async function boot() {
         true,
       );
       await settings.openSettings("destination");
+      $("settings").disabled = false;
       return;
     }
     await settings.loadAutomation();
@@ -152,8 +155,10 @@ async function boot() {
     $("day").value = state.date;
     await settings.loadMigration();
     await loadDay();
+    void generationModels.load();
     await selectView(requestedView, false, requestedSection);
     $("daily-app").hidden = false;
+    $("settings").disabled = false;
     if (
       settings.migration?.cutover_status !== "completed" &&
       settings.migration?.items?.length
@@ -164,6 +169,7 @@ async function boot() {
       );
     }
   } catch (error) {
+    $("settings").disabled = false;
     if (error.status === 401) showLogin();
     else {
       $("daily-app").hidden = false;
@@ -178,6 +184,7 @@ function showLogin() {
   $("login-panel").hidden = false;
   $("daily-app").hidden = true;
   $("unlock").hidden = true;
+  $("login-error").hidden = true;
   $("owner-secret").focus();
 }
 
@@ -295,17 +302,20 @@ function renderDaily() {
 }
 
 function renderAttentionDays() {
-  const days = (state.overview?.days || []).filter((day) =>
-    [
-      "apply_attention",
-      "generation_failed",
-      "generating",
-      "in_review",
-      "missed",
-      "notes_unreviewed",
-      "scheduled",
-      "update_available",
-    ].includes(day.status),
+  const days = (state.overview?.days || []).filter(
+    (day) =>
+      (day.local_date !== state.overview?.today ||
+        ["apply_attention", "generation_failed"].includes(day.status)) &&
+      [
+        "apply_attention",
+        "generation_failed",
+        "generating",
+        "in_review",
+        "missed",
+        "notes_unreviewed",
+        "scheduled",
+        "update_available",
+      ].includes(day.status),
   );
   const panel = $("attention-panel");
   panel.hidden = !days.length;
@@ -1122,7 +1132,7 @@ async function toggleLateEvidence(eventId, reopen) {
 }
 
 // Generation and comparison commands. These never Apply Markdown automatically.
-async function generate(referenceMode, contextAdjustments) {
+async function generate(referenceMode, contextAdjustments, retry = false) {
   if (state.saving) return;
   if (hasPendingChanges()) {
     notice(
@@ -1133,10 +1143,7 @@ async function generate(referenceMode, contextAdjustments) {
   }
   const withoutReferences = referenceMode === "none";
   const editedWithNewEvidence =
-    state.data?.current_revision?.origin === "structured_edit" &&
-    (state.data?.current_revision?.content?.schema_version === 2 ||
-      state.data?.candidate_freshness === "update_available" ||
-      withoutReferences);
+    state.data?.current_revision?.origin === "structured_edit";
   if (
     editedWithNewEvidence &&
     !confirm(
@@ -1156,12 +1163,14 @@ async function generate(referenceMode, contextAdjustments) {
       method: "POST",
       body: JSON.stringify({
         replace_edited: editedWithNewEvidence,
+        ...generationModels.requestSelection({ retry }),
         ...(withoutReferences ? { reference_mode: "none" } : {}),
         ...(contextAdjustments || {}),
       }),
     });
     if (state.date !== date) return;
     if (result.attempt) {
+      generationModels.started(date, result.attempt);
       state.data.generation_attempt = result.attempt;
       state.overview.active_generation = result.attempt;
       renderGeneration();
@@ -1200,14 +1209,16 @@ async function regenerateWithContext() {
   render();
   notice("");
   try {
-    await api(`/api/v2/daily/${state.date}/generate`, {
+    const result = await api(`/api/v2/daily/${state.date}/generate`, {
       method: "POST",
       body: JSON.stringify({
         replace_edited: replacesEdits,
+        ...generationModels.requestSelection(),
         expected_revision_id: state.contextDraft.revisionId,
         context_exclusions,
       }),
     });
+    if (result.attempt) generationModels.started(state.date, result.attempt);
     await loadDay();
   } catch (error) {
     notice(error.message, true);
@@ -1266,7 +1277,10 @@ async function startComparison() {
       `/api/v2/daily/${state.date}/context-comparisons`,
       {
         method: "POST",
-        body: JSON.stringify({ expected_revision_id: revisionId }),
+        body: JSON.stringify({
+          expected_revision_id: revisionId,
+          ...generationModels.requestSelection(),
+        }),
       },
     );
     state.comparison = result.comparison || result;
@@ -1388,9 +1402,15 @@ async function reviewApply() {
     state.applyPreview = await api(`/api/v2/daily/${state.date}/apply-preview`);
     $("apply-target").textContent =
       `Destination: ${state.applyPreview.destination_path}${state.applyPreview.will_create_note ? " · new note" : ""}`;
-    $("apply-before").textContent =
-      state.applyPreview.previous_block || "(No managed block yet)";
-    $("apply-after").textContent = state.applyPreview.next_block;
+    const { previous_block, next_block, block_id } = state.applyPreview;
+    $("apply-before").textContent = previous_block
+      ? readableManagedBlock(previous_block, block_id)
+      : "(No managed block yet)";
+    $("apply-after").textContent = readableManagedBlock(next_block, block_id);
+    $("apply-before-raw").textContent =
+      previous_block || "(No managed block yet)";
+    $("apply-after-raw").textContent = next_block;
+    $("apply-technical-details").open = false;
     openDialog($("apply-dialog"));
   } catch (error) {
     notice(error.message, true);
@@ -1640,6 +1660,7 @@ function renderCandidate(content) {
 }
 
 function renderGeneration() {
+  generationModels.renderDaily();
   const applied =
     state.data?.apply_status?.state === "finalized" ||
     state.data?.day?.review_status === "applied";
@@ -1670,6 +1691,7 @@ function renderGeneration() {
   $("view-generation").hidden = !active || active.local_date === state.date;
   $("generation-error").hidden = !attempt?.error;
   $("generation-error-text").textContent = attempt?.error || "";
+  $("generation-repair-settings").hidden = !attempt?.error && !state.retryError;
   renderAttemptMessage(attempt);
   const needsReferenceRecovery =
     !active &&
@@ -1890,6 +1912,7 @@ async function refreshStatus() {
       }));
     if (!current()) return;
     state.overview = overview;
+    renderAttentionDays();
     state.data.generation_attempt = data.generation_attempt;
     refreshDelay = 2000;
     if (changed && context && !hasPendingChanges() && !navigationBusy()) {
@@ -1995,7 +2018,13 @@ const {
   referenceNotes,
   getSettings: () => settings,
 });
+const generationModels = createGenerationModels({
+  app: state,
+  api,
+  openSettings: (section) => settings.openSettings(section),
+});
 const settings = createSettings({
+  generationModels,
   app: state,
   api,
   selectDay,
@@ -2016,6 +2045,9 @@ const historySearch = createHistory({
 });
 async function signIn(event) {
   event.preventDefault();
+  const button = $("login-form").querySelector("button[type=submit]");
+  button.disabled = true;
+  $("login-error").hidden = true;
   try {
     const result = await api("/api/v2/auth/login", {
       method: "POST",
@@ -2029,7 +2061,14 @@ async function signIn(event) {
     $("remember-login").checked = false;
     await boot();
   } catch (error) {
-    notice(error.message, true);
+    $("login-error").textContent =
+      error.status === 401
+        ? "That owner secret does not match. Use the dashboard owner secret; activity and model API keys cannot sign in."
+        : error.message;
+    $("login-error").hidden = false;
+    $("owner-secret").focus();
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -2160,6 +2199,9 @@ function bindDailyEvents() {
   $("edit-draft").addEventListener("click", toggleDraftEditor);
   $("copy-draft").addEventListener("click", copyDraft);
   $("cancel-generation").addEventListener("click", cancelGeneration);
+  $("generation-repair-settings").addEventListener("click", () =>
+    settings.openSettings("generation"),
+  );
   $("view-generation").addEventListener("click", () => {
     const attempt = activeAttempt();
     if (attempt) selectDay(attempt.local_date);
@@ -2181,7 +2223,9 @@ function bindDailyEvents() {
     });
   });
   // These used to be inline HTML handlers; module functions are intentionally private.
-  $("retry-generation").addEventListener("click", () => generate());
+  $("retry-generation").addEventListener("click", () =>
+    generate(undefined, undefined, true),
+  );
   $("browse-activity").addEventListener("click", () => {
     $("activity-details").open = true;
     $("activity-search").focus();
@@ -2193,5 +2237,6 @@ function bindDailyEvents() {
 bindDailyEvents();
 referenceNotes.bindEvents();
 settings.bindEvents();
+generationModels.bindEvents();
 installNavigation();
 boot();

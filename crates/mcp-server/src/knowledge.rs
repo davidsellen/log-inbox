@@ -590,9 +590,8 @@ pub fn resolve_knowledge_with_adjustments(
     if excluded_excerpts.len() > 64 {
         return Err("Knowledge excerpt adjustments exceed 64 entries".to_owned());
     }
-    if !include_excerpts && !excluded_excerpts.is_empty() {
-        return Err("Knowledge excerpt adjustments require a local model endpoint".to_owned());
-    }
+    // Frozen exclusions can follow a switch to an activity-only provider. No
+    // source prose is retained in the snapshot or sent when include_excerpts is false.
     let mut enabled_collections = collections
         .iter()
         .filter(|collection| collection.enabled)
@@ -1716,6 +1715,28 @@ mod tests {
             adjusted.snapshot_payload["used_notes"][0]
                 .get("usable_digest")
                 .is_none()
+        );
+
+        let external = resolve_knowledge_with_adjustments(
+            &workspace,
+            &[collection("workspace")],
+            &[],
+            &events,
+            false,
+            &excluded,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(external.vault_context["knowledge"]["excerpts"], json!([]));
+        assert_eq!(
+            external.snapshot_payload["applied_exclusions"],
+            adjusted.snapshot_payload["applied_exclusions"]
+        );
+        assert!(
+            !external
+                .vault_context
+                .to_string()
+                .contains("Stable product background")
         );
 
         let stale = BTreeSet::from([(

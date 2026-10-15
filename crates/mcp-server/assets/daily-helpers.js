@@ -64,3 +64,17 @@ export function noteTitle(path) {
   const name = (path || "").split("/").pop() || path || "Unknown note";
   return name.replace(/\.md$/i, "");
 }
+
+// Remove only the exact outer ownership pair returned by the writer. Embedded
+// examples (including fenced examples) and unrelated comments remain untouched.
+export function readableManagedBlock(text, blockId) {
+  if (!text || !blockId) return text || "";
+  const lines = text.split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  if (
+    lines[0] !== `<!-- log-inbox:daily:${blockId}:begin -->` ||
+    lines.at(-1) !== `<!-- log-inbox:daily:${blockId}:end -->`
+  )
+    return text;
+  return lines.slice(1, -1).join(text.includes("\r\n") ? "\r\n" : "\n");
+}

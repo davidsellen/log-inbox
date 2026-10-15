@@ -215,3 +215,26 @@ Requires `review:write` and CSRF. Body contains the exact current dismissed revi
 Requires `review:write` and CSRF. Body contains the exact `expected_revision_id` and a complete `DailyRevisionContent` object. The storage boundary validates schema version, manual-entry ownership, unique workstreams, canonical-link shape, complete snapshot coverage, and evidence on every factual item. A successful edit creates a new immutable `structured_edit` revision; compare-and-swap prevents a stale editor from replacing a newer candidate. Arbitrary Markdown is not accepted by this route.
 
 The Daily read model renders the final preview deterministically. Owner-authored manual prose remains verbatim and separate. Model-authored titles, facts, and questions are escaped as plain Markdown text; only validated server-owned canonical links are active. Facts supported solely by omitted, duplicate, or superseded evidence are absent from the preview.
+
+## Generation configuration and provenance
+
+All routes below use the current workspace, authenticated dashboard session, allowed host/origin and existing scopes. Mutations require `settings:write` plus CSRF. Discovery also requires `settings:write` and CSRF because it sends configured credentials to the selected endpoint. The browser uses POST so same-origin requests include the required Origin header; the legacy GET route remains for clients explicitly supplying Origin and CSRF.
+
+| Route | Contract |
+| --- | --- |
+| `GET /api/v2/settings/generation` | `logs:read`; connections, tested models/profiles, saved default, and credential-storage availability; credentials excluded |
+| `POST /api/v2/settings/generation/connections` | `{name,base_url,api_key?}`; returns `{id,saved}` |
+| `PUT /api/v2/settings/generation/connections/{id}` | Same fields; omitted key preserves it, empty string clears it; environment endpoint/key read-only |
+| `DELETE /api/v2/settings/generation/connections/{id}` | Rejects removal of default connection; keeps historical provenance |
+| `PUT /api/v2/settings/generation/connections/{id}/consent` | `{consent:boolean}`; endpoint-bound permission for external activity, including scheduling when default |
+| `POST /api/v2/settings/generation/connections/{id}/models` | Bounded discovery returning `{models:[model_id]}`; manual ID entry remains available |
+| `POST /api/v2/settings/generation/connections/{id}/models/test` | `{model}`; synthetic production-contract validation, then persists tested profile |
+| `PUT /api/v2/settings/generation/default` | `{connection_id,model}`; requires tested model and valid consent/credentials |
+
+Generation and context-comparison start requests accept optional `connection_id` and `model` together; omitting both uses the saved default or initial environment connection. Invalid selections do not silently fall back. An accepted attempt freezes its configuration and exposes nonsecret `model_selection`. Daily reads expose `generation_provenance` for the displayed revision; missing legacy provenance is null. Reuse compares the captured model configuration as well as evidence/context. Manual-only records need no model request. Reference adjustments use the same selection contract.
+
+Comparison retries return the existing immutable experiment; an explicitly conflicting model selection returns conflict. Both arms share the captured configuration and promoted revisions inherit that comparison's provenance. Excerpt-bearing comparisons remain local-only. Apply preview retains raw `previous_block`/`next_block` and hashes; readable marker hiding is presentation-only.
+
+### Generation timing history
+
+`GET /api/v2/settings/generation/history` requires existing `logs:read` authorization and returns at most 100 attempts scoped to the active workspace. Each row contains attempt ID/day/operation/state, timestamps, nullable terminal elapsed milliseconds, timeout, reference mode, workstream progress, failure code, inference-progress availability, and allowlisted nonsecret model provenance. Running/invalid timestamps have unknown duration; backward wall-clock intervals have unknown duration. No prompts, content, credentials, or raw errors are returned. Existing attempt records supply durable history without a schema migration.
