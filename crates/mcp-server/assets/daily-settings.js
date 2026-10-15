@@ -1,4 +1,10 @@
-import { $, el, action, isPlainLinkClick } from "./daily-helpers.js";
+import {
+  $,
+  el,
+  action,
+  isPlainLinkClick,
+  preparationRunLabel,
+} from "./daily-helpers.js";
 // Settings owns destination, automation, and migration forms and requests.
 export function createSettings({
   generationModels,
@@ -270,11 +276,12 @@ export function createSettings({
       return;
     }
     const heading = document.createElement("strong");
-    heading.textContent = "Recent preparation runs";
+    heading.textContent =
+      "Schedule history. Manual generations appear in Generation timing history.";
     runs.append(heading);
     for (const run of recent) {
       const row = document.createElement("div");
-      row.textContent = `${run.local_date}: ${run.state}${run.attempts > 1 ? ` (${run.attempts} attempts)` : ""}${run.last_error ? ` — ${run.last_error}` : ""}`;
+      row.textContent = `${run.local_date}: ${preparationRunLabel(run, state.automation.settings, app.overview?.today)}${run.attempts > 1 ? ` (${run.attempts} attempts)` : ""}${run.last_error ? ` — ${run.last_error}` : ""}`;
       runs.append(row);
     }
   }
@@ -283,14 +290,20 @@ export function createSettings({
     const runs = $("automation-runs");
     if (!runs || !state.automation?.recent_runs?.length) return;
     const recent = (state.automation.recent_runs || []).slice(0, 5);
-    runs.replaceChildren(el("strong", "", "Recent preparation runs"));
+    runs.replaceChildren(
+      el(
+        "p",
+        "subtle",
+        "Schedule history. Manual generations appear in Generation timing history.",
+      ),
+    );
     for (const run of recent) {
       const row = el("div", "preparation-run");
       const failed = run.state === "failed";
       const summary = el(
         "div",
         "",
-        `${run.local_date}: ${run.state}${run.attempts > 1 ? ` (${run.attempts} attempts)` : ""}`,
+        `${run.local_date}: ${preparationRunLabel(run, state.automation.settings, app.overview?.today)}${run.attempts > 1 ? ` (${run.attempts} attempts)` : ""}`,
       );
       row.append(summary);
       if (failed) {
@@ -331,9 +344,13 @@ export function createSettings({
           el(
             "div",
             "subtle",
-            "Preparation is currently running. Open the day to follow its progress.",
+            app.overview?.active_generation?.local_date === run.local_date
+              ? "Generation is running for this day. Open the day to follow its progress."
+              : "Saved scheduler claim. Open the day to check its current status.",
           ),
         );
+      if (!failed)
+        row.append(action("Open day", () => selectDay(run.local_date)));
       runs.append(row);
     }
   }
@@ -520,6 +537,10 @@ export function createSettings({
         $("day").value = app.date;
       }
       if (!hasPendingChanges()) await loadDay();
+      $("dashboard-open").disabled = !(
+        state.workspaceSettings?.active_profile &&
+        state.workspaceSettings.binding_matches
+      );
       $("settings-preview").textContent =
         "Destination saved. Existing days keep their previous destinations.";
       $("save-settings").disabled = true;

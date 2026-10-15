@@ -12,6 +12,7 @@ import { readableManagedBlock } from "./daily-helpers.js";
 import { createGenerationModels } from "./daily-generation.js";
 import { createSettings } from "./daily-settings.js";
 import { createHistory } from "./daily-history.js";
+import { createDashboard } from "./daily-dashboard.js";
 // Daily owns the selected day, draft edits, generation, and polling.
 const state = {
   csrf: null,
@@ -112,7 +113,7 @@ async function boot() {
   const url = new URL(location.href);
   const requested = url.searchParams.get("date");
   const requestedDate = validDate(requested) ? requested : null;
-  const requestedView = ["knowledge", "settings"].includes(
+  const requestedView = ["knowledge", "settings", "dashboard"].includes(
     url.searchParams.get("view"),
   )
     ? url.searchParams.get("view")
@@ -124,6 +125,8 @@ async function boot() {
     $("login-panel").hidden = true;
     $("unlock").hidden = Boolean(state.csrf);
     $("settings").hidden = false;
+    $("dashboard-open").hidden = false;
+    $("dashboard-open").disabled = true;
     $("settings").disabled = true;
     await settings.loadWorkspaceSettings();
     if (
@@ -159,6 +162,7 @@ async function boot() {
     await selectView(requestedView, false, requestedSection);
     $("daily-app").hidden = false;
     $("settings").disabled = false;
+    $("dashboard-open").disabled = false;
     if (
       settings.migration?.cutover_status !== "completed" &&
       settings.migration?.items?.length
@@ -182,6 +186,7 @@ function showLogin() {
   $("main-shell").hidden = false;
   $("settings-page").hidden = true;
   $("login-panel").hidden = false;
+  $("dashboard-open").hidden = true;
   $("daily-app").hidden = true;
   $("unlock").hidden = true;
   $("login-error").hidden = true;
@@ -2017,6 +2022,7 @@ const {
   unsavedDayChanges,
   referenceNotes,
   getSettings: () => settings,
+  getDashboard: () => dashboard,
 });
 const generationModels = createGenerationModels({
   app: state,
@@ -2033,6 +2039,12 @@ const settings = createSettings({
   loadDay,
   hasPendingChanges,
 });
+const dashboard = createDashboard({
+  api,
+  openDay: (date) => selectDay(date),
+  openSettings: (section) => settings.openSettings(section),
+});
+$("dashboard-open").addEventListener("click", () => selectView("dashboard"));
 const historySearch = createHistory({
   state,
   api,

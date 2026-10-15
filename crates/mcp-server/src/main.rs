@@ -5240,6 +5240,10 @@ async fn dashboard_asset(AxumPath(name): AxumPath<String>) -> Response {
             "text/javascript",
             include_str!("../assets/daily-references.js"),
         ),
+        "daily-dashboard.js" => (
+            "text/javascript",
+            include_str!("../assets/daily-dashboard.js"),
+        ),
         "daily-generation.js" => (
             "text/javascript",
             include_str!("../assets/daily-generation.js"),

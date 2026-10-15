@@ -7,6 +7,7 @@ export function createNavigation({
   unsavedDayChanges,
   referenceNotes,
   getSettings,
+  getDashboard,
 }) {
   let navigationIndex = 0;
 
@@ -20,7 +21,7 @@ export function createNavigation({
   function routeUrl(route) {
     const url = new URL(location.href);
     if (route.date) url.searchParams.set("date", route.date);
-    if (["knowledge", "settings"].includes(route.view))
+    if (["knowledge", "settings", "dashboard"].includes(route.view))
       url.searchParams.set("view", route.view);
     else url.searchParams.delete("view");
     if (route.view === "settings")
@@ -103,8 +104,13 @@ export function createNavigation({
   }
 
   function showView(view) {
-    state.view = ["knowledge", "settings"].includes(view) ? view : "daily";
+    state.view = ["knowledge", "settings", "dashboard"].includes(view)
+      ? view
+      : "daily";
     const knowledge = state.view === "knowledge";
+    const dashboard = state.view === "dashboard";
+    $("dashboard-panel").hidden = !dashboard;
+    $("dashboard-open").setAttribute("aria-pressed", String(dashboard));
     const settings = state.view === "settings";
     $("main-shell").hidden = settings;
     $("settings-page").hidden = !settings;
@@ -114,9 +120,9 @@ export function createNavigation({
     if (state.view === "daily")
       $("home-link").setAttribute("aria-current", "page");
     else $("home-link").removeAttribute("aria-current");
-    $("daily-panel").hidden = knowledge || settings;
+    $("daily-panel").hidden = knowledge || settings || dashboard;
     $("knowledge-panel").hidden = !knowledge;
-    document.title = `Log Inbox · ${settings ? "Settings" : knowledge ? "Reference notes" : "Daily"}`;
+    document.title = `Log Inbox · ${settings ? "Settings" : dashboard ? "Dashboard" : knowledge ? "Reference notes" : "Daily"}`;
   }
 
   function closeVisibleDialogs() {
@@ -131,7 +137,7 @@ export function createNavigation({
   ) {
     route = {
       date: route.date || state.date,
-      view: ["knowledge", "settings"].includes(route.view)
+      view: ["knowledge", "settings", "dashboard"].includes(route.view)
         ? route.view
         : "daily",
       dialog: route.dialog || null,
@@ -166,6 +172,7 @@ export function createNavigation({
       getSettings().showSection(route.section);
       route.section = state.settingsSection;
     }
+    if (route.view === "dashboard") void getDashboard().load();
     if (fromHistory) navigationIndex = index;
     else if (JSON.stringify(previous) !== JSON.stringify(route))
       writeHistory(
@@ -204,7 +211,9 @@ export function createNavigation({
             )
           : route.view === "daily"
             ? $("day-title")
-            : $("knowledge-panel").querySelector("h1");
+            : route.view === "dashboard"
+              ? $("dashboard-panel").querySelector("h1")
+              : $("knowledge-panel").querySelector("h1");
       if (
         route.view === "daily" &&
         previous.view !== "daily" &&
@@ -237,7 +246,11 @@ export function createNavigation({
           },
         }),
       );
-    return loaded && state.date === route.date && state.view === route.view;
+    return (
+      (loaded || route.view === "dashboard") &&
+      state.date === route.date &&
+      state.view === route.view
+    );
   }
 
   async function selectDay(date, target = null) {
@@ -258,6 +271,7 @@ export function createNavigation({
       getSettings().showSection(section);
       $("settings-title").focus({ preventScroll: true });
     }
+    if (view === "dashboard") void getDashboard().load();
     writeHistory(currentRoute(), false);
     if (
       state.view === "knowledge" &&

@@ -6,6 +6,10 @@ All routes use exact configured Host/Origin boundaries. Error responses have `{ 
 
 The Daily server exposes only the authenticated v2 Daily/settings/migration routes, health endpoint, and static root assets. Removed browser-vault, proposal/consolidation, and Daily-service `/mcp` routes have no runtime aliases. The separate collector exposes the ingestion-only MCP endpoint.
 
+## Compact Dashboard browser route
+
+`/?view=dashboard` selects the authenticated browser overview without changing the selected Daily date. Existing guarded navigation handles Back/Forward and preserves in-memory Daily edits. The view reuses `GET /api/v2/daily/overview`, `GET /api/v2/settings/automation`, and `GET /api/v2/settings/generation/history`; it adds no endpoint or mutation. Refresh is explicit, with workspace-local snapshot time and per-section unavailable/last-known feedback. Scheduler records remain historical data; effective paused/out-of-window labels do not update their stored state.
+
 ## Activity-record creation
 
 `POST /api/v2/daily/{date}/activity-record` requires `draft:generate`, an authenticated session, and CSRF. It accepts no record content and returns `201` with the created proposal revision. The server groups the day's original events without a model or Knowledge lookup, preserving manual-note IDs. An active generation, existing draft, dismissed day, empty day, or known expired snapshot evidence returns `409`; more than 500 events returns `422` rather than a partial record. Creation uses the generation guard and an expected-empty-current-revision transaction check. It writes app state only; preview and Apply remain unchanged.

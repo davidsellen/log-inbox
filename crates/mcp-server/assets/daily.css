@@ -1038,3 +1038,44 @@ dialog::backdrop {
 .generation-history-list p {
   margin: 0.35rem 0;
 }
+
+#dashboard-panel {
+  max-width: 960px;
+  margin-inline: auto;
+}
+#dashboard-panel > .card-head {
+  align-items: flex-start;
+}
+#dashboard-panel h1,
+#dashboard-panel h2 {
+  margin-top: 0;
+}
+#dashboard-window {
+  margin-bottom: 0;
+}
+.dashboard-preparation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: 16px 0;
+}
+.dashboard-preparation-grid dd {
+  margin: 6px 0 0;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.dashboard-review-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+@media (max-width: 780px) {
+  .dashboard-preparation-grid {
+    grid-template-columns: 1fr;
+  }
+  #dashboard-panel .card-head {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+}

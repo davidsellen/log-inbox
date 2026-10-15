@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { readableManagedBlock, isPlainLinkClick } from "../../crates/mcp-server/assets/daily-helpers.js";
+import { readableManagedBlock, isPlainLinkClick, preparationRunLabel } from "../../crates/mcp-server/assets/daily-helpers.js";
 
 test("Link interception preserves browser modifier and non-primary behavior", () => {
   expect(isPlainLinkClick({ button: 0 })).toBe(true);
@@ -20,6 +20,7 @@ const dailyAssets = Object.fromEntries(await Promise.all([
   "daily-settings.js",
   "daily-generation.js",
   "daily-history.js",
+  "daily-dashboard.js",
   "daily.css"
 ].map(async name => [
   name,
@@ -1416,6 +1417,7 @@ test("refocused Daily previews and saves first-run destination settings on the p
   await page.getByRole("button", { name: "Save destination" }).click();
 
   await expect(page.locator("#settings-preview")).toContainText("Destination saved");
+  await expect(page.locator("#dashboard-open")).toBeEnabled();
   await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
   await expect.poll(() => requests.find(request => request.path === "/api/v2/settings/workspace" && request.method === "PUT")?.body).toMatchObject({
     settings: { daily_root: "Journal", daily_pattern: "{year}/{date}.md" },
@@ -2138,4 +2140,85 @@ test("Timing history failure is isolated and refresh recovers without changing t
   await expect(page.locator("#generation-history-status")).toHaveText("No generation timing records yet. New attempts will appear here.");
   await page.getByRole("button",{name:"Back to Daily",exact:false}).click();
   await expect(page.locator("#draft-card")).toBeVisible();
+});
+
+
+test("Preparation labels use the workspace day and saved scheduling eligibility", () => {
+  const run={state:"pending",local_date:"2026-09-11"};
+  expect(preparationRunLabel(run,{enabled:false,catch_up_days:30},"2026-10-15")).toContain("outside catch-up window");
+  expect(preparationRunLabel({...run,local_date:"2026-10-14"},{enabled:false,catch_up_days:30},"2026-10-15")).toContain("Paused");
+  expect(preparationRunLabel({...run,local_date:"2026-09-15"},{enabled:true,catch_up_days:30},"2026-10-15")).toContain("Waiting");
+});
+
+async function mockDashboard(page) {
+  await mockDaily(page);
+  await page.route("**/api/v2/daily/overview", route=>route.fulfill({json:{today:"2026-10-15",timezone:"Europe/Stockholm",active_generation:null,days:[{local_date:"2026-10-15",status:"not_started"},{local_date:"2026-10-14",status:"in_review"},{local_date:"2026-10-13",status:"applied"}]}}));
+  await page.route("**/api/v2/settings/automation",route=>route.fulfill({json:{saved:true,settings:{enabled:false,generation_time:"00:15",catch_up_days:30,raw_retention_days:30,audit_retention_days:30,recovery_retention_days:30},recent_runs:[{local_date:"2026-09-11",state:"pending"},{local_date:"2026-09-10",state:"pending"}]}}));
+  const selection={connection_id:"local",provider:"Local",model:"test-small",profile:"max_tokens"};
+  const base={model_selection:selection,operation_type:"manual",reference_mode:"configured",state:"succeeded",total_groups:15};
+  await page.route("**/api/v2/settings/generation/history",route=>route.fulfill({json:{attempts:[{...base,elapsed_ms:60000},{...base,elapsed_ms:120000},{...base,elapsed_ms:500,total_groups:0},{...base,state:"failed",elapsed_ms:10000},{...base,model_selection:null,elapsed_ms:500}]}}));
+}
+
+test("Compact Dashboard shows honest status and bounded model samples on mobile", async ({page})=>{
+  await mockDashboard(page);await page.setViewportSize({width:390,height:844});await openDaily(page);
+  await page.locator("#dashboard-open").focus();await page.keyboard.press("Enter");
+  await expect(page.locator("#dashboard-panel")).toBeVisible();
+  await expect(page.locator("#dashboard-preparation")).toContainText("Off");
+  await expect(page.locator("#dashboard-preparation")).toContainText("2 saved pending");
+  await expect(page.locator("#dashboard-review")).toContainText("Ready for review");
+  await expect(page.locator("#dashboard-review")).not.toContainText("Oct 15");
+  await expect(page.locator("#dashboard-models")).toContainText("test-small");
+  await expect(page.locator("#dashboard-models")).toContainText("1.5 min");
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await page.locator("#dashboard-preparation-settings").click();
+  await expect(page.locator("#automation-runs")).toContainText("outside catch-up window");
+});
+
+test("Dashboard navigation preserves draft edits and delayed reads cannot replace the current route", async ({page})=>{
+  await mockDashboard(page);await openDaily(page);
+  await page.locator("#edit-draft").click();
+  const field=page.locator("#candidate textarea").first();
+  await field.fill("Unsaved dashboard round-trip text");
+  let release;const gate=new Promise(resolve=>release=resolve);
+  await page.route("**/api/v2/settings/generation/history",async route=>{await gate;await route.fulfill({json:{attempts:[]}});});
+  await page.locator("#dashboard-open").click();await expect(page).toHaveURL(/view=dashboard/);
+  await page.locator("#home-link").click();release();
+  await expect(page.locator("#daily-panel")).toBeVisible();
+  await expect(field).toHaveValue("Unsaved dashboard round-trip text");
+  await expect(page).not.toHaveURL(/view=dashboard/);
+  await page.goBack();await expect(page.locator("#dashboard-panel")).toBeVisible();
+});
+
+test("Dashboard partial failures stay isolated and Refresh recovers",async({page})=>{
+  await mockDashboard(page);let fail=true;
+  await page.route("**/api/v2/settings/generation/history",route=>fail?route.fulfill({status:503,json:{error:"History unavailable"}}):route.fulfill({json:{attempts:[]}}));
+  await openDaily(page);await page.locator("#dashboard-open").click();
+  await expect(page.locator("#dashboard-models-status")).toContainText("Could not refresh");
+  await expect(page.locator("#dashboard-review")).toContainText("Ready for review");
+  fail=false;await page.locator("#dashboard-refresh").click();
+  await expect(page.locator("#dashboard-models-status")).toBeHidden();
+  await expect(page.locator("#dashboard-models")).toContainText("No completed attempts");
+});
+
+
+test("Compact overview does not present off, expired or already drafted records as an executable queue", async ({page}) => {
+  await mockDashboard(page);
+  await page.route("**/api/v2/daily/overview",route=>route.fulfill({json:{today:"2026-10-15",timezone:"Europe/Stockholm",days:[{local_date:"2026-10-14",status:"scheduled",schedule_state:"pending",revision_number:1,event_count:3},{local_date:"2026-10-13",status:"scheduled",schedule_state:"pending",revision_number:null,event_count:2}]}}));
+  await openDaily(page);await page.locator("#dashboard-open").click();
+  await expect(page.locator("#dashboard-preparation")).toContainText("Off");
+  await expect(page.locator("#dashboard-review")).toContainText("Paused");
+  await expect(page.locator("#dashboard-review")).not.toContainText("Scheduled");
+  await page.reload();await expect(page.locator("#dashboard-panel")).toBeVisible();
+});
+
+
+test("Compact scheduled labels mark cached automation settings as last known", async ({page})=>{
+  await mockDashboard(page);let failed=false;
+  await page.route("**/api/v2/daily/overview",route=>route.fulfill({json:{today:"2026-10-15",timezone:"Europe/Stockholm",days:[{local_date:"2026-10-14",status:"scheduled",schedule_state:"pending",event_count:2}]}}));
+  await page.route("**/api/v2/settings/automation",route=>failed?route.fulfill({status:503,json:{error:"unavailable"}}):route.fulfill({json:{saved:true,settings:{enabled:true,generation_time:"00:15",catch_up_days:30},recent_runs:[]}}));
+  await openDaily(page);await page.locator("#dashboard-open").click();
+  await expect(page.locator("#dashboard-review")).toContainText("Waiting for automatic preparation");
+  failed=true;await page.locator("#dashboard-refresh").click();
+  await expect(page.locator("#dashboard-review-status")).toContainText("Could not refresh automation");
+  await expect(page.locator("#dashboard-review")).toContainText("Last known: Waiting");
 });

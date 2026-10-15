@@ -78,3 +78,28 @@ export function readableManagedBlock(text, blockId) {
     return text;
   return lines.slice(1, -1).join(text.includes("\r\n") ? "\r\n" : "\n");
 }
+
+// A saved scheduler row is history, not necessarily executable work.
+export function preparationRunLabel(run, settings, today) {
+  if (run.state !== "pending")
+    return (
+      {
+        completed: "Completed",
+        failed: "Failed",
+        dismissed: "Dismissed",
+        claimed: "Claimed for preparation",
+      }[run.state] || "Unknown status"
+    );
+  if (validDate(today) && validDate(run.local_date)) {
+    const age =
+      (Date.parse(`${today}T00:00:00Z`) -
+        Date.parse(`${run.local_date}T00:00:00Z`)) /
+      86400000;
+    if (age < 1) return "Not scheduled — day has not ended";
+    if (age > settings.catch_up_days)
+      return "Not scheduled — outside catch-up window";
+  }
+  return settings.enabled
+    ? "Waiting for automatic preparation"
+    : "Paused — automatic preparation is off";
+}

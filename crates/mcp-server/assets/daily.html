@@ -11,6 +11,9 @@
       <div class="bar">
         <a class="brand" id="home-link" href="/">Log Inbox</a>
         <div class="actions">
+          <button id="dashboard-open" class="header-link" hidden>
+            Dashboard
+          </button>
           <button id="settings" class="header-link" hidden>Settings</button
           ><button id="unlock" hidden>Unlock changes</button>
         </div>
@@ -52,6 +55,64 @@
         </form>
       </section>
       <section id="daily-app" hidden>
+        <section id="dashboard-panel" aria-labelledby="dashboard-title" hidden>
+          <div class="card-head">
+            <div>
+              <h1 id="dashboard-title">Dashboard</h1>
+              <p id="dashboard-window" class="subtle">
+                Recent activity and preparation
+              </p>
+            </div>
+            <button id="dashboard-refresh" type="button">Refresh</button>
+          </div>
+          <div class="stack">
+            <section class="card" aria-labelledby="dashboard-preparation-title">
+              <div class="card-head">
+                <h2 id="dashboard-preparation-title">Preparation</h2>
+                <button id="dashboard-preparation-settings" type="button">
+                  Preparation settings
+                </button>
+              </div>
+              <p
+                id="dashboard-preparation-status"
+                class="notice"
+                role="status"
+                hidden
+              ></p>
+              <div id="dashboard-preparation"></div>
+            </section>
+            <section class="card" aria-labelledby="dashboard-review-title">
+              <h2 id="dashboard-review-title">Days to review</h2>
+              <p
+                id="dashboard-review-status"
+                class="notice"
+                role="status"
+                hidden
+              ></p>
+              <div id="dashboard-review"></div>
+            </section>
+            <section class="card" aria-labelledby="dashboard-models-title">
+              <div class="card-head">
+                <h2 id="dashboard-models-title">Model results</h2>
+                <button id="dashboard-model-settings" type="button">
+                  Generation settings
+                </button>
+              </div>
+              <p class="subtle">
+                Latest 100 attempts. End-to-end time includes preparation and
+                saving. Workload and provider load vary; small samples do not
+                establish a faster or better model.
+              </p>
+              <p
+                id="dashboard-models-status"
+                class="notice"
+                role="status"
+                hidden
+              ></p>
+              <div id="dashboard-models"></div>
+            </section>
+          </div>
+        </section>
         <section id="daily-panel" aria-labelledby="day-title">
           <div class="day-head">
             <div>
@@ -801,7 +862,7 @@
                 </button>
               </div>
               <details id="automation-history">
-                <summary>Recent preparation runs</summary>
+                <summary>Automatic preparation records</summary>
                 <div id="automation-runs" class="subtle"></div>
               </details>
             </form>

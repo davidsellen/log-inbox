@@ -9,13 +9,15 @@ Start with `daily.js`: its imports show the feature boundaries, its wiring block
 | `daily.js` | Session/API access, selected day, draft/evidence editing, generation, Apply and polling |
 | `daily-navigation.js` | URL/history, view changes, dialog lifecycle and discard guards |
 | `daily-references.js` | Reference collections, links, search and their form state |
-| `daily-generation.js` | Provider/model settings, temporary Daily choices and nonsecret model labels |
+| `daily-generation.js` | Provider/model settings, temporary Daily choices, timing history and nonsecret model labels |
+| `daily-dashboard.js` | Read-only preparation status, recent review links and bounded model timing insights |
+| `daily-history.js` | Activity/draft history search and result navigation |
 | `daily-settings.js` | Destination, scheduling, retention and migration forms |
 | `daily-helpers.js` | Stateless DOM, date and label helpers |
 
 ## Follow a click
 
-Each feature has a `bindEvents` function (`bindDailyEvents` for Daily). Find the control ID there, then follow its named handler. Handlers perform requests through the supplied `api` function, update their state and call rendering functions. Renderers build DOM and attach actions; they do not start network requests merely by rendering.
+Most features expose a `bindEvents` function (`bindDailyEvents` for Daily); the compact Dashboard binds its three controls in its creation function. Find the control ID there, then follow its named handler. Handlers perform requests through the supplied `api` function, update their state and call rendering functions. Renderers build DOM and attach actions; they do not start network requests merely by rendering.
 
 For example: `#save-candidate` → `saveCandidate` → PUT the revision → `loadDay` → `render`. `#reference-settings` → `selectView` → guarded navigation → `loadKnowledge` when needed.
 
@@ -32,3 +34,5 @@ Navigation receives `unsavedDayChanges` from Daily and extra dialog values from 
 Run `npm run format:client`, then `npm run check:client` and `npm run test:browser`. Prettier is development-only; CI checks formatting. Browser tests exercise both Chromium and Firefox.
 
 Rust embeds each asset with `include_str!` and serves only the explicit allowlist in `dashboard_asset`. A new module needs an allowlist entry and a browser fixture asset entry. No general-purpose filesystem serving is needed.
+
+The Dashboard reads existing Daily, automation and generation-history endpoints. Partial failures mark sections unavailable or last known without replacing Daily edits. It uses native DOM and existing CSS; no dashboard/chart dependency is required.

@@ -194,7 +194,7 @@ Exit gate: recovery, idempotency, preserved-content, authorization and containme
 ### M3 — Daily Habit, Catch-up, and Expiry
 
 - [x] Add previous-day generation at 00:15, editable time/timezone, restart catch-up and bounded background work.
-- [x] Show selected-day status, late-event updates and evidence-expiry warnings. Recent-list counts were removed from the dashboard after owner feedback.
+- [x] Show selected-day status, late-event updates and evidence-expiry warnings. Daily keeps its quiet date-focused layout. An optional [compact Dashboard](specs/dashboard.md#compact-dashboard) shows preparation state, recent review links and bounded model timing samples without treating historical pending rows as queued work.
 - [x] Preserve edited candidates on new evidence; implement dismiss/reopen and retention-safe revisions/amendments.
 - [x] Coordinate cleanup across raw data, handled bodies, indexes, audit data and recovery copies.
 - [ ] Run a ten-active-day personal pilot using the [pilot guide](pilot.md); record correctness, review burden and operational problems.
