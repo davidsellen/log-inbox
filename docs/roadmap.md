@@ -354,6 +354,16 @@ acceptance; Product KB ingestion remains gated. No model-output repair, weakened
 checks or selective retries were used. Private evidence is preserved under
 `tmp/evaluations/oct13-14-v12-20261016/` through `oct13-14-v15-20261016/`.
 
+CI follow-up — 2026-10-16: run101 at `8d38e32` passed browser and Compose jobs
+but failed Rust1.99.1 Clippy on an unnecessary borrowed closure in the read-only
+history comparison; Rust tests were skipped after that lint failure. Local checks
+used Rust1.98.1, explaining the missed newer lint. Concurrent remote commit
+`bac50a6` removed the unnecessary borrow without changing comparison or validation
+behavior; that identical fix was preserved during integration. Local formatting,
+workspace Clippy and all86 core tests pass. Remote
+[CI run103](https://github.com/davidsellen/log-inbox/actions/runs/38889038721)
+passed on `bac50a6`. Semantic acceptance and release gates remain unchanged.
+
 | Acceptance scenario | Evidence at v15 working tree | Result |
 | --- | --- | --- |
 | Same source facts, precise ownership and strict rejection | Three actual responses validated by production parser; Rust/Compose regressions | Pass |
