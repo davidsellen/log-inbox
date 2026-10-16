@@ -27,6 +27,8 @@ pub(super) struct Attempt {
     date: NaiveDate,
     pub workspace_id: String,
     pub reference_mode: ReferenceMode,
+    pub preparation_mode: llm::PreparationMode,
+    pub preparation_mode_explicit: bool,
     pub model: Option<providers::ResolvedModel>,
     model_captured: bool,
     operation: String,
@@ -85,14 +87,19 @@ pub(super) fn save_with_retries<T>(
 
 impl Attempt {
     pub fn model_provenance(&self) -> Value {
-        self.model
+        let mut value = self
+            .model
             .as_ref()
-            .map(|m| {
-                let mut value = m.provenance.clone();
-                value["fingerprint"] = json!(m.fingerprint);
-                value
-            })
-            .unwrap_or(Value::Null)
+            .map(|m| m.provenance.clone())
+            .unwrap_or_else(|| json!({}));
+        value["preparation_mode"] = json!(self.preparation_mode);
+        value["generation_contract"] = json!(llm::daily_generation_contract_digest());
+        let identity = json!({"mode": self.preparation_mode, "contract": llm::daily_generation_contract_digest(), "model": self.model.as_ref().map(|m| &m.fingerprint)});
+        value["fingerprint"] = json!(format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&identity).expect("generation identity serializes"))
+        ));
+        value
     }
 
     pub fn capture_model(
@@ -150,7 +157,7 @@ impl Attempt {
             .generation_cancel
             .lock()
             .map_err(|_| ApiError::internal("generation controller unavailable"))?;
-        if matches!(stage, "requesting_model" | "saving") {
+        if matches!(stage, "requesting_model" | "preparing_sources" | "saving") {
             if *self.cancel.borrow() {
                 return Err(ApiError::unprocessable("Generation canceled."));
             }
@@ -254,6 +261,8 @@ pub(super) fn begin_with_references(
             date,
             workspace_id: profile.id,
             reference_mode,
+            preparation_mode: llm::PreparationMode::SourceBased,
+            preparation_mode_explicit: false,
             model: None,
             model_captured: false,
             operation: operation.to_owned(),
@@ -274,7 +283,11 @@ pub(super) async fn run(
 ) -> Result<ProposalRevision, ApiError> {
     let result = async {
         if !attempt.model_captured {
-            let selected = resolve_for_day(state, date, None, None).await?;
+            let selected = if attempt.preparation_mode == llm::PreparationMode::Semantic {
+                resolve_for_day(state, date, None, None).await?
+            } else {
+                None
+            };
             attempt.capture_model(selected)?;
         }
         generate_daily_candidate_inner(state, date, replace, context, &mut attempt).await

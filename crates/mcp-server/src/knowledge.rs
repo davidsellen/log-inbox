@@ -100,6 +100,73 @@ pub fn vault_context_from_snapshot(payload: &JsonValue) -> Result<JsonValue, Str
     Ok(context)
 }
 
+/// Keep reviewed navigation while preserving the source-only identity partition.
+/// This also supports evaluation against already-frozen Knowledge, without re-resolution.
+pub(crate) fn normalize_source_based_resolution(
+    vault_context: &mut JsonValue,
+    snapshot_payload: &mut JsonValue,
+    events: &[StoredLogEvent],
+) -> Result<(), String> {
+    log_inbox_core::validate_context_snapshot_payload(snapshot_payload)
+        .map_err(|error| error.to_string())?;
+    let groups = group_events(events);
+    let aliases = snapshot_payload["group_aliases"].clone();
+    let original_links = snapshot_payload["workstream_links"].clone();
+    let mut links = serde_json::Map::new();
+    let mut evidence = serde_json::Map::new();
+    for (raw_id, members) in &groups {
+        let canonical = aliases
+            .get(raw_id)
+            .and_then(JsonValue::as_str)
+            .unwrap_or(raw_id);
+        if let Some(values) = original_links.get(canonical) {
+            links.insert(raw_id.clone(), values.clone());
+            evidence.insert(
+                raw_id.clone(),
+                json!(members.iter().map(|event| &event.id).collect::<Vec<_>>()),
+            );
+        }
+    }
+    if let Some(resolved) = snapshot_payload["resolved_groups"].as_array_mut() {
+        for group in resolved {
+            let raw = group["source_group_id"]
+                .as_str()
+                .ok_or("resolved Knowledge group has no source identity")?
+                .to_owned();
+            if !groups.contains_key(&raw) {
+                return Err("resolved Knowledge group is outside frozen evidence".to_owned());
+            }
+            group["canonical_group_id"] = json!(raw);
+        }
+    }
+    snapshot_payload["workstream_links"] = JsonValue::Object(links);
+    snapshot_payload["workstream_evidence"] = JsonValue::Object(evidence);
+    snapshot_payload["group_aliases"] = json!({});
+    snapshot_payload["excerpts"] = json!([]);
+    snapshot_payload["workstream_excerpts"] = json!({});
+    snapshot_payload["applied_exclusions"] = json!([]);
+    if let Some(notes) = snapshot_payload["used_notes"].as_array_mut() {
+        for note in notes {
+            if let Some(note) = note.as_object_mut() {
+                note.remove("usable_digest");
+            }
+        }
+    }
+    let normalized = vault_context_from_snapshot(snapshot_payload)?;
+    for key in [
+        "candidate_notes",
+        "workstream_links",
+        "group_aliases",
+        "knowledge",
+    ] {
+        vault_context[key] = normalized[key].clone();
+    }
+    log_inbox_core::validate_context_snapshot_payload(snapshot_payload)
+        .map_err(|error| error.to_string())?;
+    context_snapshot_digest(snapshot_payload)?;
+    Ok(())
+}
+
 pub fn configuration_digest(
     workspace: &InspectedWorkspace,
     collections: &[KnowledgeCollection],
@@ -1624,6 +1691,69 @@ mod tests {
             resolution.vault_context["candidate_notes"],
             json!(["[[Products/Alpha]]"])
         );
+    }
+
+    #[test]
+    fn source_based_frozen_knowledge_preserves_raw_membership_and_navigation() {
+        let (_root, workspace) =
+            workspace(&[("Products/Alpha.md", "# Alpha\n\nReference background.\n")]);
+        let events = vec![
+            event("evt_1", "repo-one", "10"),
+            event("evt_2", "repo-two", "11"),
+        ];
+        let mut resolution = resolve_knowledge_with_adjustments(
+            &workspace,
+            &[collection("workspace")],
+            &[
+                mapping("work_item", "10", "Products/Alpha.md"),
+                mapping("work_item", "11", "Products/Alpha.md"),
+            ],
+            &events,
+            true,
+            &BTreeSet::new(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            !resolution.snapshot_payload["excerpts"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        normalize_source_based_resolution(
+            &mut resolution.vault_context,
+            &mut resolution.snapshot_payload,
+            &events,
+        )
+        .unwrap();
+        let frozen = resolution.clone();
+        assert_eq!(resolution.snapshot_payload["group_aliases"], json!({}));
+        assert_eq!(resolution.snapshot_payload["excerpts"], json!([]));
+        assert_eq!(resolution.vault_context["knowledge"]["excerpts"], json!([]));
+        assert!(
+            resolution.snapshot_payload["used_notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note.get("usable_digest").is_none())
+        );
+        for (group, members) in group_events(&events) {
+            assert_eq!(
+                resolution.snapshot_payload["workstream_links"][&group],
+                json!(["[[Products/Alpha]]"])
+            );
+            assert_eq!(
+                resolution.snapshot_payload["workstream_evidence"][&group],
+                json!(members.iter().map(|event| &event.id).collect::<Vec<_>>())
+            );
+        }
+        normalize_source_based_resolution(
+            &mut resolution.vault_context,
+            &mut resolution.snapshot_payload,
+            &events,
+        )
+        .unwrap();
+        assert_eq!(resolution, frozen);
     }
 
     #[test]

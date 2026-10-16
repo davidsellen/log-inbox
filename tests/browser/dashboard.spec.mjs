@@ -1053,7 +1053,7 @@ test("Daily retries invalid references for one attempt and labels the resulting 
   await page.getByRole("button",{name:"Retry without reference notes",exact:true}).click();
   await expect(page.locator("#generation-message")).toContainText("Without reference notes");
   await expect(page.locator("#notice")).not.toContainText("preparation started");
-  expect(bodies).toEqual([{replace_edited:false,reference_mode:"none"}]);
+  expect(bodies).toEqual([{replace_edited:false,preparation_mode:"semantic",reference_mode:"none"}]);
   await expect(page.locator("#revision-reference-mode")).toBeHidden();
   done=true;attempt={...attempt,state:"succeeded",stage:"complete"};
   await expect(page.locator("#revision-reference-mode")).toBeVisible({timeout:8000});
@@ -1416,7 +1416,7 @@ test("Activity record is opt-in, compact, editable and uses the existing save pr
   await page.reload();
   await expect(page.getByRole("heading", {name:"Activity record · not AI-summarized",exact:true})).toBeVisible();
   page.once("dialog", dialog => dialog.dismiss());
-  await page.getByRole("button", {name:"Create AI summary",exact:true}).click();
+  await page.getByRole("button", {name:"Prepare structured draft",exact:true}).click();
   expect(requests.some(request=>request.path.endsWith("/generate")&&request.method==="POST")).toBe(false);
   await page.getByRole("button", {name:"Review & save",exact:true}).click();
   await expect(page.locator("#apply-dialog")).toBeVisible();
@@ -1616,7 +1616,8 @@ test("refocused Daily confirms before replacing edits with new evidence", async 
   page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Regenerate" }).click();
   await expect.poll(() => requests.find(request => request.path.endsWith("/generate"))?.body).toEqual({
-    replace_edited: true
+    replace_edited: true,
+    preparation_mode: "source_based"
   });
 });
 
@@ -1700,6 +1701,7 @@ test("Daily discloses the exact bounded Knowledge excerpt sent to a local model"
   const generation = requests.find(request => request.path.endsWith("/generate") && request.method === "POST");
   expect(generation.body).toEqual({
     replace_edited: false,
+    preparation_mode: "semantic",
     expected_revision_id: "revision_1",
     context_exclusions: [{ workstream_id: "source:codex%2Ffedora|task:test", note_path: "Products/Alpha.md" }]
   });
@@ -1791,6 +1793,7 @@ test("Daily can restore a previously excluded excerpt without changing its link"
   } });
   await mockGenerationSettings(page);
   await openDaily(page);
+  await page.locator("#generation-preparation-mode").selectOption("semantic");
   await page.locator("#generation-model-change").click();
   await page.locator("#generation-model-picker").selectOption({label:"Local / large"});
 
@@ -2052,8 +2055,9 @@ test("Model override survives navigation and Settings while draft provenance sta
   await mockDaily(page);await mockGenerationSettings(page);
   await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:{...dailyResponse(),generation_provenance:{connection_id:"environment",provider:"Local",model:"small"}}}));
   await openDaily(page);
-  await expect(page.locator("#next-generation-model")).toContainText("Local / small");
-  await expect(page.locator("#draft-generation-model")).toHaveText("Generated with Local / small");
+  await expect(page.locator("#next-generation-model")).toContainText("Source-based preparation");
+  await expect(page.locator("#draft-generation-model")).toHaveText("Current draft: Semantic · Local / small");
+  await page.locator("#generation-preparation-mode").selectOption("semantic");
   await page.locator("#generation-model-change").click();
   await expect(page.locator("#generation-model-picker")).toBeFocused();
   await page.locator("#generation-model-picker").selectOption({label:"Local / large"});
@@ -2066,7 +2070,7 @@ test("Model override survives navigation and Settings while draft provenance sta
   await page.locator("#next-day").click();
   await expect(page.locator("#next-generation-model")).toContainText("Local / large");
   await page.reload();
-  await expect(page.locator("#next-generation-model")).toContainText("Local / small · saved default");
+  await expect(page.locator("#next-generation-model")).toContainText("Source-based preparation");
 });
 
 test("Retry uses the failed model unless a different model is explicitly chosen",async({page})=>{
@@ -2078,6 +2082,7 @@ test("Retry uses the failed model unless a different model is explicitly chosen"
   await openDaily(page);
   await page.locator("#retry-generation").click();
   await expect.poll(()=>bodies[0]).toMatchObject({connection_id:"environment",model:"large"});
+  await page.locator("#generation-preparation-mode").selectOption("semantic");
   await page.locator("#generation-model-change").click();
   await page.locator("#generation-model-picker").selectOption({label:"Local / small"});
   await page.locator("#retry-generation").click();
@@ -2090,6 +2095,7 @@ test("Model-only regeneration confirms before replacing structured edits",async(
   let sent=0;
   await page.route("**/api/v2/daily/2026-09-08/generate",route=>{sent++;return route.fulfill({status:503,json:{error:"Unavailable"}});});
   await openDaily(page);
+  await page.locator("#generation-preparation-mode").selectOption("semantic");
   await page.locator("#generation-model-change").click();
   await page.locator("#generation-model-picker").selectOption({label:"Local / large"});
   page.once("dialog",dialog=>dialog.dismiss());
@@ -2106,7 +2112,7 @@ test("Cloud default requires consent and model settings failure leaves Daily usa
   await openDaily(page);await page.locator("#settings").click();await settingsSection(page,"generation");
   await page.locator("#generation-default").selectOption({label:"Cloud / remote"});
   await expect(page.locator("#generation-save-default")).toBeDisabled();
-  await expect(page.locator("#generation-default-help")).toContainText("scheduled preparation");
+  await expect(page.locator("#generation-default-help")).toContainText("Semantic preparation");
   await page.locator("#generation-manage-connections summary").click();
   // Keep the unsaved default choice while choosing the connection to authorize.
   page.once("dialog",dialog=>dialog.accept());
@@ -2163,11 +2169,12 @@ test("Successful one-attempt model choice returns to the saved default",async({p
   await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:{...dailyResponse(),...(completed?{generation_attempt:{...attempt,state:"succeeded"},generation_provenance:attempt.model_selection}:{})}}));
   await page.route("**/api/v2/daily/2026-09-08/generate",route=>{completed=true;return route.fulfill({status:202,json:{attempt}});});
   await openDaily(page);
+  await page.locator("#generation-preparation-mode").selectOption("semantic");
   await page.locator("#generation-model-change").click();
   await page.locator("#generation-model-picker").selectOption({label:"Local / large"});
   await page.locator("#generate").click();
   await expect(page.locator("#next-generation-model")).toContainText("Local / small · saved default");
-  await expect(page.locator("#draft-generation-model")).toHaveText("Generated with Local / large");
+  await expect(page.locator("#draft-generation-model")).toHaveText("Current draft: Semantic · Local / large");
 });
 
 test("Generation settings stays readable and operable on a narrow screen",async({page},testInfo)=>{
@@ -2195,10 +2202,14 @@ test("Expired activity preserves safe amendments while explicit model changes re
   await page.route("**/api/v2/daily/2026-09-08/generate",route=>{bodies.push(route.request().postDataJSON());return route.fulfill({status:409,json:{error:"Source evidence expired; existing draft preserved"}});});
   await openDaily(page);await page.locator("#generate").click();
   await expect.poll(()=>bodies.length).toBe(1);
-  expect(bodies[0].connection_id).toBeUndefined();
+  expect(bodies[0]).toEqual({replace_edited:false});
+  await page.locator("#generation-preparation-mode").selectOption("semantic");
   await page.locator("#generation-model-change").click();await page.locator("#generation-model-picker").selectOption({label:"Local / large"});
   await page.locator("#generate").click();
-  await expect.poll(()=>bodies[1]).toMatchObject({connection_id:"environment",model:"large"});
+  await expect.poll(()=>bodies[1]).toMatchObject({preparation_mode:"semantic",connection_id:"environment",model:"large"});
+  await page.locator("#generation-preparation-mode").selectOption("source_based");
+  await page.locator("#generate").click();
+  await expect.poll(()=>bodies[2]).toEqual({replace_edited:false,preparation_mode:"source_based"});
 });
 
 
@@ -2352,4 +2363,62 @@ test("Compact scheduled labels mark cached automation settings as last known", a
   failed=true;await page.locator("#dashboard-refresh").click();
   await expect(page.locator("#dashboard-review-status")).toContainText("Could not refresh automation");
   await expect(page.locator("#dashboard-review")).toContainText("Last known: Waiting");
+});
+
+
+test("Source preparation omits models and keeps historical mode distinct", async ({page}) => {
+  await mockDaily(page); await mockGenerationSettings(page);
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({json:{...dailyResponse(), revision_preparation_mode:"semantic", generation_provenance:{provider:"Local",connection_id:"environment",model:"small"}}}));
+  const bodies=[];
+  await page.route("**/api/v2/daily/2026-09-08/generate",route=>{bodies.push(route.request().postDataJSON());return route.fulfill({status:503,json:{error:"Unavailable"}});});
+  await openDaily(page);
+  await expect(page.locator("#generation-preparation-mode")).toHaveValue("source_based");
+  await expect(page.locator("#next-generation-model")).toContainText("No model used");
+  await expect(page.locator("#draft-generation-model")).toContainText("Semantic");
+  await expect(page.locator("#generation-model-change")).toBeHidden();
+  await page.locator("#generate").click();
+  await expect.poll(()=>bodies[0]).toEqual({replace_edited:false,preparation_mode:"source_based"});
+  await page.locator("#generation-preparation-mode").selectOption("semantic");
+  await expect(page.locator("#generation-model-change")).toBeVisible();
+  await page.locator("#generate").click();
+  await expect.poll(()=>bodies[1]).toMatchObject({preparation_mode:"semantic",connection_id:"environment",model:"small"});
+});
+
+test("A failed semantic retry can explicitly switch to source preparation", async ({page}) => {
+  await mockDaily(page); await mockGenerationSettings(page);
+  const attempt={id:"failed_mode",state:"failed",local_date:"2026-09-08",model_selection:{preparation_mode:"semantic",connection_id:"environment",model:"large"},error:"Unavailable"};
+  await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:{...dailyResponse(),generation_attempt:attempt}}));
+  const bodies=[];
+  await page.route("**/api/v2/daily/2026-09-08/generate",route=>{bodies.push(route.request().postDataJSON());return route.fulfill({status:503,json:{error:"Unavailable"}});});
+  await openDaily(page);
+  await expect(page.locator("#generation-preparation-mode")).toHaveValue("semantic");
+  await page.locator("#retry-generation").click();
+  await expect.poll(()=>bodies[0]).toMatchObject({preparation_mode:"semantic",model:"large"});
+  await page.locator("#generation-preparation-mode").selectOption("source_based");
+  await page.locator("#retry-generation").click();
+  await expect.poll(()=>bodies[1]).toEqual({replace_edited:false,preparation_mode:"source_based"});
+  await page.reload();
+  await expect(page.locator("#generation-preparation-mode")).toHaveValue("semantic");
+});
+
+
+test("Untouched partial-expiry amendment omits failed semantic mode and model", async ({page}) => {
+  await mockDaily(page); await mockGenerationSettings(page);
+  const data=dailyResponse();
+  data.current_snapshot={id:"partly_retained"};
+  data.expired_evidence_count=1;
+  data.revision_preparation_mode="semantic";
+  data.generation_attempt={id:"previous_failed_semantic",state:"failed",local_date:"2026-09-08",model_selection:{preparation_mode:"semantic",connection_id:"environment",model:"large"},error:"Unavailable"};
+  await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:data}));
+  const bodies=[];
+  await page.route("**/api/v2/daily/2026-09-08/generate",route=>{bodies.push(route.request().postDataJSON());return route.fulfill({status:503,json:{error:"Unavailable"}});});
+  await openDaily(page);
+  await expect(page.locator("#generation-preparation-mode")).toHaveValue("semantic");
+  await page.locator("#generate").click();
+  await expect.poll(()=>bodies[0]).toEqual({replace_edited:false});
+  // A deliberate model choice on the restored semantic mode remains explicit.
+  await page.locator("#generation-model-change").click();
+  await page.locator("#generation-model-picker").selectOption({label:"Local / small"});
+  await page.locator("#generate").click();
+  await expect.poll(()=>bodies[1]).toEqual({replace_edited:false,preparation_mode:"semantic",connection_id:"environment",model:"small"});
 });

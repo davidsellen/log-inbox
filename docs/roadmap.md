@@ -304,6 +304,133 @@ the associated pull request and lifecycle report.
 
 ### Next Product KB ingestion delivery
 
+
+**Source-based preparation — authorized 2026-10-16 (implemented and locally verified).**
+The owner accepted the revised recovery strategy and explicitly requested the
+software factory, source-based preparation with optional semantic grouping,
+unchanged evidence checks, October13–14 comparisons with/without Knowledge, and
+local verification deployment. This supersedes the earlier requirement that a
+semantic capability pass must precede every usable preparation. It does not
+establish semantic accuracy or authorize Product KB ingestion.
+
+Reuse the existing `codex/bounded-daily-selection` branch, based on `af5036b`,
+including the reviewed uncommitted v18 corrections. Root coordinates and owns
+this task record, specifications, evaluation and deployment. Sol/medium workers
+own the preparation engine and API/UI integration; Sol/high independently reviews
+correctness and actual output quality. Apply factory and Ponytail lite within
+scope. Keep existing historical revisions, manual notes and source evidence.
+
+1. Implement a deterministic default source-based path: conservative existing
+   source identity buckets; bounded chronological highlights selected from exact
+   source cards; complete cited reported history; explicit source-based labels.
+   Both extraction and composition must work without a model. Knowledge provides
+   reviewed headings/navigation/background, never historical evidence or inferred
+   resolution. Keep ambiguous identities separate. Preserve raw source grouping
+   across both Knowledge arms.
+2. Add an explicit semantic option through the existing generation lifecycle.
+   Preserve strict semantic/model validation and fail visibly when it cannot
+   generate a candidate. Capture the chosen mode in provenance and freshness;
+   preserve cancellation, concurrent-edit protection, expiry and scheduling.
+   No silent switch or claims that source buckets are semantic subjects.
+3. Run appropriate regression/build/browser/Compose checks, independently assess
+   the four frozen October13–14 outputs against the original currentness/outcome
+   rubric and source evidence, then deploy locally with app-data preservation and
+   rollback evidence. Report actual usefulness, omissions and Knowledge effect,
+   including neutral/negative findings. Nothing auto-Applies Markdown.
+
+| Contract/scenario | Required evidence | Stage |
+| --- | --- | --- |
+| Default source preparation without inference | No-provider engine/API tests, provider-stopped Compose smoke and live October15 candidate | Pass |
+| Explicit semantic option | Mode/model capture and strict failure tests; no silent fallback | Pass; model capability still limited |
+| Exact facts, qualifications, ownership and history | Tamper/exclusion/Copy/Apply regressions; frozen four-arm save validation | Pass |
+| Mode changes, legacy revisions and edited/expired drafts | Cache/provenance/concurrency and actual browser/API expiry-amendment regressions | Pass |
+| Stable source groups, optional Knowledge | Same frozen evidence/ledger in all four arms; reviewed links only | Pass; no demonstrated factual benefit |
+| Useful/current readable output | Independent original12-item rubric:4/12 fully highlighted; all retained in history | Partial: substantial editing required |
+| Local build and deployment | Rust/browser checks, release Compose smoke, offline backup, health/login and live source preparation | Pass locally |
+
+
+Frozen source-mode evaluation (v19 engine, original32/44 events and original
+Knowledge snapshot; no provider calls):
+
+| Date | Activity-only | Knowledge | Source support of highlighted dated reports | Complete checklist items in highlights |
+| --- | --- | --- | --- | --- |
+| October13 | Parser + save contract pass;50ms | Parser + save contract pass;52ms | 30/30 in each arm | 2/6 in each arm |
+| October14 | Parser + save contract pass;61ms | Parser + save contract pass;67ms | 34/34 in each arm | 2/6 in each arm |
+
+These timings cover composition in one read-only trial, not full API/SQLite/UI
+latency or a repeated performance benchmark. All four candidates pass both the
+production parser and production save contract, versus none in the v11 baseline.
+No production revisions were inserted by the harness. Original evidence and the
+pretrial12-item rubric were unchanged. Each date shares one exact deterministic
+ledger across both arms; frozen Knowledge is normalized to reviewed navigation
+without re-reading notes or using excerpts.
+
+Independent output assessment found128/128 highlighted bullets supported as
+explicitly dated source reports, with no partially supported/unsupported bullet
+claims. This does not establish current-state completeness: only4/12 distinct
+rubric items are fully captured in highlights, six are partial and two have their
+core result only in history. No rubric item is entirely absent from retained
+history (147/191 cards per date). Important implementation outcomes, acceptance
+qualifications and separate planned work still require manual promotion from
+history. Zero exact duplicate strings does not eliminate repeated meaning.
+
+Both dates are usable auditable review starting records, but need substantial
+editing to become concise complete Daily summaries. Knowledge changes canonical
+navigation links only; factual fields and history are identical across each pair.
+There is no demonstrated factual/editing benefit and some broad product links
+may distract from the actual module. Keep Knowledge optional and Product KB
+ingestion gated. A future bounded task/event-diversity selection experiment may
+improve highlight coverage, but is not implemented or counted as success here.
+Private frozen artifacts/independent assessment:
+`/tmp/log-inbox-source-evaluation-20261016/trial-1/`; original negative trials
+remain untouched. Independent code review is separate from this output review.
+
+
+Final contract `daily-structured-v20-source-headings` additionally displays exact
+UTF-8 branch names instead of encoded identity keys. Group IDs and source facts
+are unchanged; malformed/control-character display names use a safe generic label.
+A fresh four-arm trial2 passed parser/save validation; every candidate content and
+rendered preview is byte-identical to independently assessed trial1. The original
+assessment therefore applies to the final October13–14 outputs. A live October15
+regeneration additionally proved that only headings changed from the initial v19
+source candidate; all factual content/history and the manual entry are unchanged.
+
+Correctness review covered the complete task diff against `af5036b` (base/HEAD/
+merge-base), followed by focused expiry, documentation and heading corrections.
+The final follow-up diff hash was
+`9a037a0097378d02aecf17f2369469d15a09265963e4a6910286ae513a57da10`;
+no remaining findings. This is separate from the output-quality limitation above.
+The final branch decoder uses the Clippy-recommended fixed array chunks under
+an even-length guard; it passed focused heading and legacy-expiry tests and
+all-target Clippy. No additional semantic-model sweep was performed.
+
+Validation: full workspace276 tests passed (10 ignored), Rust/client formatting
+and all-target Clippy passed. The initial browser suite passed220/228; two request
+expectations needed explicit new mode fields (four cases across both browsers),
+and four Chromium cleanup errors came from overlapping Playwright artifact
+folders. All affected cases passed an isolated12-case rerun. The final fully and
+partially expired amendment cases passed4/4 across Chromium/Firefox, including the
+new partial-expiry case. Existing cases plus that addition cover230 scenarios.
+The isolated release-container smoke passed with the fake provider stopped before
+preparation, then validated exact cited facts/history, Apply, restart, navigation
+and retained owner content in disposable data. Final heading-only follow-ups also
+passed focused LLM92 tests (1 ignored), expiry and display checks; the final release
+image was rebuilt from the lint-corrected source.
+
+Local deployment: both ordinary and provider-secret Compose files were retained.
+Offline app-data backups passed SQLite quick_check across39 tables; previous
+binaries are retained. Both service images match the final build, both health
+endpoints and owner login pass, and workspace/data/secret mounts and environment
+are unchanged. Existing October13–14 notes/revisions/evidence reads are unchanged.
+Live October15 preparation succeeded with no model:122 events,28 raw source
+groups,476 history cards, attached unchanged manual entry and no Markdown Apply.
+Final local revision: `revision_23d1c4414f904633aaaccfe8ec0ad053`.
+Receipt: ignored `tmp/deployments/source-preparation-final-20261016/receipt.json`;
+screenshot: `/tmp/log-inbox-source-validation-20261016/daily-ready-final.jpg`.
+Source preparation is operationally recovered; summary completeness and Product KB
+ingestion remain gated. No remote publication, merge or branch deletion is claimed.
+
+
 **Next authorized delivery — 2026-10-16 (v12–v15, semantic acceptance failed).** Run a frozen,
 source-grounded semantic grouping capability check before the full experiment.
 Compact selection prompts without removing source facts or weakening ownership,
@@ -375,6 +502,89 @@ revisions). The browser sign-in page renders. No new generation or Apply was
 performed. Old Docker image layers were unavailable; exact running binaries and
 the offline database were retained privately for rollback. Local deployment does
 not close semantic acceptance, authorize KB ingestion or mark PR2 ready to merge.
+
+Preparation recovery — 2026-10-16 (changes implemented; real-model recovery failed): the owner reported the
+October15 attempt ending13:04:48 with `model_output_truncated`. Its captured
+selection was environment Qwen2.5:1.5b; the first topic request consumed exactly
+2,048 completion tokens after a3,252-token prompt. No current revision existed;
+manual notes and122 evidence events are retained. A subsequent owner retry was
+canceled, not silently replaced. Deterministic preflight finds637 source cards in
+28 workstreams and43 topic windows before composition, so runtime viability is
+also an acceptance requirement. The old cluster schema allows288 ID entries while
+valid evidence coverage permits only24 once each. The exact first production request was preserved and replayed once privately: its
+3,252 prompt tokens match the failed attempt; it again stopped at2,048 output
+tokens. It emitted208 ID entries from only five distinct facts (one repeated54
+times), not a nearly complete valid partition. V16 fixed slots terminated with271 tokens
+but the old model generated duplicate labels; the installed4B model also returned
+inconsistent label/index references. V17 removes free-label generation entirely:
+one integer per card selects an existing source quotation as representative. The
+chosen quote persists separately from earliest-member canonical identity. Keep
+strict rejection, original ownership, the global12-topic cap, continuation and
+mandatory semantic topic/field coverage. The exact first window now finishes in
+41 seconds/93 tokens but1.5B makes24 self-rooted topics and is still rejected.
+The installed4B model and a newer local Qwen3.5:0.8b also returned the same
+24-self-root partition. Disabling the newer model's presence penalty made no
+difference; no model default or provider sampling profile was changed. No day
+recovery is claimed. V18 additionally retains each eligible whole typed metadata
+container once rather than also emitting its descendants. Oversized containers
+still descend; exact pointers, complete values and all existing evidence checks
+remain. This is an input-redundancy correction, not proof of semantic capability.
+No deterministic task-based substitute or activity-record fallback is authorized
+as proof of summary quality. Verify full-window/profile/parser regressions and actual request termination;
+require a demonstrably valid semantic partition before a day-level retry. Retry October15 without Apply or
+manual-note replacement. Do not claim recovery until the complete candidate can
+be saved and inspected. Coordinator owns this record; bounded workers own protocol
+and fixtures, with independent review before deployment/publication.
+
+V18 measured preflight:122 events,28 workstreams,476 cards and37 topic windows
+(previously637 cards/43 windows). The original Qwen2.5:1.5b first-window replay
+stopped normally after93 completion tokens in71 seconds, but again returned24
+self-rooted topics and failed the unchanged12-topic limit. The input reduction
+therefore does not recover preparation. V17/V18 code has independent correctness
+review with no findings. Final workspace regressions passed268 tests (9 ignored),
+with formatting and all-target Clippy passing; the earlier v17 isolated Compose
+Apply/restart smoke passed, but v18 was not deployed. A read-only live check found
+manual entries and the current revision unchanged. These checks do not satisfy
+model accuracy or operational acceptance. Keep changes pending and the existing v15 local runtime unchanged;
+no new candidate, note Apply, deployment or merge is claimed.
+
+Remaining delivery prerequisite: demonstrate a model/runtime that passes the frozen
+semantic must-link/must-separate sample and continuation within the preparation
+budget, then run complete October15 preparation without Apply and inspect the
+saved candidate. If capable inference is unavailable, a separately designed,
+explicitly reviewed source-to-subject map is the next product approach; automatic
+identity grouping, pairwise inference without measured accuracy, and a larger
+token limit are not accepted substitutes. October13–14 Knowledge comparisons,
+Product KB ingestion and merge remain gated on useful, accurate summaries.
+
+
+Local verification deployment — 2026-10-16: after the failed recovery was
+explicitly disclosed, the owner requested deployment for verification. Built and
+started the reviewed v18 working tree (uncommitted, based on `af5036b`) with the
+ordinary and provider-secret Compose files. An offline app-data backup passed
+SQLite quick_check across39 tables; previous binaries are retained for rollback.
+Both running service images match the rebuilt tags and both health endpoints
+return ok. Owner login and October13–15 note/revision/evidence reads passed;
+workspace, app-data volume, provider-secret mount and environment are unchanged.
+Receipt: ignored `tmp/deployments/verification-20261016T115828Z/receipt.json`, with
+per-file build hashes and image IDs. No preparation retry or Apply was performed;
+semantic recovery, publication and merge remain unverified.
+
+
+Owner verification — 2026-10-16 14:02:50 Europe/Stockholm: deployed v18
+preparation failed after62 seconds on environment Qwen2.5:1.5b with
+`daily topic partition exceeds its subject limit`, before composition (0/0
+groups). The configuration digest is
+`6e6744fd4aae659a638f8827e3fa5ddc5808766d16b95551e180c04d4e8963f9`.
+A controlled replay changed only `response_format` from JSON schema to JSON
+object on the captured v18 first window: same3,585 prompt tokens, normal stop,
+93 completion tokens and the same24 identity assignments. This does not support
+changing schema enforcement as a recovery. The12-topic bound is also connected to
+four highlights per field and bundles containing at most three source facts;
+raising it is not an evidence-backed repair. The owner was asked to choose
+between explicitly reviewed source-based grouping for local operation and keeping
+semantic grouping mandatory pending a capable model. No code, model settings,
+evidence validators or deployed services were changed in this diagnosis.
 
 | Acceptance scenario | Evidence at v15 working tree | Result |
 | --- | --- | --- |

@@ -1169,7 +1169,10 @@ async function generate(referenceMode, contextAdjustments, retry = false) {
       method: "POST",
       body: JSON.stringify({
         replace_edited: editedWithNewEvidence,
-        ...generationModels.requestSelection({ retry }),
+        ...generationModels.requestSelection({
+          retry,
+          preserveRevision: Boolean(contextAdjustments),
+        }),
         ...(withoutReferences ? { reference_mode: "none" } : {}),
         ...(contextAdjustments || {}),
       }),
@@ -1219,7 +1222,7 @@ async function regenerateWithContext() {
       method: "POST",
       body: JSON.stringify({
         replace_edited: replacesEdits,
-        ...generationModels.requestSelection(),
+        ...generationModels.requestSelection({ preserveRevision: true }),
         expected_revision_id: state.contextDraft.revisionId,
         context_exclusions,
       }),
@@ -1285,7 +1288,10 @@ async function startComparison() {
         method: "POST",
         body: JSON.stringify({
           expected_revision_id: revisionId,
-          ...generationModels.requestSelection(),
+          ...generationModels.requestSelection({
+            preserveRevision: true,
+            includeMode: false,
+          }),
         }),
       },
     );
@@ -1797,7 +1803,7 @@ function renderGeneration() {
       $("generation-status").hidden = state.retryError?.date !== state.date;
       $("reference-recovery").hidden = true;
     }
-    $("generate").textContent = "Create AI summary";
+    $("generate").textContent = "Prepare structured draft";
   }
   renderIntake(state.overview?.intake);
   renderDayAvailability();
@@ -1846,6 +1852,7 @@ function renderAttemptMessage(attempt) {
       {
         queued: "Waiting to start",
         preparing: "Preparing sources",
+        preparing_sources: "Preparing source-based draft · No model used",
         requesting_model: "Writing draft",
         requesting_model_fallback: "Retrying smaller groups one at a time",
         saving: "Saving prepared draft",

@@ -83,7 +83,7 @@ Messages up to 1 MiB and metadata up to 512 KiB are accepted after secret redact
 
 1. Choose the calendar date you want to review. The server resolves its exact interval using the saved timezone; changing the selector loads only that day.
 2. Add work that did not come from an agent under **My notes**. Those words remain separate and are never rewritten by the model.
-3. Generate the day candidate. Automated evidence is grouped into human-readable workstreams with outcomes, decisions, trade-offs, validation, blockers, and follow-ups when supported.
+3. Prepare the day candidate. Source-based preparation needs no model: it groups reported activity by source identities, selects recent cited reports, and retains the full source history for review. Optional Semantic preparation uses a tested model for grouping and selection; review its accuracy before relying on it.
 4. Correct the structured fields and include or omit evidence as needed. Each save creates an immutable revision in SQLite and still does not touch Markdown.
 5. Select **Review Apply** to see the current and approved managed blocks plus the exact frozen destination.
 6. Select **Confirm Apply** to write. Existing frontmatter and all content outside the Log Inbox block are preserved. Interrupted or conflicting writes remain visible and retryable.
@@ -114,7 +114,7 @@ After it completes, restart with ordinary `docker compose up --build`; the migra
 
 ## Generation models
 
-Use **Settings → Generation** to save tested local or cloud models and choose a default. Daily can select another model for one attempt. Existing environment configuration remains available; external generation requires explicit activity-data consent, and reference-note excerpts stay local. See [Choosing generation models](docs/generation-models.md) for connection setup, optional encrypted API-key storage, and recovery.
+Source-based preparation is the default and uses no model. Select **Semantic** beside the preparation controls to request model grouping and selection. Use **Settings → Generation** to save tested local or cloud models and choose a default for that option. Daily can select another model for one attempt. Existing environment configuration remains available; external generation requires explicit activity-data consent, and reference-note excerpts stay local. See [Choosing generation models](docs/generation-models.md) for connection setup, optional encrypted API-key storage, and recovery.
 
 ## Configuration
 
@@ -126,7 +126,7 @@ The essential settings are:
 - `LOG_INBOX_WORKSPACE_DIR`: container mount path, normally `/workspace`.
 - `LOG_INBOX_ALLOWED_HOSTS` and `LOG_INBOX_ALLOWED_ORIGINS`: exact dashboard request boundaries.
 - Optional `LOG_INBOX_LLM_MASTER_KEY_FILE`: separately mounted encryption key for UI-managed provider credentials; no-key connections and environment API keys do not need it.
-- `LOG_INBOX_LLM_BASE_URL`, `LOG_INBOX_LLM_MODEL`, `LOG_INBOX_LLM_CONTEXT_LENGTH` (default `32768`), `LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS` (default `1200`), and optional `LOG_INBOX_LLM_API_KEY`: model connection used for draft generation. The context and timeout must accommodate the bounded evidence prompt and CPU inference time.
+- `LOG_INBOX_LLM_BASE_URL`, `LOG_INBOX_LLM_MODEL`, `LOG_INBOX_LLM_CONTEXT_LENGTH` (default `32768`), `LOG_INBOX_LLM_REQUEST_TIMEOUT_SECONDS` (default `1200`), and optional `LOG_INBOX_LLM_API_KEY`: model connection used for optional Semantic preparation. Its context and timeout must accommodate the bounded evidence prompt and CPU inference time.
 
 The collector and dashboard bind to loopback by default. Put them behind an authenticated secure route before allowing nonlocal access.
 

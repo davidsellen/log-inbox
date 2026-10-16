@@ -20,8 +20,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             properties = request["response_format"]["json_schema"]["schema"]["properties"]
             if prompt.startswith("Stage: topic partition"):
-                fact_ids = properties["topics"]["items"]["properties"]["fact_ids"]["items"]["enum"]
-                result = {"topics": [{"subject": "Synthetic subject", "fact_ids": fact_ids}]}
+                count = properties["assignments"]["minItems"]
+                if properties["assignments"]["maxItems"] != count:
+                    raise ValueError("Expected an exact-size representative array")
+                result = {"assignments": [0] * count}
             elif prompt.startswith("Stage: fact composition"):
                 groups = json.loads(
                     prompt.split("\n\nExtracted evidence groups:\n", 1)[1].split(

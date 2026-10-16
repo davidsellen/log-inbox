@@ -1,18 +1,20 @@
 # Choosing generation models
 
-Daily shows **Next generation uses** beside Create draft. **Change model** selects a saved, tested provider/model for one attempt; it does not change the saved default. A temporary choice stays with that day while navigating or visiting Settings, and is consumed when that attempt succeeds. Reloading starts from the saved default. Failed attempts retain their original model for **Try again**; explicitly changing the model starts a new attempt with that choice.
+Daily defaults to **Source-based** preparation: no model is used, and source grouping and current state need your review. Select **Semantic** to request model grouping and highlight selection. In that mode, **Change model** selects a saved, tested provider/model for one attempt without changing the saved model default. A temporary model choice stays with that day while navigating or visiting Settings and is consumed on success. Failed semantic attempts retain their mode/model for retry; explicitly selecting Source-based starts a source attempt instead. The mode displayed beside preparation controls always describes the next request.
 
-**Generated with** describes the displayed draft, independently of the next selection. Older drafts without provenance say that their generation model is unavailable. Manual-only drafts and activity records do not use a model. Changing models never silently overwrites structured edits: confirm replacement first. Failures retain the last usable draft, which can still be read, copied, edited, and saved.
+The **Current draft** caption describes the displayed draft and its mode, independently of the next selection. Older drafts without provenance say that their generation model is unavailable. Source-based drafts, manual-only drafts and activity records do not use a model. Changing models never silently overwrites structured edits: confirm replacement first. Failures retain the last usable draft, which can still be read, copied, edited, and saved.
 
 ## Add or change a model
 
-Open **Settings → Generation**. Choose and save the default for future manual generation and scheduled preparation. To add models, expand **Manage connections and models**:
+Open **Settings → Generation**. Choose and save the model default for future explicit Semantic preparation. Scheduled preparation always uses source-based mode without a model. To add models, expand **Manage connections and models**:
 
 1. Select an existing connection or choose **Add a connection**. Give a new connection a name and an OpenAI-compatible API base URL, normally ending in `/v1`; an API key is optional.
 2. Save the connection. Environment-configured endpoint and credentials are read-only, but additional models can still be tested and saved for that connection.
 3. **Find available models**, or enter a model ID manually when discovery is unavailable.
 4. **Test & save model** sends synthetic activity through the production structured-output request and validator. Only successful models become choices. The original environment model remains available for compatibility with existing installations.
 5. Choose a saved model as the default, or return to Daily and choose it for one attempt.
+
+A saved synthetic compatibility result proves the request/response contract on that probe, not accurate grouping or useful summaries on real activity. Semantic preparation may still fail; source-based preparation remains available without a model.
 
 A discovered ID is not a compatibility guarantee. Tests support `max_tokens` with temperature and `max_completion_tokens` without temperature; the successful request profile is saved per model. Models must support the Daily structured JSON contract. Authentication, missing models, unsupported contracts, timeouts, and temporary service failures have separate recovery messages. Local models must be installed on their server; Log Inbox does not download them.
 
@@ -22,7 +24,7 @@ Requests originate from the Log Inbox service. In Docker, `localhost` means the 
 
 Before a nonlocal connection receives real activity, explicitly allow that connection to receive activity messages and authorized link metadata, including source labels and canonical link labels/paths. Manual-note prose and reference-note excerpts remain local. Synthetic connection tests and model discovery do not contain your activity.
 
-Saving an external default also selects it for scheduled preparation. Changing the endpoint resets its consent and tested models. A pre-existing nonlocal environment configuration needs consent before further generation. No provider is silently substituted on failure. A running attempt keeps its captured endpoint, credentials, model and request profile; settings changes affect subsequent attempts.
+Saving an external default selects it only for explicit Semantic preparation; scheduled preparation uses no model. Changing the endpoint resets its consent and tested models. A pre-existing nonlocal environment configuration needs consent before Semantic preparation. No provider is silently substituted on failure. A running attempt keeps its captured endpoint, credentials, model and request profile; settings changes affect subsequent attempts.
 
 ## API-key storage
 
@@ -43,7 +45,7 @@ docker compose -f docker-compose.yml -f docker-compose.providers.yml up --build 
 
 For a direct service launch, set `LOG_INBOX_LLM_MASTER_KEY_FILE` to a readable key file. It accepts 32 raw bytes or 64 hexadecimal characters, with surrounding whitespace allowed for hex. The optional Compose override mounts the key read-only at `/run/secrets/log_inbox_provider_master_key`; ordinary Compose startup is unchanged.
 
-Back up app data and the master key separately and protect both. The key cannot be recovered from the database. Missing or incorrect keys block only affected provider operations, preserving existing drafts. Restore the matching key to recover access. To rotate a key, pause scheduled preparation, replace the mounted key, restart, and explicitly re-enter each UI-managed API key; old encrypted values cannot be decrypted with the replacement. Test the connections before re-enabling preparation. Do not leave old key backups with app-data copies.
+Back up app data and the master key separately and protect both. The key cannot be recovered from the database. Missing or incorrect keys block only affected provider operations, preserving existing drafts. Restore the matching key to recover access. To rotate a key, finish or cancel active attempts, replace the mounted key, restart, and explicitly re-enter each UI-managed API key; old encrypted values cannot be decrypted with the replacement. Test the connections before using Semantic preparation again. Do not leave old key backups with app-data copies.
 
 The saved default must be changed before deleting its connection. Deleting a connection preserves historical model provenance. Additive schema migration v27 preserves existing content and environment configuration. Back up SQLite before upgrade; rollback requires restoring the pre-upgrade database and matching app version rather than downgrading a migrated database in place.
 

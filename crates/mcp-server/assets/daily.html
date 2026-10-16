@@ -170,6 +170,12 @@
                 id="generation-model-control"
                 class="generation-model-control"
               >
+                <label class="field"
+                  >Preparation<select id="generation-preparation-mode">
+                    <option value="source_based">Source-based (default)</option>
+                    <option value="semantic">Semantic (optional)</option>
+                  </select></label
+                >
                 <span id="next-generation-model" class="subtle"></span>
                 <button type="button" id="generation-model-change">
                   Change model
@@ -591,10 +597,9 @@
                 <h3>Allow external generation</h3>
                 <p>
                   Activity messages and link metadata will be sent to this
-                  service for generation. Your manual-note prose and
-                  reference-note excerpts remain local. This also allows
-                  scheduled preparation if you save an external model as the
-                  default.
+                  service when you select Semantic preparation. Your manual-note
+                  prose and reference-note excerpts remain local. Source-based
+                  and scheduled preparation use no model.
                 </p>
                 <label class="check-field"
                   ><input id="generation-consent-confirm" type="checkbox" />I

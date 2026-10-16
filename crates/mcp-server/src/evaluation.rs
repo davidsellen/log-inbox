@@ -536,6 +536,183 @@ async fn evaluate_real_days() -> Result<()> {
     Ok(())
 }
 
+/// Frozen source-mode comparison. Runs the production engine and save validators
+/// without a model, database, note resolver or Markdown writer.
+#[tokio::test]
+#[ignore = "requires private frozen October 13–14 evidence and Knowledge; no inference"]
+async fn evaluate_source_based_real_days() -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let input_bytes = read_bounded(Path::new(&std::env::var("LOG_INBOX_EVALUATION_INPUT")?))?;
+    let input: EvaluationInput = serde_json::from_slice(&input_bytes)?;
+    let frozen = read_json(Path::new(&std::env::var(
+        "LOG_INBOX_EVALUATION_FROZEN_MANIFEST",
+    )?))?;
+    validate_frozen_cases(&frozen, &input)?;
+    ensure!(
+        frozen["identity"]["fixture_sha256"] == digest(&input_bytes),
+        "frozen fixture changed"
+    );
+    ensure!(
+        input.cases.len() == 2,
+        "exactly two original dates required"
+    );
+    for (case, (date, count)) in input
+        .cases
+        .iter()
+        .zip([("2026-10-13", 32), ("2026-10-14", 44)])
+    {
+        ensure!(
+            case.date == date && case.events.len() == count,
+            "original date/evidence count required"
+        );
+    }
+    let requested = std::env::var("LOG_INBOX_EVALUATION_OUTPUT")?;
+    let requested = Path::new(&requested);
+    if !requested.exists() {
+        fs::DirBuilder::new().mode(0o700).create(requested)?;
+    }
+    ensure!(
+        fs::symlink_metadata(requested)?.file_type().is_dir(),
+        "real output directory required"
+    );
+    let output = fs::canonicalize(requested)?;
+    ensure!(
+        !output.starts_with(fs::canonicalize(&input.workspace_root)?)
+            && !output.starts_with(fs::canonicalize(std::env::current_dir()?)?),
+        "private output outside vault and checkout required"
+    );
+    ensure!(
+        fs::metadata(&output)?.permissions().mode() & 0o077 == 0,
+        "private output permissions required"
+    );
+    let manifest = json!({
+        "identity": {
+            "schema_version": 1,
+            "pipeline": "source-based-exact-reports-with-complete-history",
+            "preparation_mode": "source_based", "model_used": false,
+            "fixture_sha256": digest(&input_bytes),
+            "contract_digest": llm::daily_generation_contract_digest(),
+            "frozen_manifest_sha256": value_digest(&frozen)?,
+            "knowledge_scope": "reviewed navigation only; frozen excerpts unused",
+            "order": [
+                {"date":"2026-10-13","with_knowledge":false},
+                {"date":"2026-10-13","with_knowledge":true},
+                {"date":"2026-10-14","with_knowledge":true},
+                {"date":"2026-10-14","with_knowledge":false}
+            ]
+        },
+        "cases": frozen["cases"]
+    });
+    write_new_json(&output.join("manifest.json"), &manifest)?;
+    let manifest_sha256 = value_digest(&manifest)?;
+    let mut succeeded = 0;
+    for (index, case) in input.cases.iter().enumerate() {
+        let started = Instant::now();
+        let ledger = llm::prepare_source_based_ledger(&case.events).map_err(anyhow::Error::msg)?;
+        llm::validate_daily_sources(&ledger, &case.events).map_err(anyhow::Error::msg)?;
+        let extraction = json!({"date":case.date,"manifest_sha256":manifest_sha256,
+            "status":"succeeded","elapsed_ms":started.elapsed().as_millis(),
+            "events_sha256":digest(&serde_json::to_vec(&case.events)?),"source_facts":ledger});
+        write_new_json(
+            &output.join(format!("{}-source-facts.json", case.date)),
+            &extraction,
+        )?;
+        let extraction_sha256 = value_digest(&extraction)?;
+        let order = if index == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        };
+        for with_knowledge in order {
+            let started = Instant::now();
+            let arm = if with_knowledge {
+                "withKnowledge"
+            } else {
+                "withoutKnowledge"
+            };
+            let mut vault_context = if with_knowledge {
+                frozen["cases"][index]["knowledge"]["vault_context"].clone()
+            } else {
+                without_knowledge()
+            };
+            let mut payload = if with_knowledge {
+                frozen["cases"][index]["knowledge"]["snapshot_payload"].clone()
+            } else {
+                json!({})
+            };
+            if with_knowledge {
+                knowledge::normalize_source_based_resolution(
+                    &mut vault_context,
+                    &mut payload,
+                    &case.events,
+                )
+                .map_err(anyhow::Error::msg)?;
+            }
+            let mut args = llm::SuggestMarkdownSummaryArgs {
+                vault_context,
+                mode: "daily-consolidation".into(),
+                task: None,
+            };
+            llm::normalize_source_based_context(&mut args, &case.events)
+                .map_err(anyhow::Error::msg)?;
+            let result = llm::compose_source_based_prepared_summary(
+                args.clone(),
+                case.events.clone(),
+                &ledger,
+                |_, _, _| Ok(()),
+            )
+            .await;
+            let mut artifact = json!({
+                "schema_version":1,"manifest_sha256":manifest_sha256,
+                "date":case.date,"with_knowledge":with_knowledge,"model_used":false,
+                "preparation_mode":"source_based","snapshot_id":case.snapshot_id,
+                "extraction_sha256":extraction_sha256,
+                "elapsed_ms":started.elapsed().as_millis(),"status":"failed",
+                "parser_accepted":false,"persistable":false,"error":null,
+                "structured_draft":null,"daily_revision_content":null,"preview_markdown":null,
+                "normalized_context_payload":if with_knowledge { payload.clone() } else { Value::Null }
+            });
+            match result {
+                Ok(proposal) => {
+                    if let Some(draft) = proposal.structured_draft {
+                        artifact["parser_accepted"] = json!(true);
+                        artifact["structured_draft"] = serde_json::to_value(&draft)?;
+                        let content = llm::daily_revision_content(draft, Vec::new(), &args);
+                        artifact["preview_markdown"] =
+                            json!(llm::render_daily_revision_preview(&content, &[], &[]));
+                        artifact["daily_revision_content"] = serde_json::to_value(&content)?;
+                        match validate_candidate_for_save(
+                            &content,
+                            &case.events,
+                            with_knowledge.then_some(&payload),
+                        ) {
+                            Ok(()) => {
+                                artifact["persistable"] = json!(true);
+                                artifact["status"] = json!("succeeded");
+                                succeeded += 1;
+                            }
+                            Err(error) => artifact["error"] = json!(error.to_string()),
+                        }
+                    } else {
+                        artifact["error"] = json!("structured content missing");
+                    }
+                }
+                Err(error) => artifact["error"] = json!(error),
+            }
+            write_new_json(&output.join(format!("{}-{arm}.json", case.date)), &artifact)?;
+            println!(
+                "source evaluation date={} arm={arm} status={} elapsed_ms={}",
+                case.date, artifact["status"], artifact["elapsed_ms"]
+            );
+        }
+    }
+    ensure!(
+        succeeded == 4,
+        "only {succeeded}/4 candidates passed both production parser and save contract"
+    );
+    Ok(())
+}
+
 #[test]
 #[ignore = "requires private October 13–14 fixtures; performs no model calls"]
 fn preflight_real_day_source_cards() -> Result<()> {
@@ -637,6 +814,27 @@ fn capability_prefix_content(id: &str) -> Result<String> {
         .as_str()
         .context("prefix content required")?
         .to_owned())
+}
+
+#[tokio::test]
+#[ignore = "requires private failed-preparation fixture; performs no model calls"]
+async fn export_first_daily_topic_request() -> Result<()> {
+    let input: EvaluationInput = serde_json::from_slice(&read_bounded(Path::new(
+        &std::env::var("LOG_INBOX_EVALUATION_INPUT")?,
+    ))?)?;
+    let output = capability_output(&input)?;
+    let config = llm::LlmConfig::from_env().context("explicit local model required")?;
+    ensure!(
+        llm::knowledge_text_stays_local(&config),
+        "local model required"
+    );
+    let case = input.cases.first().context("evaluation case required")?;
+    let exported = llm::export_first_daily_topic_request(&config, &case.events)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    write_new_json(&output.join("first-daily-topic-request.json"), &exported)?;
+    println!("first daily topic request exported date={}", case.date);
+    Ok(())
 }
 
 #[tokio::test]

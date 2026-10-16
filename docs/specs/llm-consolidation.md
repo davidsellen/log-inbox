@@ -1,6 +1,6 @@
-# Daily Model Generation
+# Daily Preparation
 
-The model turns one server-resolved day of bounded automated evidence into a structured review candidate. It never chooses the destination, writes Markdown, resolves review decisions, or rewrites owner-authored notes.
+Preparation turns one server-resolved day of bounded automated evidence into a structured review candidate. Source-based preparation is the default and requires no model. Optional semantic preparation uses the configured model. Neither mode chooses the destination, writes Markdown, resolves review decisions, or rewrites owner-authored notes.
 
 ## Active flow
 
@@ -8,12 +8,12 @@ The model turns one server-resolved day of bounded automated evidence into a str
 2. Rust groups events using namespaced repository, work-item, pull-request, task, session, and source identities. Numeric/string/URL and consistent object references share identity normalization with Knowledge. A task may inherit its single unambiguous external identity. Otherwise an exact feature branch can associate tasks without explicit identities; integration branches and conflicting or malformed identities cannot authorize that merge.
 3. The service freezes event IDs and content digests in an immutable evidence snapshot.
 4. When Knowledge collections or mappings are enabled, the server resolves reviewed mappings and unique exact title, alias, or typed-reference matches. Conflicting matches produce no link. Repository-wide mappings may authorize a link but cannot merge distinct work items; only reviewed work-item/PR relationships may alias groups.
-5. Rust deterministically extracts all eligible bounded fact cards from each automated source separately, without Knowledge. Rust validates each card and assigns source-owned fact IDs. The configured OpenAI-compatible endpoint first proposes bounded source-only topics from that ledger, without Knowledge. A later request selects source-backed highlights from the prepared topics and server-authorized background; neither request generates factual prose or citation lists. When the endpoint is verifiably local (`localhost`, a loopback address, or the Compose `ollama` service), background includes bounded opening excerpts from the already-resolved canonical notes. Nonlocal endpoints require connection-specific consent and receive link metadata without reference-note excerpts.
+5. Rust deterministically extracts all eligible bounded fact cards from each automated source separately, without Knowledge. Rust validates each card and assigns source-owned fact IDs. In default source-based mode, Rust retains each conservative source identity bucket and selects at most four recent eligible source reports per field, without inference or a configured provider. Optional semantic mode first asks the configured endpoint to propose bounded source-only topics, then to select source-backed highlights. Neither mode invents factual prose or citation lists. Only semantic mode sends activity to a provider; nonlocal endpoints require connection-specific consent. Only verified local semantic endpoints may receive bounded canonical-note excerpts.
 6. Rust renders validated display projections with source times, derives citations only from visible supporting clauses, retains every original card as typed reported history, and validates group membership, complete evidence coverage, factual evidence IDs, canonical links, and text limits using the persisted revision contract. Malformed extraction, stale-only selection and invalid composition fail visibly.
-7. A valid result becomes an immutable proposal revision bound to its evidence and optional Knowledge snapshots in SQLite. Invalid, incomplete, or unavailable model output is a visible failure.
+7. A valid result becomes an immutable proposal revision bound to its evidence and optional Knowledge snapshots in SQLite. Invalid, incomplete, or unrepresentable results are visible failures. Semantic model errors never silently switch the selected mode.
 8. The server renders the reviewed structure deterministically for preview. Only explicit dashboard Apply invokes the Markdown writer.
 
-Manual-only days need no model. Mixed days send only automated evidence to the provider and keep manual prose verbatim in a separate section. There is no raw-log or free-form Markdown fallback.
+Source-based and manual-only days need no model. Semantic mixed days send only automated evidence to the provider and keep manual prose verbatim in a separate section. The separately selected activity-record path remains available; source preparation is a structured, cited proposal rather than a free-form Markdown fallback.
 
 ## Structured output
 
@@ -29,12 +29,11 @@ stale clause maps are rejected when saving owner edits. The editor clears a map
 only when its fact text is explicitly changed; unchanged and title-only saves
 preserve the original text/map, including browser-normalized Windows line endings.
 The readable Daily projection applies the same clause filtering as server-rendered
-Copy and Apply. Generation has deterministic source extraction, bounded source-only topic preparation and
-selection-only composition. Neither stage may invent event IDs; final citations
+Copy and Apply. Both modes share deterministic source extraction and the same validated composition catalog. Semantic mode adds bounded source-only topic preparation and model selection; source mode chooses bounded exact reports in Rust. Neither stage may invent event IDs; final citations
 are derived exclusively from selected server-owned source facts. Existing stored
 revisions and historical string-compatible readers retain their format; no
 migration or automatic rewrite is performed. The generation contract is
-`daily-structured-v15-joint-subject-partition`, invalidating ordinary cache reuse from older
+`daily-structured-v20-source-headings`, invalidating ordinary cache reuse from older
 contracts. Final output retains four facts per field and 320 characters per fact.
 Oversized selected bundles fail rather than being clipped.
 Required visible source clauses may be impossible to fit within these inherited
@@ -49,37 +48,89 @@ sentence/semicolon clauses of longer strings. A bare newline cannot split a
 clause. Only outer whitespace is normalized; internal whitespace, including CRLF,
 and negation remain exact source content. Clipped or unrepresentable clauses are excluded; if required material has
 no eligible representation, preparation fails. No model request prunes this ledger.
+Eligible whole typed containers are retained as one exact JSON value, without also
+emitting their descendants. This nonoverlapping extraction frontier keeps all
+statuses, counts, names and qualifications together. Oversized or otherwise
+ineligible containers still descend through original pointers; scalar extraction
+is unchanged. No deduplication occurs across source pointers or events.
 Fact IDs map to field-scoped source pointers and exact quotations. Rust verifies
 the pointer, quotation, field compatibility, source identity and required fields;
 reloaded ledgers are checked again against original evidence. Not-run, pending and
 probable qualifications remain source data; an extracted validation fact does not
 establish that checks passed. Knowledge cannot create source facts.
 
+### Default source-based mode
+
+Source identity buckets are review aids, not inferred semantic subjects. The UI
+labels the mode **Source-based preparation · review grouping** and **No model
+used**. Repository/work-item/PR/task/feature-branch and conservative ambiguous
+identity handling reuse the existing grouping rules. Each raw identity bucket
+remains separate in both Knowledge arms; reviewed note aliases cannot merge it.
+Server-encoded branch keys retain their stable identity but display the original
+UTF-8 branch name in headings; malformed/control-character names use a safe
+generic branch label.
+
+Rust creates one nonsemantic bucket assignment containing every eligible card,
+rebuilds and validates the complete ledger against original events, then selects
+at most four recent eligible singleton reports for each field. Selected reports
+are rendered chronologically. All original eligible reports remain available in
+typed reported history with precise source clauses. These are bounded highlights,
+not a claim to semantic completeness. An earlier blocker or next-step report is
+labeled historically; a later report does not prove closure of an independent gate.
+Existing ownership, lifecycle, field coverage, citation and size checks still
+apply. Oversized/unrepresentable required source material fails visibly.
+
+Source-mode Knowledge contributes reviewed navigation only. Resolve without note
+excerpts, normalize note associations and evidence maps to raw group identities,
+then hash/persist that exact context. It supplies no historical facts or inferred
+product acceptance. Source preparation makes no provider request, requires no
+provider consent and does not count as a model-performance sample.
+
+The generate request may select `preparation_mode: source_based|semantic`;
+omission selects source-based. Capture the mode in attempt/revision provenance
+and context freshness so changing modes cannot silently reuse the other mode's
+candidate. Historical revisions without mode retain semantic provenance. Retry,
+reference adjustment and comparison preserve the relevant captured mode; scheduled
+preparation defaults to source-based. The existing edited-draft, expired-evidence,
+cancellation, concurrent-write and explicit Apply protections remain in force.
+
+### Optional semantic mode
+
 Topic preparation sees verified source cards and event identities, without Knowledge.
 Chronological windows contain at most 24 cards and at most 12 server-owned topic
-anchors. V15 requires `{topics:[{subject,fact_ids}]}`: one to twelve nonempty
-subject clusters containing every current-window fact exactly once. Empty clusters,
-unknown or duplicate IDs, duplicate exact subject labels and extra fields fail.
-The server flattens validated clusters through the existing subject assignment
-logic; the model does not generate canonical IDs or anchors. Labels must be
-nonempty, trimmed, control-free and at most 80 characters. Match labels exactly;
-no normalization, fuzzy matching or synonym merge repairs a reply. The server
-assigns deterministic chronological topic IDs and retains the earliest owned
-source anchor, with at most 12 distinct subjects across the whole workstream.
-Unknown, missing, cross-group or duplicate fact assignments fail.
+anchors. The representative protocol requires `{assignments:[integer,...]}` with exactly one entry per
+current card, in its displayed order. References select existing topic representatives
+or current source cards; no subject prose or source IDs are generated. A newly chosen
+representative must select itself. Unknown references, chains, cycles, invalid roots,
+noninteger/negative values, wrong counts, duplicate root properties and extra fields
+fail. The server resolves references to original cards, retains complete coverage,
+assigns chronological topic IDs and preserves the earliest member as canonical anchor.
+At most twelve topics may exist across the whole workstream.
 
-`proposed_subject` is optional for legacy ledger decoding, mandatory for the new
-contract and explicitly untrusted interpretation. Existing anchors expose their
-subject for exact reuse in later windows. Labels never become factual Daily text,
-citations, product identity, resolution or approval, and are excluded from the
-compact composition payload and saved factual/history content. Anchors retain
-source quotes. Both Knowledge arms share the prepared assignment, revalidated
-against original cards and canonical groups. Structural validity still does not
-prove coherent or sufficiently distinct subjects; semantic and continuation
-capability checks remain separate gates.
+`representative_fact_id` is optional for legacy decoding and mandatory for the new
+contract; it must name an owned member of that topic. Its original quote is retained
+for later windows even when it differs from the earliest canonical anchor. Thus
+canonical identity does not silently replace the model's selected semantic example.
+The legacy `proposed_subject` field remains decodable but new partitions do not
+produce it. A representative remains an untrusted grouping interpretation, never
+product identity, resolution, approval or a new factual claim. The frozen semantic evaluation harness shares the prepared assignment across its
+Knowledge arms, revalidated against original source cards and groups. The existing
+interactive semantic comparison prepares each arm separately; shared semantic
+partitions there remain unverified. Source-mode comparisons always share one
+exact deterministic source ledger.
+An all-one partition may be structurally valid; coherence and material distinctions
+still require independent assessment.
+
+Production, compatibility and request-capture/continuation helpers share a2,048-token
+output budget. The compact canonical reply contains at most24 small integers and
+has no free-form labels or repeated source-ID membership arrays. A length finish
+still fails closed: no partial JSON, assignment repair, source dropping or silent
+fallback. Semantic quality and whole-day latency remain separate requirements.
+
 
 V13 restores bounded original source context to topic preparation. A deduplicated
-table covers window owners and existing anchor owners; anchor records include the
+table covers window owners, canonical anchor owners and representative owners;
+representative records include the
 exact owning event ID. Only original scalar task_id, session_id, branch, event_type
 and status values are included. Identity strings are at most 256 characters,
 lifecycle/status strings at most 64, and the table at most 32 KiB. Absent or
@@ -87,7 +138,7 @@ non-scalar fields are omitted; oversized permitted values/table fail preparation
 without clipping identities or pruning facts. Shared identities are contextual
 clues, not required merges; different identities do not establish separate topics.
 No lifecycle/status value proves defect resolution, verification or acceptance.
-Output assignment schema, exact quotes, source anchors and coverage remain the same.
+Exact source quotations, owner validation and coverage remain mandatory.
 
 The topic prompt asks for coherent subjects across lifecycle and factual fields,
 not one topic per card, position, source event or field. The number of topic IDs

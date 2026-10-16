@@ -1243,14 +1243,17 @@ mod tests {
                             Json(json!({"error":"use completion tokens"})),
                         );
                     }
-                    assert_eq!(
-                        body["max_completion_tokens"],
-                        if stage == "Stage: topic partition" {
-                            2048
-                        } else {
-                            1536
-                        }
-                    );
+                    let expected_tokens = if stage == "Stage: topic partition" {
+                        // The whole validation array is one card, without its duplicate child.
+                        let assignments = &body["response_format"]["json_schema"]["schema"]
+                            ["properties"]["assignments"];
+                        assert_eq!(assignments["minItems"], 5);
+                        assert_eq!(assignments["maxItems"], 5);
+                        2048
+                    } else {
+                        1536
+                    };
+                    assert_eq!(body["max_completion_tokens"], expected_tokens);
                     assert!(body.get("temperature").is_none());
                     (
                         StatusCode::OK,

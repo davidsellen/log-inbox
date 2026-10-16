@@ -70,7 +70,17 @@ impl Store {
             completed <= total && total <= 500,
             "invalid generation progress"
         );
-        Ok(self.connect()?.execute("UPDATE generation_attempts SET completed_groups=?2,total_groups=?3,stage=?4 WHERE id=?1 AND state='running' AND completed_groups<=?2", params![id, completed as i64,total as i64,if fallback {"requesting_model_fallback"} else {"requesting_model"}])? == 1)
+        let source_based = self
+            .generation_attempt_provenance(id)?
+            .is_some_and(|value| value["preparation_mode"] == "source_based");
+        let stage = if source_based {
+            "preparing_sources"
+        } else if fallback {
+            "requesting_model_fallback"
+        } else {
+            "requesting_model"
+        };
+        Ok(self.connect()?.execute("UPDATE generation_attempts SET completed_groups=?2,total_groups=?3,stage=?4 WHERE id=?1 AND state='running' AND completed_groups<=?2", params![id, completed as i64,total as i64,stage])? == 1)
     }
 
     pub fn update_generation_attempt_stage(&self, id: &str, stage: &str) -> Result<bool> {
@@ -150,7 +160,7 @@ impl Store {
             let provenance:Option<String>=row.get(11)?;
             let model_selection=provenance.as_deref().and_then(|text|serde_json::from_str::<Value>(text).ok()).and_then(|provenance| {
                 let mut selected=serde_json::Map::new();
-                for field in ["connection_id","provider","model","profile","configuration_digest"] {
+                for field in ["connection_id","provider","model","profile","configuration_digest","preparation_mode"] {
                     if let Some(value)=provenance.get(field).and_then(Value::as_str).filter(|value|!value.is_empty() && value.len()<=256) {
                         if field=="configuration_digest" && (value.len()!=64 || !value.bytes().all(|byte|byte.is_ascii_hexdigit())) {continue;}
                         selected.insert(field.to_owned(),json!(value));
@@ -159,7 +169,7 @@ impl Store {
                 (!selected.is_empty()).then_some(Value::Object(selected))
             });
             let failure_code=row.get::<_,Option<String>>(10)?.filter(|code|!code.is_empty() && code.len()<=64 && code.bytes().all(|byte|byte.is_ascii_lowercase()||byte.is_ascii_digit()||byte==b'_'));
-            Ok(json!({"id":row.get::<_,String>(0)?,"local_date":row.get::<_,String>(1)?,"operation_type":row.get::<_,String>(2)?,"state":state,"started_at":started_at,"finished_at":finished_at,"elapsed_ms":elapsed_ms,"timeout_seconds":row.get::<_,i64>(6)?,"reference_mode":row.get::<_,String>(7)?,"completed_groups":row.get::<_,i64>(8)?,"total_groups":total_groups,"failure_code":failure_code,"inference_progress":if total_groups>0 {"recorded"}else{"unknown_or_not_recorded"},"model_selection":model_selection}))
+            Ok(json!({"id":row.get::<_,String>(0)?,"local_date":row.get::<_,String>(1)?,"operation_type":row.get::<_,String>(2)?,"state":state,"started_at":started_at,"finished_at":finished_at,"elapsed_ms":elapsed_ms,"timeout_seconds":row.get::<_,i64>(6)?,"reference_mode":row.get::<_,String>(7)?,"completed_groups":row.get::<_,i64>(8)?,"total_groups":total_groups,"failure_code":failure_code,"inference_progress":if model_selection.as_ref().is_some_and(|value| value["preparation_mode"] == "source_based") {"not_applicable"}else if total_groups>0 {"recorded"}else{"unknown_or_not_recorded"},"model_selection":model_selection}))
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(records)
     }
@@ -246,6 +256,39 @@ fn attempt_from_row(row: &Row<'_>) -> rusqlite::Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_preparation_progress_and_history_do_not_claim_model_inference() {
+        let (store, workspace, date) = fixture();
+        let now = Utc::now();
+        let attempt = store
+            .create_generation_attempt(&workspace, date, "scheduled", 1200, now)
+            .unwrap();
+        let id = attempt["id"].as_str().unwrap();
+        store
+            .set_generation_attempt_provenance(
+                id,
+                &json!({"preparation_mode":"source_based", "fingerprint":"a".repeat(64)}),
+            )
+            .unwrap();
+        store
+            .update_generation_attempt_progress(id, 1, 2, false)
+            .unwrap();
+        assert_eq!(
+            store
+                .latest_generation_attempt(&workspace, date)
+                .unwrap()
+                .unwrap()["stage"],
+            "preparing_sources"
+        );
+        let history = store.generation_history(&workspace, 100).unwrap();
+        assert_eq!(
+            history[0]["model_selection"]["preparation_mode"],
+            "source_based"
+        );
+        assert_eq!(history[0]["inference_progress"], "not_applicable");
+        assert!(history[0]["model_selection"].get("model").is_none());
+    }
 
     #[test]
     fn timing_history_keeps_backward_or_invalid_clock_durations_unknown() {
