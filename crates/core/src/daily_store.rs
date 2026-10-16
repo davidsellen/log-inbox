@@ -1456,7 +1456,7 @@ impl Store {
                 history(content)?
                     == previous
                         .as_ref()
-                        .map(&history)
+                        .map(history)
                         .transpose()?
                         .unwrap_or_default(),
                 "reported history is read-only; retain the verified source reports"
