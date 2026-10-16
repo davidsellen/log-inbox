@@ -33,7 +33,7 @@ Copy and Apply. Both modes share deterministic source extraction and the same va
 are derived exclusively from selected server-owned source facts. Existing stored
 revisions and historical string-compatible readers retain their format; no
 migration or automatic rewrite is performed. The generation contract is
-`daily-structured-v21-source-highlights`, invalidating ordinary cache reuse from older
+`daily-structured-v22-source-outcomes`, invalidating ordinary cache reuse from older
 contracts. Final output retains four facts per field and 320 characters per fact.
 Oversized selected bundles fail rather than being clipped.
 Required visible source clauses may be impossible to fit within these inherited
@@ -42,7 +42,8 @@ fails closed; this contract preserves the evidence checks, not a guarantee that
 every formerly representable group remains generatable.
 
 Extraction processes the bounded message and allowed metadata of exactly one
-event, including original typed decisions, checks, blockers and follow-ups. Rust
+event, including explicit `metadata.outcome`, original typed decisions, checks,
+blockers and follow-ups. Rust
 retains all eligible cards from complete short source values or complete original
 sentence/semicolon clauses of longer strings. A bare newline cannot split a
 clause. Only outer whitespace is normalized; internal whitespace, including CRLF,
@@ -76,8 +77,21 @@ eligible cards per field. The priority queue first covers distinct exact task
 identities (session or event identity when absent), then remaining events, then
 remaining clauses. These identities prioritize reports within a source bucket;
 they do not merge buckets or establish semantic subjects. Main outcome messages
-and existing scope-bearing validation values precede ancillary leaves, with
-original source order preserved rather than lexical fact-ID order.
+and existing scope-bearing validation values precede ancillary leaves. Explicit
+`metadata.outcome` reports precede generic message headlines within the same event;
+message and ancillary cards remain in the ledger/history. Original source order
+is preserved rather than lexical fact-ID order. Explicit outcomes remain dated
+producer claims: they do not establish verification, acceptance, closure or KB
+promotion authority. See [agent reporting](../agent-integration.md) for concise,
+self-contained producer guidance.
+
+A nonempty explicit outcome must yield at least one eligible bounded card at
+`/metadata/outcome` or an eligible descendant; otherwise preparation fails
+visibly rather than falling back to the generic message. Typed containers use
+the existing descendant extraction rules. This requires one eligible card, not
+that every oversized or otherwise ineligible leaf can be represented. Optional
+omission remains supported, and protected metadata reduction retains outcomes
+when large ancillary values are removed.
 
 Selection uses only existing singleton/pair/triple catalog choices, with at most
 four choices per field and 320 characters per choice. Packing is anchored to the

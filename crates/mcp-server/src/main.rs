@@ -8974,6 +8974,7 @@ mod knowledge_destination_tests {
             "daily-structured-v18-source-frontier",
             "daily-structured-v19-source-based",
             "daily-structured-v20-source-headings",
+            "daily-structured-v21-source-highlights",
         ] {
             let (mut state, profile, date) = generation_test_state();
             state.llm_config = Some(llm::LlmConfig::for_test("http://127.0.0.1:9"));

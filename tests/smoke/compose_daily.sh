@@ -51,7 +51,7 @@ daily_headers="Host: 127.0.0.1:8788"
 origin_header="Origin: http://127.0.0.1:8788"
 cookie_jar="$smoke_root/cookies"
 
-event_body=$(jq -n --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"log_activity",arguments:{source:"smoke/compose",level:"info",timestamp:$timestamp,message:"Completed the live Compose smoke workflow.",metadata:{task_id:"compose-smoke",event_type:"complete",status:"succeeded",repo:"log-inbox",tests:["live Compose smoke"]}},_meta:{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{name:"compose-smoke",version:"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}')
+event_body=$(jq -n --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"log_activity",arguments:{source:"smoke/compose",level:"info",timestamp:$timestamp,message:"Completed the live Compose smoke workflow.",metadata:{task_id:"compose-smoke",event_type:"complete",status:"succeeded",repo:"log-inbox",outcome:"Local preparation and reviewed Apply verified; external provider acceptance remains unverified.",tests:["live Compose smoke"]}},_meta:{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{name:"compose-smoke",version:"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}')
 curl -fsS --max-time 10 "$collector_url/mcp" \
   -H 'Authorization: Bearer smoke-ingest-key' \
   -H 'Content-Type: application/json' \
@@ -132,16 +132,19 @@ curl -fsS --max-time 10 "$daily_url/api/v2/daily/$local_date/apply" \
 
 grep -F 'Owner content before the managed block.' "$target" >/dev/null
 grep -F 'Completed the live Compose smoke workflow.' "$target" >/dev/null
+grep -F 'Local preparation and reviewed Apply verified; external provider acceptance remains unverified.' "$target" >/dev/null
 grep -F 'live Compose smoke' "$target" >/dev/null
 # Each visible source clause must cite exactly the event used by extraction.
 printf '%s' "$day" | jq -e --arg event "$event_id" '
   .current_revision.content.workstreams[0] as $stream |
-  ($stream.outcome | length == 1) and
+  ($stream.outcome | length == 2) and
   ($stream.validation | length == 1) and
-  ($stream.outcome[0].text | contains("Completed the live Compose smoke workflow.")) and
+  ($stream.outcome | any(.text | contains("Completed the live Compose smoke workflow."))) and
+  ($stream.outcome | any(.text | contains("Local preparation and reviewed Apply verified; external provider acceptance remains unverified."))) and
   ($stream.validation[0].text | contains("live Compose smoke")) and
-  ($stream.outcome[0].evidence_event_ids == [$event]) and
+  ($stream.outcome | all(.evidence_event_ids == [$event])) and
   ($stream.validation[0].evidence_event_ids == [$event]) and
+  ($stream.reported_history | any(.original_field == "outcome" and (.fact.text | contains("external provider acceptance remains unverified")))) and
   ($stream.reported_history | any(.original_field == "validation" and (.fact.text | contains("[\"live Compose smoke\"]")))) and
   ($stream.reported_history | all(.fact.evidence_event_ids == [$event] and (.fact.source_clauses | length == 1)))
 ' >/dev/null

@@ -28,6 +28,7 @@ Send `progress` only for durable milestones, decisions, deployments, or blockers
 | `changed_paths` | Optional bounded list of paths when they materially help a later diagnosis. |
 | `commit` | Resulting commit hash when one was created. |
 | `commit_message` | Concise human-readable commit subject when one was created. |
+| `outcome` | Optional short, self-contained reported result, retaining its scope and unresolved qualifications. |
 | `tests` or `validation` | Commands or checks and their outcome. |
 | `work_item` or `pull_request` | Durable external identifiers or named URLs. |
 
@@ -45,6 +46,17 @@ merge and deployment separate. A completed investigation can still leave the
 underlying defect unresolved. Use explicit `blocker` and `follow_up` metadata for
 remaining work rather than relying on a terminal task status to imply resolution.
 Knowledge excerpts provide background; they are not evidence that work happened.
+
+For terminal reports, put the useful result directly in `metadata.outcome` rather
+than requiring a summary selector to recover it from a generic completion headline.
+Use a short string or small structured value; each meaningful statement should fit
+within 280 characters with its qualifications. For example: "Local route validation
+now rejects missing customer IDs; shared deployment remains pending." Keep detailed
+checks in `validation`, and actionable next steps in `follow_up`. An outcome is a
+producer-reported claim, not independent verification, human acceptance or approval
+to promote Product KB content. Never omit "probable", "unverified", "not run" or
+similar limitations to make a fact shorter. Existing message-only producers remain
+supported, and original messages remain in source history.
 
 The product resolver compares normalized repository identifiers with wiki-link targets in the configured product navigation. For example, `CustomerPortal`, `customer-portal`, and `Customer Portal` can match the same existing note. A repository may contain several products, so changed modules and an explicitly confirmed `product` take precedence over guessing from the repository name.
 
@@ -96,7 +108,9 @@ Do not send secrets, access tokens, complete diffs, source files, personal data,
     "modules": ["chat", "host-navigation"],
     "changed_paths": ["frontend/chat", "backend/navigation"],
     "commit": "abc1234",
-    "tests": ["navigation tests: passed", "frontend build: passed"]
+    "outcome": "Local route validation now rejects missing customer IDs; shared deployment remains pending.",
+    "tests": ["navigation tests: passed", "frontend build: passed"],
+    "follow_up": "Review and merge the change before shared deployment."
   }
 }
 ```
@@ -115,7 +129,7 @@ Register the global Streamable HTTP server with `codex mcp add log-inbox --url h
 - Use `event_type=start` and `status=running` initially. Finish with `event_type=complete|blocked|failed` and the matching status.
 - Write a concise human message stating the intent or outcome. Put structured facts in metadata: `agent`, `host`, `repo`, `branch`, known base/target branches, confirmed `product`, `modules`, commit hash and concise `commit_message` when available, tests, work item, pull request, and canonical note candidates. Include `changed_paths` only when they materially help a later diagnosis.
 - Confirm product names against the configured product navigation when available. Do not guess a product for a multi-product repository; omit it and preserve repo/module facts when uncertain.
-- Make the terminal event daily-note-ready: include the outcome, important decision or diagnosis, validation, blocker or follow-up, and durable links without dumping raw logs.
+- Make the terminal event daily-note-ready: put a short self-contained reported result in `metadata.outcome`, retaining its scope and qualifications. Keep validation and actionable `blocker`/`follow_up` fields separate; include durable links without dumping raw logs.
 - Do not read, create, or append an Obsidian daily note for work logging. Send the material to Log Inbox; its consolidation workflow owns Markdown generation and review.
 - Never send secrets, tokens, source contents, full diffs, personal data, or large command output. Reporting failure must not corrupt or replace the primary task result.
 - Pass `source`, `level`, `message`, and structured `metadata` directly to `log_activity`.

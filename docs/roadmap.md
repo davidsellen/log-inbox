@@ -305,6 +305,163 @@ the associated pull request and lifecycle report.
 ### Next Product KB ingestion delivery
 
 
+**Concise source summaries — authorized 2026-10-16 (implementation/capability validation).**
+The owner requests shorter summaries with the remaining outcomes and pending
+work visible, unchanged evidence checks, the original October13–14 paired
+Knowledge evaluation and local deployment before Product KB ingestion.
+Reuse `codex/source-highlight-coverage` at clean `06cc1b0`; the branch remains
+local. Root owns this task record, specifications, frozen evaluation and deployment.
+
+1. Prove which original rubric outcomes/qualifications fit the existing exact-card
+   and display bounds. The v21 task-head selector improved coverage to6/12 while
+   lengthening both drafts; a third positional ranking tweak is not sufficient.
+2. Use a bounded factory Astra/low architecture escalation after Sol/high
+   diagnosis, then a bounded Sol implementation of the chosen information-selection
+   contract. Keep quote ownership, qualifications, whole source history, existing
+   revision protections and optional Knowledge. Do not infer closure, hard-code
+   fixture identities or make a new model a prerequisite for source preparation.
+3. Compare the unchanged four arms against v21 coverage6/12 and6272/7810
+   Markdown characters, also retaining the original shorter4368/6075 baseline.
+   Target all twelve original rubric items with no unsupported claims and shorter
+   output; disclose any infeasibility/remaining omissions instead of weakening checks.
+4. Independently review actual code and outputs, run required checks, back up app
+   data and deploy locally. Preserve existing notes/drafts; no production Apply.
+
+| Stage/scenario | Required evidence | State |
+| --- | --- | --- |
+| Representability and architecture | Human reference12/12; exact-card automatic packing/parser/save in four arms; bounded architecture review | Passed feasibility only |
+| Concise outcomes and pending work | Producer explicit outcomes covered; strict generic noise gate failed; frozen real-day diagnostic | Historical usefulness not demonstrated |
+| Evidence and revision safety | Ownership/history/qualification, protected outcome reduction, visible zero-card failure, expiry/cache and strict parser/save regressions | Passed |
+| Integrated review/checks | Complete task review plus focused fixes; Rust286 passed/13 ignored, browser230 passed, format/Clippy/release Compose passed | Passed; actual output quality separate |
+| Local preservation/deployment | Offline39-table backup verified; both matching images healthy; owner/browser checks and four-day preservation | Passed |
+
+**Delivery result: partial implementation deployed; historical usefulness gate
+failed.** Both real-day selection plans timed out on their first nonempty model
+request at180003ms each (360.18seconds total). October14's empty source group
+used no model. Zero candidates were produced for the four planned arms; strict
+parsing/save was never reached for those failed dates. Their factual accuracy,
+rubric coverage and summary length are therefore not assessable, and this run
+cannot establish Knowledge benefit. The failed generic boilerplate gate remains
+failed. No model-backed preparation mode, prompt/model sweep, repaired output or
+historical replacement was promoted.
+
+| Frozen comparison | October13 | October14 | Knowledge result |
+| --- | --- | --- | --- |
+| Existing source default, before and after explicit-outcome change |6272 Markdown characters;27 highlights |7810 characters;32 highlights | Facts/content identical apart from navigation; no demonstrated factual/editing benefit |
+| New selection-only diagnostic |180003ms timeout; neither arm has a candidate |180003ms timeout; neither arm has a candidate | Not measurable without candidates |
+| Private human reference, not automatic output |3507 characters;15 highlights |3705 characters;14 highlights |12/12 original items representable; all four parser/save arms pass |
+
+The unchanged default still fully highlights6/12 original rubric items; explicit
+outcomes improve future producer inputs, which the historical fixture does not
+contain. Its four before/after content and preview artifacts are byte-identical.
+The reference proves that useful complete summaries fit the bounds, not that the
+automatic selector can find them. Next delivery remains selection usefulness and
+latency over exact cards, or explicit owner selection/review; accepted-plan Product
+KB ingestion remains deferred until that daily-summary gate is demonstrated.
+Final local checks:286 Rust tests passed/13 opt-in tests ignored,230 browser
+tests passed, formatting/Clippy passed, qualified-outcome release Compose smoke
+passed through reviewed Apply/restart. The separate opt-in real-model diagnostic
+failed as reported. Tests initially unable to bind fixture sockets in the sandbox
+passed with permitted loopback execution; no evidence or assertion was weakened.
+
+Pretrial hypothesis, original inputs and unchanged rubric are frozen privately in
+`/tmp/log-inbox-concise-evaluation-20261016/`. KB ingestion remains gated.
+
+Architecture/feasibility evidence: Sol diagnosis and bounded Astra/low review
+rejected another positional/keyword ranking tweak. Source-only inference may
+select exact cards independently of semantic grouping; source preparation must
+remain provider-free unless the owner explicitly selects a model-backed option.
+A private human reference exposed catalog locality: distant same-field facts fit
+four×320 but useful pairings were absent from the bounded precomputed catalog.
+The evaluation-only helper therefore packs selected existing singleton cards
+on demand (at most three cards per bundle) and submits server-owned choices to
+the unchanged parser/save checks. Quotes, fields, historical labels, citations,
+complete ledger and final bounds remain unchanged. The oracle is private test
+data, never a production ranking, prompt, lookup or repaired model response.
+
+Independent reference review initially found11/12: the candidate omitted a scoped
+passed check alongside the interrupted full-host build. A separate corrected
+reference, retaining the first artifact, passed all four parser/save arms and all
+12 original rubric items. Its activity-only Markdown is3507/3705 characters,
+15/14 bullets, with58/58 dated bullet claims supported across all four arms.
+History remains147/191 cards. Each group fits eight facts and1600 highlight-text
+characters (largest1581); four facts per field,320 characters per fact and exact
+ownership remain enforced. This proves representability, not automatic selection.
+Actual model usefulness was not demonstrated in the trials below. The first small local
+selection probe (qwen3:4b-instruct-2507-q4_K_M, already installed) returned the
+needed source cards but incorrectly assigned outcome cards to Decision/Blocker;
+the unchanged field validator rejected it. The protocol asked the model to repeat
+known field ownership and propose packing, creating avoidable responsibilities.
+One evidence-based evaluation-only protocol revision now requests a flat list of
+known card refs; Rust derives fields and bounded packing from original cards.
+Original failed artifacts remain immutable. No repaired model output or production
+mode change was promoted. Private local endpoint transport initially required permitted loopback
+execution; the permitted response failure is distinct from that infrastructure gap.
+
+Flat-reference v2 initially passed the tiny sample (selected concrete behavior and
+probable/unverified/pending cards, omitted generic headline/count). Exposing the
+existing mandatory fields and exact Earlier/Latest labels changed the 4B choice:
+it omitted the probable-cause card and failed the semantic gate. No real-day
+output or runtime mode is promoted from that failed capability result. A second
+bounded Astra decision authorized one larger local instruction-model escalation,
+`gemma3:12b` from the official Ollama library, with the corrected flat policy and
+unchanged evidence checks. Resource inspection found10GiB available RAM plus7.6GB
+of idle task-model memory subject to normal expiry, and32GiB free disk. Existing
+model/default settings were preserved. Its frozen choice/stopping policy is in
+private `larger-model-decision.json`; the subsequent diagnostic exception below
+was recorded before real-day calls. No further model trial followed those failures.
+
+The larger model's small response retained all substantive behavior and
+probable/unverified/pending qualifications, but also the generic completion
+headline: strict boilerplate omission failed. Actual response `[0,2,3,4]`,62558ms;
+no unknown facts, field reassignment, count fragment or source/budget violation.
+That failed noise result remains failed. A focused Astra decision permitted one
+read-only real-day diagnostic against the original rubric/length targets; this
+explicitly changes the stopping policy, not the original result, model, prompt,
+evidence or rubric. No further model/prompt trial follows a failed real-day
+result. Private `real-diagnostic-decision.json` records the pre-run conditions.
+An experimental opt-in strategy required shorter summaries on both dates and
+improved complete coverage without losing previous full items. Independent
+review also had to find no material pending/qualification loss or unsupported
+closure, with passing strict save/history checks and acceptable whole-day latency.
+Those promotion conditions were not met.
+Provider-free defaults and the KB gate remain unchanged.
+
+Deterministic producer improvement implemented in this delivery:
+optional `metadata.outcome` is now admitted as exact source-owned outcome data and
+prioritized before that event's generic message. No original cards/history are
+pruned; qualified message-only sources remain supported. Agent reporting, ingest
+and MCP schema guidance describe short self-contained outcomes, separate checks
+and pending work, and no inferred verification or Knowledge approval. No owner
+metadata-correction authority or saved recommendation preferences were expanded.
+Contract `daily-structured-v22-source-outcomes` retains v21 safe historical expiry
+amendments. Focused source/forgery/provider-free and full legacy partial-expiry
+checks pass. Both frozen dates contain zero such new fields; before/after facts
+and topics match apart from the contract, and all four existing source-mode drafts,
+contents and previews are exactly identical. This is a future-input improvement,
+not a repair of historical prose or a passed automatic-usefulness gate.
+
+Independent complete-task review and focused follow-up resolved one P2: protected
+metadata reduction could omit an explicit outcome alongside large ancillary
+values. Outcomes now survive that reduction, and an explicit nonempty outcome
+with no eligible card fails visibly. Mixed typed containers require at least one
+eligible descendant, not every leaf. Regression coverage and the qualified-outcome
+release Compose Apply/restart check pass. Follow-up review found no remaining
+code findings; reviewed nine-path diff SHA256
+`bca4b00e68c6d0a0581c728f7b725d5992fa6878eecf1f573dba1c85772f68ed`
+against starting HEAD/base/merge-base `06cc1b0`. The actual diagnostic failed as
+reported above; passing code review does not establish summary usefulness.
+
+The deterministic producer change is deployed locally. Both built images match
+the running services; health and owner
+authentication pass, with October13–16 notes/revisions/evidence, environment and
+mounts preserved. Verified offline primary backup: quick_check `ok`,39 tables;
+old executable binaries are retained in ignored
+`tmp/deployments/concise-source-20261016/`. Browser verification shows the existing
+review draft preserved, Source-based default, no model used and nothing written.
+No historical draft was regenerated or applied, and no model-backed mode has
+been promoted.
+
 **Source highlight coverage — authorized 2026-10-16 (implemented and locally verified).**
 Improve important outcome and pending-work visibility before Product KB ingestion.
 Starting clean `main`: `34bbcc6690f063ce9f1345cf1a8e708c7b696214`;
