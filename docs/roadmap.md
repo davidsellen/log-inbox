@@ -431,6 +431,19 @@ Source preparation is operationally recovered; summary completeness and Product 
 ingestion remain gated. No remote publication, merge or branch deletion is claimed.
 
 
+Publication follow-up — 2026-10-16: after the operational recovery and remaining
+highlight/Knowledge limitations were disclosed, the owner explicitly requested
+push, PR and merge. Publish the verified source-preparation delivery through
+existing PR2, with its description rewritten around the final default/optional
+modes and observed limitations. This authorizes merging the reviewed operational
+recovery after CI; it does not establish concise-summary completeness or remove
+the Product KB ingestion gate. Retain the prior full-PR review and subsequent
+source/expiry/heading/documentation reviews, reconcile coverage against the actual
+`main` target, verify final-head CI and merge without bypassing repository checks.
+Remote branch cleanup remains authorized after confirmed merge. The local app
+already runs the verified source code; publication does not auto-Apply Markdown.
+
+
 **Next authorized delivery — 2026-10-16 (v12–v15, semantic acceptance failed).** Run a frozen,
 source-grounded semantic grouping capability check before the full experiment.
 Compact selection prompts without removing source facts or weakening ownership,
