@@ -8,8 +8,8 @@ The model turns one server-resolved day of bounded automated evidence into a str
 2. Rust groups events using namespaced repository, work-item, pull-request, task, session, and source identities. Numeric/string/URL and consistent object references share identity normalization with Knowledge. A task may inherit its single unambiguous external identity. Otherwise an exact feature branch can associate tasks without explicit identities; integration branches and conflicting or malformed identities cannot authorize that merge.
 3. The service freezes event IDs and content digests in an immutable evidence snapshot.
 4. When Knowledge collections or mappings are enabled, the server resolves reviewed mappings and unique exact title, alias, or typed-reference matches. Conflicting matches produce no link. Repository-wide mappings may authorize a link but cannot merge distinct work items; only reviewed work-item/PR relationships may alias groups.
-5. Rust deterministically extracts all eligible bounded fact cards from each automated source separately, without Knowledge. Rust validates each card and assigns source-owned fact IDs. The configured OpenAI-compatible endpoint composes one workstream per request from this chronological ledger and server-authorized background, selecting source-specific facts rather than generating factual prose or citation lists. When the endpoint is verifiably local (`localhost`, a loopback address, or the Compose `ollama` service), background includes bounded opening excerpts from the already-resolved canonical notes. Nonlocal endpoints require connection-specific consent and receive link metadata without reference-note excerpts.
-6. Rust renders the selected clauses with source times, derives citations only from their visible supporting clauses, and validates group membership, evidence coverage, factual evidence IDs, canonical links, and text limits. Malformed extraction, stale-only selection and invalid composition fail visibly.
+5. Rust deterministically extracts all eligible bounded fact cards from each automated source separately, without Knowledge. Rust validates each card and assigns source-owned fact IDs. The configured OpenAI-compatible endpoint first proposes bounded source-only topics from that ledger, without Knowledge. A later request selects source-backed highlights from the prepared topics and server-authorized background; neither request generates factual prose or citation lists. When the endpoint is verifiably local (`localhost`, a loopback address, or the Compose `ollama` service), background includes bounded opening excerpts from the already-resolved canonical notes. Nonlocal endpoints require connection-specific consent and receive link metadata without reference-note excerpts.
+6. Rust renders validated display projections with source times, derives citations only from visible supporting clauses, retains every original card as typed reported history, and validates group membership, complete evidence coverage, factual evidence IDs, canonical links, and text limits using the persisted revision contract. Malformed extraction, stale-only selection and invalid composition fail visibly.
 7. A valid result becomes an immutable proposal revision bound to its evidence and optional Knowledge snapshots in SQLite. Invalid, incomplete, or unavailable model output is a visible failure.
 8. The server renders the reviewed structure deterministically for preview. Only explicit dashboard Apply invokes the Markdown writer.
 
@@ -29,12 +29,12 @@ stale clause maps are rejected when saving owner edits. The editor clears a map
 only when its fact text is explicitly changed; unchanged and title-only saves
 preserve the original text/map, including browser-normalized Windows line endings.
 The readable Daily projection applies the same clause filtering as server-rendered
-Copy and Apply. Generation now has two constrained stages: isolated source extraction and
+Copy and Apply. Generation has deterministic source extraction, bounded source-only topic preparation and
 selection-only composition. Neither stage may invent event IDs; final citations
 are derived exclusively from selected server-owned source facts. Existing stored
 revisions and historical string-compatible readers retain their format; no
 migration or automatic rewrite is performed. The generation contract is
-`daily-structured-v9-source-slots`, invalidating ordinary cache reuse from older
+`daily-structured-v15-joint-subject-partition`, invalidating ordinary cache reuse from older
 contracts. Final output retains four facts per field and 320 characters per fact.
 Oversized selected bundles fail rather than being clipped.
 Required visible source clauses may be impossible to fit within these inherited
@@ -55,38 +55,118 @@ reloaded ledgers are checked again against original evidence. Not-run, pending a
 probable qualifications remain source data; an extracted validation fact does not
 establish that checks passed. Knowledge cannot create source facts.
 
-Composition sees only validated source facts and permitted background, not raw
-messages or metadata. Each of six fields maps every available source slot to one
-source/field-specific fact ID or permitted null. Required and newest-field slots
-must select a fact. Unknown keys, IDs, wrong fields and free prose fail. Each cited
-source contributes a visible selected clause with a server-owned time, making
-earlier plans historical rather than unqualified current state. Rust packs every
-selected clause by descending length into the existing bounds, then orders clauses
-chronologically within each bundle; no selected material is dropped. Each packed source clause retains its explicit event association through stored
-review content, so omit/duplicate/superseded decisions remove only that source's
-clauses. This bounded packing heuristic does not guarantee optimal packing. Same-UTC-date groups carry
-the reported date in the title and compact UTC times per clause; multiday clauses
-include the full date. Root typed field labels are redundant with field headings;
-descendant path labels and commit-message labels remain visible. Selecting older facts while omitting the newest source
-for that field is rejected. This is not last-event-wins: earlier required evidence
-and unrelated qualifications remain, and a later task completion does not prove
-an application defect was resolved.
+Topic preparation sees verified source cards and event identities, without Knowledge.
+Chronological windows contain at most 24 cards and at most 12 server-owned topic
+anchors. V15 requires `{topics:[{subject,fact_ids}]}`: one to twelve nonempty
+subject clusters containing every current-window fact exactly once. Empty clusters,
+unknown or duplicate IDs, duplicate exact subject labels and extra fields fail.
+The server flattens validated clusters through the existing subject assignment
+logic; the model does not generate canonical IDs or anchors. Labels must be
+nonempty, trimmed, control-free and at most 80 characters. Match labels exactly;
+no normalization, fuzzy matching or synonym merge repairs a reply. The server
+assigns deterministic chronological topic IDs and retains the earliest owned
+source anchor, with at most 12 distinct subjects across the whole workstream.
+Unknown, missing, cross-group or duplicate fact assignments fail.
 
-Each group retains mandatory field/source coverage derived from the existing
-lifecycle predicates. A nonempty array alone is insufficient: every required
-source must have a selected fact in that field. The server does not append missing
-facts or citations, silently mark older evidence superseded, or downgrade a failed
-summary to an activity record.
+`proposed_subject` is optional for legacy ledger decoding, mandatory for the new
+contract and explicitly untrusted interpretation. Existing anchors expose their
+subject for exact reuse in later windows. Labels never become factual Daily text,
+citations, product identity, resolution or approval, and are excluded from the
+compact composition payload and saved factual/history content. Anchors retain
+source quotes. Both Knowledge arms share the prepared assignment, revalidated
+against original cards and canonical groups. Structural validity still does not
+prove coherent or sufficiently distinct subjects; semantic and continuation
+capability checks remain separate gates.
+
+V13 restores bounded original source context to topic preparation. A deduplicated
+table covers window owners and existing anchor owners; anchor records include the
+exact owning event ID. Only original scalar task_id, session_id, branch, event_type
+and status values are included. Identity strings are at most 256 characters,
+lifecycle/status strings at most 64, and the table at most 32 KiB. Absent or
+non-scalar fields are omitted; oversized permitted values/table fail preparation
+without clipping identities or pruning facts. Shared identities are contextual
+clues, not required merges; different identities do not establish separate topics.
+No lifecycle/status value proves defect resolution, verification or acceptance.
+Output assignment schema, exact quotes, source anchors and coverage remain the same.
+
+The topic prompt asks for coherent subjects across lifecycle and factual fields,
+not one topic per card, position, source event or field. The number of topic IDs
+is an upper bound, not a requested count. This instruction still requires an
+independent semantic capability check; structural validation cannot prove cohesion.
+
+V12 compacts each composition request without removing facts or choices. Short
+scoped bundle IDs map only on the server to original source-owned cards. The
+request begins its evidence section with mandatory topic/field obligations, then
+uses positional records: subjects `[topic, anchor_fact]`, sources `[source, time]`,
+facts `[fact, topic, field, source, human_display]`, and bundle choices
+`[bundle, field, fact_ids, rendered_characters]`. Field codes are outcome=0,
+decision=1, trade_off=2, validation=3, blocker=4 and follow_up=5. Source display
+text appears once. The exact HTTP request, including schema, is measurable through
+private opt-in inspection; a smaller prompt does not establish sufficient context
+or semantic performance. Topic anchors and original source facts remain unchanged.
+
+Composition receives the complete prepared topics and permitted background.
+Material outcome, decision and trade-off topics require non-null choices; repeated
+start-only narration is retained in history rather than invented accomplishments.
+Each field returns an array of at most four server-owned bundle IDs. A bundle
+contains one to three same-field cards, may cover several proposed topics, and is
+pre-rendered to at most 320 characters with precise source ownership. Every eligible
+singleton remains offered; bounded pair and chronological triple candidates cannot
+crowd singletons out or require an exhaustive cubic search. Thus one coherent topic
+can use all four facts without a per-topic character cap. The union of selected
+cards must cover every mandatory topic/field obligation: an outcome cannot satisfy
+a required follow-up or gate obligation. Unknown or wrong-field IDs, duplicate
+bundles, overlapping selected cards, missing required highlights, free prose and
+overflow fail; accepted facts are never filled, clipped, substituted or dropped.
+Conservative allocation can reject a feasible arrangement and does not guarantee
+semantic completeness. Whole-day input/work, prompt, response, time and cancellation
+bounds remain enforced.
+
+Known typed metadata is projected deterministically as labels and original values
+with fixed punctuation, rather than JSON syntax. Projection adds no model-written
+claims or test-pass inference. The exact original card remains in reported history;
+unknown structures retain their original source representation. Projected character
+costs are checked before offering a choice. A multi-card choice groups all visible
+fragments from one event into one source clause; excluding that event removes its
+entire projection without borrowing another event's citation.
+
+Every verified source card is retained in optional typed `reported_history`, with
+its original field and one bounded source-owned fact. Duplicate identical display
+cards may share one retained report. Saved revision evidence coverage is validated
+over highlights plus history; history does not manufacture main-summary citations.
+It is read-only in structured edits and absent from legacy revisions by default.
+The browser exposes it collapsed as dated source reports, explicitly distinct from
+current instructions. It is not the owner-requested `activity` recovery record.
+Copy, Markdown preview and Apply export concise highlights, not the raw history;
+the original reports remain inspectable in Log Inbox. Evidence review exclusions
+apply equally to highlights and the history view.
+
+Earlier follow-ups and blockers are historical reports, not automatically current
+actions. A latest explicit report may supply a scoped next-step highlight; older
+instructions remain selectable as explicitly earlier reports and are retained in source history. A newer timestamp never removes an independent unresolved gate from the offered choices.
+Related later evidence never grants the model authority to mark a source resolved,
+omitted or superseded. Partial completion cannot remove provider proof, browser/
+live acceptance, probable causality, successful-login or release-policy boundaries.
+Task completion alone establishes none of those state transitions.
+
+Main fields retain four facts and 320 characters per fact. The complete typed
+history is separately bounded at 1,024 cards per workstream and 512 KiB serialized
+workstream content when history exists; legacy activity/summary limits do not change.
+Start-only work may be represented only by dated history, with no fabricated outcome.
+This is an explicit supported representation, not fallback after an invalid model
+response. Snapshot completeness, source maps, canonical-link authorization and
+immutable review/Apply behavior remain mandatory.
 
 The response schema remains provider-supplied, with no factual response examples
 in the daily prompt. New generated facts that exactly echo known template text
 are rejected even when their citations are valid. Historical stored revisions and
-manual prose retain their previous reading/rendering behavior. Contract-only v7/v8
+manual prose retain their previous reading/rendering behavior. Contract-only v7/v8/v9/v10/v11/v12/v13
 changes still permit safe manual amendments after source expiry; ordinary older-contract
 generation-cache reuse remains invalid.
 
-Required factual arrays cover explicit decisions (including `decisions` metadata),
-validation, blockers and follow-up, with the corresponding source events cited.
+Typed coverage retains explicit decisions (including `decisions` metadata),
+validation, blockers and follow-up in highlights or their original-field history,
+with the corresponding source events cited.
 The prompt separates planned/accepted work from implementation, verification,
 merge and deployment. Completed task status does not establish defect resolution;
 pending, probable, blocked and not-run qualifications must survive summarization.
@@ -96,13 +176,18 @@ can still omit a qualification elsewhere in a source. Newest-field inclusion als
 does not establish topic-level supersession. The real-model pilot checks those
 boundaries independently of schema and coverage tests.
 
-The reviewed Markdown renderer groups workstreams with the same authorized
-canonical links under one heading while retaining separate workstream titles and
-evidence decisions. It uses the same heading grouping as generated Markdown;
-manual-note sections preserve the additional heading level. Review, Copy and
-Apply continue to use the server-rendered reviewed revision.
+Legacy reviewed Markdown groups workstreams with the same authorized canonical
+links under one heading. For v11 and later workstreams with retained source history, the
+renderer uses the workstream title and displays authorized canonical links as
+Related navigation, avoiding an inferred product-ownership heading. Evidence
+decisions remain separate; manual-note sections preserve the additional heading
+level. Review, Copy and Apply use the server-rendered reviewed revision.
 
-The prompt lists exact mandatory source slots per field using the validator’s lifecycle predicates. Each request covers exactly one group; the schema restricts each slot to that source and field. Compatibility tests exercise synthetic decision and validation facts, rather than only a single generic event.
+Each composition request from v12 onward covers one group and lists mandatory topic/field
+obligations. Its six schema fields are arrays of authorized bundle IDs; a bundle
+may combine same-field cards from several sources while retaining exact per-clause
+ownership. These replace legacy per-source selection slots. Compatibility tests
+exercise synthetic decision and validation facts, rather than only a generic event.
 
 Model-controlled text is escaped. Active links come only from server-owned validated context. Provider requests, responses, retries, concurrency, and total input are bounded independently from raw evidence retention. Fixed safe errors distinguish truncation, schema, lifecycle coverage, group identity, factual content, and response-envelope failures; diagnostics contain normalized finish reasons and numeric token counts without provider response text. Optional malformed telemetry does not invalidate an otherwise usable response.
 
@@ -121,3 +206,13 @@ The dashboard resolves a tested provider/model from an explicit one-attempt sele
 Connection tests reuse the production builder and validator with synthetic evidence, bounded to 30 seconds per request profile. Two profiles are supported: `max_tokens` plus temperature, and `max_completion_tokens` without temperature. Failed discovery is not a generation fallback; model IDs can be tested manually. The environment's original model remains legacy-compatible; additional models require a successful test.
 
 External connections require endpoint-bound consent for activity and authorized link metadata, including when used for scheduled preparation. Manual-note prose is never sent, and source-note excerpts remain restricted to loopback/Compose Ollama. Endpoint policy validates and pins resolved addresses, requires HTTPS outside local hosts, disables proxies and rejects redirects. Credentials are encrypted only when UI-managed and are absent from public projections and diagnostics.
+
+### v11 evaluation status (2026-10-16)
+
+The experimental implementation passes mechanical ownership/history/bounds checks,
+but the unchanged October 13–14 four-arm model trial produced no complete accepted
+candidates. Proposed topics were not reliably semantic; selected source-owned IDs
+missed mandatory coverage. This contract is not a verified useful-summary release.
+Keep Product KB ingestion gated. Require a separately frozen source-topic capability
+check and a compact composition representation before another full experiment; do
+not weaken evidence validation or infer useful current state from retained history.

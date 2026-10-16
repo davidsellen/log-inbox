@@ -57,6 +57,17 @@ A proposal revision contains structured workstreams. A workstream has a stable r
 
 Supported factual fields are Outcome, Decision, Trade-off, Validation, Blocker, and Follow-up. Empty or unsupported fields are absent, not filled with boilerplate. Manual notes are stored and rendered separately under My notes; model generation never rewrites their prose.
 
+An AI-summary workstream may additionally retain read-only `reported_history`:
+bounded original source cards, each with its original factual field and one
+source-owned fact. Concise highlights and history together cover every snapshot
+event; a source need not consume highlight space merely to preserve audit coverage.
+History is displayed separately as dated reports, not current instructions or
+verified supersession. A proposed topic or later task completion cannot resolve an
+earlier provider, acceptance, verification or release gate. Main text preserves the
+explicit remaining scope. Source review exclusions affect both representations.
+Legacy revisions default to no history. History is app-state evidence, not an
+owner activity record or raw Markdown export; Copy and Apply use the highlights.
+
 Revision origin is `generated`, `structured_edit`, `manual`, `regenerated`, or `advanced_markdown`. Advanced Markdown is a detached override: returning to structured generation or discarding it requires confirmation, and evidence decisions remain explicit records.
 
 An owner-requested activity record uses content schema version 2 and origin `structured_edit`. Its workstreams contain neutral `activity` entries, each with text and exactly one distinct evidence ID. It cannot contain inferred factual fields, canonical links, or open questions. Schema version 1 remains the AI-summary format and cannot contain activity entries. Editing preserves the schema version; changing an activity record to an AI summary requires explicit regeneration approval. All snapshot evidence must remain represented, with omission handled separately. Markdown and Copy retain the “Activity record · not AI-summarized” label.

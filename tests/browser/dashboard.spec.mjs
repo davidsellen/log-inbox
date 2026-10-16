@@ -1147,6 +1147,33 @@ test("Readable mapped activity clauses use the same exclusion rules",async({page
   }
 });
 
+test("Source reports stay collapsed, historical and read-only through edits",async({page})=>{
+  const requests=await mockDaily(page);
+  const data=dailyResponse();
+  const work=data.current_revision.content.workstreams[0];
+  const report=(text,id)=>({original_field:"follow_up",fact:{text,evidence_event_ids:[id],source_clauses:[{text,evidence_event_id:id}]}});
+  work.reported_history=[report("2026-09-08 09:00Z: Earlier acceptance was pending.","evt_1"),report("Excluded report.","excluded")];
+  data.current_snapshot_evidence.push({event_id:"excluded",disposition:"omit"});
+  await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:data}));
+  await openDaily(page);
+  const reports=page.locator("#readable-draft details").filter({hasText:"Source reports"});
+  await expect(reports).not.toHaveAttribute("open", "");
+  await reports.locator("summary").click();
+  await expect(reports).toContainText("Earlier acceptance was pending.");
+  await expect(reports).toContainText("not current actions");
+  await expect(reports).not.toContainText("Excluded report.");
+  await page.evaluate(()=>Object.defineProperty(navigator,"clipboard",{configurable:true,value:{writeText:async text=>{window.copiedDraft=text;}}}));
+  await page.getByRole("button",{name:"Copy draft",exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.copiedDraft)).toContain("Built a predictable Daily review.");
+  expect(await page.evaluate(()=>window.copiedDraft)).not.toContain("Earlier acceptance was pending.");
+  await page.getByRole("button",{name:"Edit draft",exact:true}).click();
+  await expect(page.locator('#candidate textarea[data-field="reported_history"]')).toHaveCount(0);
+  await page.getByLabel("Workstream 1 title").fill("Owner title");
+  await page.getByRole("button",{name:"Save edits"}).click();
+  await expect.poll(()=>requests.filter(r=>r.method==="PUT"&&r.path.endsWith("/candidate")).length).toBe(1);
+  expect(requests.find(r=>r.method==="PUT"&&r.path.endsWith("/candidate")).body.content.workstreams[0].reported_history).toEqual(work.reported_history);
+});
+
 test("Mapped fact edits clear only the changed provenance map",async({page})=>{
   const requests=await mockDaily(page);
   const data=dailyResponse();

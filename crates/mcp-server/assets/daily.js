@@ -1645,7 +1645,29 @@ function renderCandidate(content) {
       for (const text of facts) list.append(el("li", "", text));
       section.append(list);
     }
-    if (!count) continue;
+    const reports = (workstream.reported_history || [])
+      .map((report) => ({
+        label: fieldLabels[report.original_field],
+        text: reviewedFactText(report.fact, excluded),
+      }))
+      .filter((report) => report.label && report.text !== null);
+    if (reports.length) {
+      const details = document.createElement("details");
+      details.append(el("summary", "", `Source reports · ${reports.length}`));
+      details.append(
+        el(
+          "p",
+          "subtle",
+          "Historical reports from the cited activity. Earlier follow-ups are reports at that time, not current actions. Only the highlights are copied or saved to your note.",
+        ),
+      );
+      const list = document.createElement("ul");
+      for (const report of reports)
+        list.append(el("li", "", `${report.label}: ${report.text}`));
+      details.append(list);
+      section.append(details);
+    }
+    if (!count && !reports.length) continue;
     for (const link of workstream.canonical_links || [])
       section.append(el("p", "subtle", `Reference: ${link}`));
     if (!workstream.canonical_links?.length)

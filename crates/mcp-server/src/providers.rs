@@ -1232,7 +1232,10 @@ mod tests {
                     let prompt = body["messages"][1]["content"].as_str().unwrap();
                     let stage = prompt.lines().next().unwrap().to_owned();
                     captured.lock().unwrap().push(stage.clone());
-                    assert_eq!(stage, "Stage: fact composition");
+                    assert!(matches!(
+                        stage.as_str(),
+                        "Stage: topic partition" | "Stage: fact composition"
+                    ));
                     if body.get("max_tokens").is_some() {
                         assert!(body.get("temperature").is_some());
                         return (
@@ -1240,7 +1243,14 @@ mod tests {
                             Json(json!({"error":"use completion tokens"})),
                         );
                     }
-                    assert_eq!(body["max_completion_tokens"], 1536);
+                    assert_eq!(
+                        body["max_completion_tokens"],
+                        if stage == "Stage: topic partition" {
+                            2048
+                        } else {
+                            1536
+                        }
+                    );
                     assert!(body.get("temperature").is_none());
                     (
                         StatusCode::OK,
@@ -1262,10 +1272,14 @@ mod tests {
         assert!(llm::test_compatibility(&config).await.is_err());
         config.profile = RequestProfile::MaxCompletionTokens;
         llm::test_compatibility(&config).await.unwrap();
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
         assert_eq!(
             *stages.lock().unwrap(),
-            vec!["Stage: fact composition", "Stage: fact composition"]
+            vec![
+                "Stage: topic partition",
+                "Stage: topic partition",
+                "Stage: fact composition"
+            ]
         );
         server.abort();
     }

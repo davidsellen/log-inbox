@@ -304,22 +304,158 @@ the associated pull request and lifecycle report.
 
 ### Next Product KB ingestion delivery
 
-**Queued next; plan only.** Owner authorized publication/merge of the current fixes
-and recording this follow-up. The current comparison remains 0/4 usable; source
+**Next authorized delivery — 2026-10-16 (v12–v15, semantic acceptance failed).** Run a frozen,
+source-grounded semantic grouping capability check before the full experiment.
+Compact selection prompts without removing source facts or weakening ownership,
+coverage, history, exclusions or output bounds. Prove the small sample against
+independently defined semantic requirements, then rerun October13–14 with and
+without Knowledge using unchanged original evidence. Reuse the prior branch and
+retain every negative trial. Coordinator owns evaluation and documentation; bounded
+Sol implementation and independent assessment/review cover the changes.
+
+Authorized endpoint now includes the build pipeline, deployment to the existing
+local stack, commit and PR merge into main, and deletion of the merged remote
+source branch. Publication and merge depend on verified behavior and required
+checks; a schema-only or synthetic pass does not close semantic acceptance.
+Product KB ingestion remains gated on useful, accurate Daily output. Stages:
+capability reference frozen (47 original cards, 28 hard semantic pairs plus cluster
+coherence). The unchanged-reference probes are retained separately: v12 qwen2.5:1.5b
+and granite3.3:2b passed structure but failed semantics; Qwen3 4B passed two of
+three windows. Original scalar source context (v13) still left three authentication
+pair errors. Meaningful exact subject labels in a per-card map (v14) exceeded the
+12-subject limit in all three windows. The final bounded v15 probe asks for joint
+subject clusters; strict coverage, exact labels, deterministic canonical IDs and
+original anchors remain mandatory. All three final responses pass production structure/evidence validation. Fonts
+and deletion pass their semantic checks; authentication fails two must-link pairs
+connecting a separate implementation recommendation, its created story and later
+retained scope. It also mixes that scope with unrelated publication work. All 15
+cannot-link pairs pass, and 11 of 13 must-link pairs pass (26/28 overall).
+Independent assessment confirms the remaining errors. Two of three windows pass,
+the same aggregate as the earlier 4B probe; reduced pair errors alone do not prove
+useful Daily summaries. Subject labels remain untrusted metadata, including a
+stale approval-blocked label; they are excluded from factual Daily text.
+No continuation or full real-day model inference is eligible after this failure.
+
+Compact selection is implemented: the matched 696-bundle/106-card font request
+shrunk 189,522 to 36,670 bytes (80.65%), preserving exact source/catalog membership.
+This proves request reduction, not improved summaries or a Knowledge benefit.
+V15 focused LLM checks: 88 passed, one ignored. Fresh full Rust suite: 269 passed,
+eight ignored; formatting, all-target Clippy and client formatting passed. The
+isolated Compose build and Daily Apply/restart smoke passed. All 224
+Chromium/Firefox browser checks and the release build passed. Initial sandbox-only
+browser/socket failures were
+reproduced as permission errors and rerun with local-process/socket access.
+Independent complete review plus v15 follow-up found no remaining code defects;
+that does not establish semantic acceptance. Draft publication is pending. Local deployment, full-day
+comparison, merge and remote source-branch deletion are blocked by semantic
+acceptance; Product KB ingestion remains gated. No model-output repair, weakened
+checks or selective retries were used. Private evidence is preserved under
+`tmp/evaluations/oct13-14-v12-20261016/` through `oct13-14-v15-20261016/`.
+
+| Acceptance scenario | Evidence at v15 working tree | Result |
+| --- | --- | --- |
+| Same source facts, precise ownership and strict rejection | Three actual responses validated by production parser; Rust/Compose regressions | Pass |
+| Smaller selection request with unchanged catalog | Frozen matched request: 189,522 → 36,670 bytes | Pass |
+| Coherent grouping across all original sample subjects | Independent 47-card assessment; two authentication must-links fail | Fail |
+| Cross-window exact subject reuse | Deterministic half-split protocol frozen; no inference after failed prerequisite | Not run |
+| Useful summaries with/without Knowledge, October13–14 | Original evidence and prior failed trials preserved; prerequisite fails | Not run |
+| Build and integration | 269 Rust, 224 browser, fmt/Clippy/client, release, isolated Compose/restart | Pass |
+| Existing local stack, merge and branch cleanup | Release blocked; keep running stack and unmerged source branch | Blocked |
+
+Next delivery must change the grouping approach rather than repeat another blind
+prompt/model sweep. Bound the proposal to an auditable source-linked subject map
+with explicit human correction, then re-evaluate continuation and the complete
+original outcome/stale-follow-up rubric before claiming agent memory or KB
+readiness. The final response representation experiment is closed as a failure.
+
+
+**Active follow-up — 2026-10-16, units1–2 (v11 trial complete; quality gate failed).** Owner authorized fixing
+missing outcomes, stale follow-ups and human readability, preserving evidence
+checks, then rerunning October13–14 with and without Knowledge. Reuse the existing
+local branch and preserve the completed v10 trial. Coordinator owns documentation,
+evaluation and integration; bounded Sol planning/implementation and independent
+review cover the nontrivial change. No publication or KB runtime expansion.
+
+Acceptance: retain material accomplishments/decisions and unresolved qualifications
+from the original twelve-topic rubric; distinguish obsolete instructions from
+remaining work using explicit evidence; remove metadata syntax and generic lifecycle
+noise from the human summary. Retain verified original cards, precise clause/source
+ownership, immutable review and exclusions, strict output limits and visible failure
+for invalid output. Assess full candidates and editing effort independently before
+claiming usefulness. One frozen ledger/date and unchanged original model/evidence/
+Knowledge/rubric support a new, separately recorded four-arm trial.
+
+Current stage: focused Sol planning and source acceptance review complete, followed
+by bounded Astra/low architecture review after the failed heuristic rounds.
+Experimental implementation is complete: source-only topic assignments and non-null material
+highlights replace source-slot ranking; optional typed reported history retains all
+original cards separately from the concise summary. History is app-only audit,
+read-only in edits, not an inferred resolution or raw Markdown dump. The six main
+fields retain four facts ×320 characters. Two Sol workers own generation and
+persistence/client integration; coordinator owns evaluation and documentation.
+The implementation must address source restrictions, optional nulls and historical
+action presentation together; another prompt-only or lexical-ranking adjustment
+does not establish completion. The frozen trial is complete: all four arms failed content validation; zero complete
+parser-accepted, persistable or usable candidates. Units3–6 remain planned and gated.
+
+Evaluation correction: the v10 harness counted parser acceptance without running
+the Store's complete-support contract. All four artifact contents omit fact
+support for original snapshot events (16 on October13, 20 on October14), so its
+reported 4/4 complete results are parser-only, not persistable Daily successes.
+Preserve the original experiment and record this correction; v11 must pass the
+shared production evidence/link validator and report parser acceptance,
+persistability and independently assessed usefulness separately.
+
+V11 validation: 261 Rust tests passed (5 ignored), 224 browser cases passed,
+Clippy/formatting/diff checks and the original 76-event extraction/bounds preflight
+passed. Isolated Compose generation, explicit Apply and restart passed with raw
+history/source ownership and owner content preserved. Complete independent review
+found timestamp-only pruning of earlier independent gates; fixed, regression-tested
+and independently re-reviewed without findings. The final smoke assertion change
+was reviewed separately. Runtime remained frozen throughout the 1,536.76-second trial.
+
+Actual result: all four arms failed `composition/model_content_invalid`. Source
+ledgers remain identical to v10 (197/266 cards); the model chose source-owned IDs
+but missed mandatory topic/field coverage. On October13 both versions covered only
+four of twelve required outcome topics. On October14 both versions chose the same
+source-owned IDs, covering only one of ten required outcome and follow-up topics
+and missing required validation coverage. No complete final summary exists to score
+for readability or currentness; unreached groups are not omissions. Knowledge
+provided no demonstrated usable improvement. Preserve the negative trial and the
+private report at `tmp/evaluations/oct13-14-v11-20261016/report.md`; one non-blind
+sample per arm does not establish causality or repeatability.
+
+Next delivery before another full comparison: freeze a bounded source-only semantic
+capability check and independently assess topic cohesion against original evidence.
+The tested 1.5B model/prompt assigned topics by position even in a small prompt;
+schema acceptance did not establish meaningful grouping. A stronger suitable model
+is a candidate, not a verified fix. Separately compact the composition menu (short
+IDs, source text once, obligations first) and measure full request/schema/context
+feasibility. The observed 696-bundle catalog is a concrete burden; provider token
+counts do not prove truncation. Retain all facts and strict validation. An automatic
+coverage-filling step would conceal bad topics and is not an accepted solution.
+Product KB runtime ingestion remains gated; this experimental local diff is not a
+release or proof that missing outcomes and stale actions are solved end to end.
+
+The preceding v10 delivery implemented bounded selection,
+validation and a fresh October13–14 comparison. Units3–6 remain planned. The
+preceding comparison remains 0/4 usable; source
 availability and citation correctness do not satisfy the usefulness gate. Coordinator
 owns this record; use bounded Sol implementation and independent Sol review for each
 unit, with durable storage, authorization and recovery assigned to Sol.
 
-- [ ] **1. Constrain useful selection to the output budget.** Keep the complete
-  source ledger. Reserve required/newest-field coverage and qualification-bearing
-  material before optional lifecycle narration. Use actual rendered costs and the
-  existing packer to constrain feasible choices; prompting alone did not work.
-  Decide between feasible layouts and explicitly ranked nominations with auditable
-  admission. If nominations are used, distinguish them from accepted selections;
-  never silently discard accepted facts. Preserve four facts/field ×320 characters,
-  source slots, chronological framing, citations and review exclusions. Mandatory
-  overflow must still fail visibly. No clipping, evidence filling, fabricated
-  citations or automatic activity-record fallback.
+- [ ] **1. Constrain useful selection to the output budget — v11 implemented experimentally; usefulness acceptance failed.** Keep the complete
+  verified source ledger and typed, read-only history. Prepare bounded source-only
+  topics, then select up to four source-owned bundle IDs per factual field. Each
+  bundle renders at most 320 characters, keeping all eligible singleton cards
+  available and permitting bounded same-field combinations. Mandatory topic/field
+  coverage cannot disappear through null or be satisfied by history alone. One
+  topic can use several facts; remove source-slot lexical ranking and per-topic
+  caps that hid material outcomes. Project typed checks for humans, retain raw cards
+  separately, and distinguish earlier instructions from latest explicit scope.
+  Preserve precise source clauses, snapshot coverage, review exclusions and strict
+  limits. Invalid IDs, overlapping selections, missing coverage and overflow fail
+  visibly; no clipping, filling, fabricated citations or activity-record fallback.
   Acceptance: the actual October13/PR9713 failures fit with useful completed work,
   every mandatory source and relevant pending/not-run/scope qualifications retained.
 - [ ] **2. Prove usefulness on frozen evidence and obtain owner review.** Independently
@@ -331,6 +467,12 @@ unit, with durable storage, authorization and recovery assigned to Sol.
   Record accepted/usable arms, omissions, repetition, latency and Knowledge benefit
   separately. Unreached work is not an omission; structural success is insufficient.
   If this fails, stop KB runtime expansion and record a separately frozen follow-up.
+  Next follow-up after v10: preserve material outcomes/decisions before ancillary
+  source coverage, prevent optional nulls from removing the core accomplishment,
+  distinguish historical instructions from remaining actions using explicit source
+  evidence, and format selected checks for humans. Retain original clauses and
+  review/citation ownership; task completion alone cannot resolve a defect or gate.
+  Compare a separately frozen four-arm trial against the same rubric before KB work.
 - [ ] **3. Specify accepted-plan capture independently of Daily prose.** Contract
   design may run alongside units1–2; runtime capture/promotion stays gated by their
   reviewed outcome. Capture directly from original redacted events and reviewed
@@ -376,18 +518,73 @@ Do not introduce a parallel writer or use generated Daily text as independent pr
 
 | Follow-up scenario | Required evidence | State |
 |---|---|---|
-| Dense optional starts, required-only overflow, qualification elsewhere in source | Actual failing groups, exact cost/layout regressions, independent source review | Pending |
-| Useful bounded Daily and optional Knowledge | Fresh frozen four-arm output, twelve-topic assessment, owner judgment | Pending |
+| Dense optional starts, required-only overflow, qualification elsewhere in source | Actual failing groups, exact cost/layout regressions, independent source review | V11 mechanical history/bounds/exclusion checks passed; real-model topic selection failed |
+| Useful bounded Daily and optional Knowledge | Fresh frozen four-arm output, twelve-topic assessment, owner judgment | V10: four parser acceptances, zero persistable/useful; v11: zero parser acceptances, zero persistable/useful |
 | Accepted plan versus implementation/verification/merge/deployment | Positive/negative original-source fixtures; no inferred state ladder | Pending |
 | Duplicate/conflicting submission, stale review, rejection/supersession/expiry | Immutable store/API regressions and recovery checks | Pending |
 | Producer authority, cross-workspace scope and CSRF | Negative authorization tests; no producer self-approval | Pending |
 | Exact canonical preview, preservation, concurrent edits, crash/rollback | Browser/API, writer fault injection and disposable restart/upgrade checks | Pending |
 | Approved recall, exclusions/freshness and credential separation | One-product/two-module integration pilot and retrieval assessment | Pending |
 
+Current stage: scoped Sol/high design and independent source-layout assessment
+complete; allocation is implemented and independently reviewed locally. Useful layouts exist for the dense groups within the inherited limits;
+a generic two-card same-source choice is needed to retain a completion and a
+remaining gate from one event. Sol/medium owns the selection code and a separate
+worker owns integration fixtures; coordinator owns this record, evaluation and
+report. Base `93774590b51032e6274040577879ca1f6bb7eca7`, branch
+`codex/bounded-daily-selection` (required runtime prefix).
+
+V10 plan (completed but ineffective): keep extraction and all evidence/review guards; precompute feasible source
+choices and reserved-bin rendering, exercise actual-source layouts and unchanged
+workflow contracts, independently review the complete local diff, then freeze a
+separate v10 experiment. Reuse the original events, model weights, Knowledge and
+rubric in fresh private artifacts; do not tune during the four-arm trial. Assess
+full accepted text, unsupported claims, material omissions, repeated starts,
+readability and editing burden separately from schema success and Knowledge effect.
+Deterministic quality ranking and conservative allocation are heuristics; they do
+not prove semantic completeness or optimal packing. Owner usefulness review remains
+a separate gate. Preserve earlier negative trials.
+
+Preflight found generic completion text and unqualified parent facts could crowd
+out concrete local delivery and scope limitations. The focused diagnosis changes
+the allocation order to meaningful mandatory coverage, compact optional concrete
+work, complementary qualifications, then enrichment. Actual offered choices must
+be assessed before inference; a hand-constructed feasible layout is insufficient.
+Independent review also found synchronous planning could delay cancellation.
+Whole-day admission now bounds cards/pair work before grouping, precomputes card
+properties and reuses plans. The same private large-input reproduction rejects in
+0.83 seconds rather than 16.07 seconds; focused independent review found that issue
+resolved. The final actual-source preflight restores publication/remaining-gate,
+interrupted-build, expired-key/probable-cause, implementation and local-delivery
+material. Independent review still finds unavailable font push/direct-PDF/button
+caveats, signing aggregate-PDF behavior and missing-ID-token checks. Freeze this
+coherent fix for the requested comparison with those limitations recorded; do not
+claim complete topic availability or tune during the trial. Final Rust workspace
+checks passed 254 tests (four ignored); browser checks passed 222 cases. Clippy,
+formatting and isolated Compose review/Apply/restart checks passed.
+
+The frozen v10 trial completed all four parser arms with all 14 responses source-choice
+valid and within four facts/field ×320 characters, versus zero parser successes in v9.
+These did not pass persistence; the correction above supersedes the former
+complete-candidate interpretation without modifying its frozen trial artifacts.
+The 197/266 original cards and all frozen input/runtime hashes are unchanged.
+October13 off/on took 302.242/333.476 seconds; October14 off/on took
+432.023/463.629 seconds, including shared preparation. These are single-run
+observations, not performance benchmarks. Independent source review finds no
+invented clauses, but historical instructions remain misleading as current actions,
+important outcomes/decisions are omitted, and raw metadata requires substantial
+rewriting. Knowledge adds navigation and a browser check on October13; October14
+without Knowledge retains more PR9713 outcomes. No useful-summary advantage is
+established. Private report and exact previews: `tmp/evaluations/oct13-14-v10-20261016/`.
+Units1–2 remain open for semantic usefulness and owner review. Product KB runtime
+ingestion, promotion and agent recall remain gated; no publication or deployment
+was performed in this delivery.
+
 Run affected regressions, repository formatting/Clippy/workspace/client/browser
 checks and isolated Compose smoke; run real-model evaluation separately. Endpoint
-now: this queued plan only. Future ingestion, canonical promotion, recall and
-production deployment require their own implemented, reviewed delivery stages.
+now: local implementation, independent review and fresh quality report for units1–2.
+Future ingestion, canonical promotion, recall, publication and deployment require
+their own authorized delivery stages.
 
 Keep Daily quiet: one date toolbar and Search history, without a recent-day list or permanent sidebar.
 

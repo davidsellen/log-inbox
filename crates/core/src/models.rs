@@ -465,9 +465,19 @@ pub struct DailyWorkstream {
     pub blocker: Vec<DailyFact>,
     #[serde(default)]
     pub follow_up: Vec<DailyFact>,
+    /// Verified source reports retained separately from concise daily highlights.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reported_history: Vec<ReportedFact>,
     /// Owner-requested, unsummarized activity; never a model-produced factual field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub activity: Vec<DailyFact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReportedFact {
+    pub original_field: String,
+    pub fact: DailyFact,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

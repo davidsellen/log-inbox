@@ -218,6 +218,15 @@ Requires `review:write` and CSRF. Body contains the exact current dismissed revi
 
 Requires `review:write` and CSRF. Body contains the exact `expected_revision_id` and a complete `DailyRevisionContent` object. The storage boundary validates schema version, manual-entry ownership, unique workstreams, canonical-link shape, complete snapshot coverage, and evidence on every factual item. A successful edit creates a new immutable `structured_edit` revision; compare-and-swap prevents a stale editor from replacing a newer candidate. Arbitrary Markdown is not accepted by this route.
 
+Schema-version-1 workstreams may include `reported_history` entries containing
+`original_field` and a source-owned `fact`. Legacy absence means empty. Clients must
+retain the current history unchanged when saving titles or highlights; removing,
+editing or injecting it returns a validation error. Highlights remain editable with
+the existing provenance-map rules. Complete evidence coverage includes history,
+while read-only source reports remain visibly separate from current actions. The
+readable view applies evidence exclusions to both; Copy/preview/Apply export the
+concise highlights without dumping source history into Markdown.
+
 The Daily read model renders the final preview deterministically. Owner-authored manual prose remains verbatim and separate. Model-authored titles, facts, and questions are escaped as plain Markdown text; only validated server-owned canonical links are active. Facts supported solely by omitted, duplicate, or superseded evidence are absent from the preview.
 
 ## Generation configuration and provenance
