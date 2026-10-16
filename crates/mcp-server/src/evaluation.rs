@@ -1,9 +1,11 @@
-//! Opt-in, read-only real-day evaluation. No Store, API, or Markdown writer is used.
+//! Opt-in, read-only real-day evaluation. Uses the Store's shared content validators;
+//! no database, API, or Markdown writer is used.
 
 use crate::{knowledge, llm};
 use anyhow::{Context, Result, ensure};
 use log_inbox_core::{
     models::{ContextMapping, KnowledgeCollection, StoredLogEvent},
+    validate_daily_evidence_content,
     workspace::InspectedWorkspace,
 };
 use serde::Deserialize;
@@ -40,6 +42,27 @@ fn digest(bytes: &[u8]) -> String {
 
 fn value_digest(value: &Value) -> Result<String> {
     Ok(digest(&serde_json::to_vec(value)?))
+}
+
+fn validate_candidate_for_save(
+    content: &log_inbox_core::models::DailyRevisionContent,
+    events: &[StoredLogEvent],
+    context_payload: Option<&Value>,
+) -> Result<()> {
+    ensure!(
+        content.schema_version == 1
+            && content.manual_entry_ids.is_empty()
+            && content
+                .workstreams
+                .iter()
+                .all(|work| work.activity.is_empty()),
+        "evaluation requires an automated summary without manual activity"
+    );
+    let ids = events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>();
+    validate_daily_evidence_content(&content.workstreams, &ids, context_payload)
 }
 
 /// Publish complete JSON only, using a hard link for atomic no-overwrite creation.
@@ -135,8 +158,12 @@ fn validate_replay(manifest: &Value, input: &EvaluationInput, identity: &Value) 
         "request_profile",
         "timeout_seconds",
     ] {
+        let declared_model_change = field == "model"
+            && identity["model_change_from"].is_string()
+            && identity["model_change_from"] == manifest["identity"]["model"];
         ensure!(
-            !identity[field].is_null() && manifest["identity"][field] == identity[field],
+            !identity[field].is_null()
+                && (manifest["identity"][field] == identity[field] || declared_model_change),
             "frozen manifest fixture/model/profile/timeout mismatch"
         );
     }
@@ -242,8 +269,9 @@ async fn evaluate_real_days() -> Result<()> {
 
     let mut identity = json!({
         "schema_version": 1,
-        "pipeline": "deterministic-per-source-cards-then-source-slot-selection",
-        "extraction_reuse": "one validated ledger per date shared by both Knowledge arms",
+        "pipeline": "verified-source-cards-then-source-only-topic-plan-and-readable-highlights",
+        "extraction_reuse": "one verified card/topic ledger per date shared by both Knowledge arms",
+        "source_preparation": "deterministic exact cards plus source-only proposed topic partition",
         "fixture_sha256": digest(&bytes),
         "model": config.model,
         "request_profile": config.profile,
@@ -257,6 +285,11 @@ async fn evaluate_real_days() -> Result<()> {
             {"date": "2026-10-14", "with_knowledge": false}
         ]
     });
+    if let Ok(baseline_model) = std::env::var("LOG_INBOX_EVALUATION_BASELINE_MODEL") {
+        identity["model_change_from"] = json!(baseline_model);
+        identity["model_change_scope"] =
+            json!("explicit model variation; original evidence and Knowledge unchanged");
+    }
     let replay = std::env::var("LOG_INBOX_EVALUATION_FROZEN_MANIFEST")
         .ok()
         .map(|path| read_json(Path::new(&path)))
@@ -323,8 +356,8 @@ async fn evaluate_real_days() -> Result<()> {
     };
     let manifest_sha256 = value_digest(&manifest)?;
     for (index, case) in input.cases.iter().enumerate() {
-        // Extraction is independent of Knowledge. Freeze it once so each pair
-        // composes exactly the same source facts, not separate model samples.
+        // Preparation is independent of Knowledge. Freeze raw cards and the
+        // source-only proposed topic partition once for both composition arms.
         let extraction_path = output.join(format!("{}-source-facts.json", case.date));
         let extraction = if extraction_path.exists() {
             let prior = read_json(&extraction_path)?;
@@ -338,7 +371,15 @@ async fn evaluate_real_days() -> Result<()> {
             );
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(config.timeout_seconds()),
-                llm::extract_daily_sources(&config, &case.events),
+                llm::extract_daily_sources(
+                    &config,
+                    &llm::SuggestMarkdownSummaryArgs {
+                        vault_context: without_knowledge(),
+                        mode: "daily-consolidation".to_owned(),
+                        task: None,
+                    },
+                    &case.events,
+                ),
             )
             .await;
             let mut artifact = json!({
@@ -442,17 +483,29 @@ async fn evaluate_real_days() -> Result<()> {
                 "extraction_elapsed_ms": extraction_elapsed_ms,
                 "total_charged_elapsed_ms": extraction_elapsed_ms + started.elapsed().as_millis() as u64,
                 "status": if extraction["status"] == "timed_out" { "timed_out" } else { "failed" }, "error": null,
+                "parser_accepted": false, "persistable": false,
                 "structured_draft": null, "daily_revision_content": null, "preview_markdown": null
             });
             match result {
                 Ok(Ok(proposal)) => {
                     if let Some(draft) = proposal.structured_draft {
+                        artifact["parser_accepted"] = json!(true);
                         artifact["structured_draft"] = serde_json::to_value(&draft)?;
                         let content = llm::daily_revision_content(draft, Vec::new(), &args);
                         artifact["preview_markdown"] =
                             json!(llm::render_daily_revision_preview(&content, &[], &[]));
-                        artifact["daily_revision_content"] = serde_json::to_value(content)?;
-                        artifact["status"] = json!("succeeded");
+                        artifact["daily_revision_content"] = serde_json::to_value(&content)?;
+                        let context_payload = with_knowledge
+                            .then_some(&manifest["cases"][index]["knowledge"]["snapshot_payload"]);
+                        if validate_candidate_for_save(&content, &case.events, context_payload)
+                            .is_ok()
+                        {
+                            artifact["persistable"] = json!(true);
+                            artifact["status"] = json!("succeeded");
+                        } else {
+                            artifact["stage"] = json!("revision_validation");
+                            artifact["error"] = json!("revision_contract_invalid");
+                        }
                     } else {
                         artifact["error"] = json!("Generator omitted structured content");
                     }
@@ -483,6 +536,183 @@ async fn evaluate_real_days() -> Result<()> {
     Ok(())
 }
 
+/// Frozen source-mode comparison. Runs the production engine and save validators
+/// without a model, database, note resolver or Markdown writer.
+#[tokio::test]
+#[ignore = "requires private frozen October 13–14 evidence and Knowledge; no inference"]
+async fn evaluate_source_based_real_days() -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let input_bytes = read_bounded(Path::new(&std::env::var("LOG_INBOX_EVALUATION_INPUT")?))?;
+    let input: EvaluationInput = serde_json::from_slice(&input_bytes)?;
+    let frozen = read_json(Path::new(&std::env::var(
+        "LOG_INBOX_EVALUATION_FROZEN_MANIFEST",
+    )?))?;
+    validate_frozen_cases(&frozen, &input)?;
+    ensure!(
+        frozen["identity"]["fixture_sha256"] == digest(&input_bytes),
+        "frozen fixture changed"
+    );
+    ensure!(
+        input.cases.len() == 2,
+        "exactly two original dates required"
+    );
+    for (case, (date, count)) in input
+        .cases
+        .iter()
+        .zip([("2026-10-13", 32), ("2026-10-14", 44)])
+    {
+        ensure!(
+            case.date == date && case.events.len() == count,
+            "original date/evidence count required"
+        );
+    }
+    let requested = std::env::var("LOG_INBOX_EVALUATION_OUTPUT")?;
+    let requested = Path::new(&requested);
+    if !requested.exists() {
+        fs::DirBuilder::new().mode(0o700).create(requested)?;
+    }
+    ensure!(
+        fs::symlink_metadata(requested)?.file_type().is_dir(),
+        "real output directory required"
+    );
+    let output = fs::canonicalize(requested)?;
+    ensure!(
+        !output.starts_with(fs::canonicalize(&input.workspace_root)?)
+            && !output.starts_with(fs::canonicalize(std::env::current_dir()?)?),
+        "private output outside vault and checkout required"
+    );
+    ensure!(
+        fs::metadata(&output)?.permissions().mode() & 0o077 == 0,
+        "private output permissions required"
+    );
+    let manifest = json!({
+        "identity": {
+            "schema_version": 1,
+            "pipeline": "source-based-exact-reports-with-complete-history",
+            "preparation_mode": "source_based", "model_used": false,
+            "fixture_sha256": digest(&input_bytes),
+            "contract_digest": llm::daily_generation_contract_digest(),
+            "frozen_manifest_sha256": value_digest(&frozen)?,
+            "knowledge_scope": "reviewed navigation only; frozen excerpts unused",
+            "order": [
+                {"date":"2026-10-13","with_knowledge":false},
+                {"date":"2026-10-13","with_knowledge":true},
+                {"date":"2026-10-14","with_knowledge":true},
+                {"date":"2026-10-14","with_knowledge":false}
+            ]
+        },
+        "cases": frozen["cases"]
+    });
+    write_new_json(&output.join("manifest.json"), &manifest)?;
+    let manifest_sha256 = value_digest(&manifest)?;
+    let mut succeeded = 0;
+    for (index, case) in input.cases.iter().enumerate() {
+        let started = Instant::now();
+        let ledger = llm::prepare_source_based_ledger(&case.events).map_err(anyhow::Error::msg)?;
+        llm::validate_daily_sources(&ledger, &case.events).map_err(anyhow::Error::msg)?;
+        let extraction = json!({"date":case.date,"manifest_sha256":manifest_sha256,
+            "status":"succeeded","elapsed_ms":started.elapsed().as_millis(),
+            "events_sha256":digest(&serde_json::to_vec(&case.events)?),"source_facts":ledger});
+        write_new_json(
+            &output.join(format!("{}-source-facts.json", case.date)),
+            &extraction,
+        )?;
+        let extraction_sha256 = value_digest(&extraction)?;
+        let order = if index == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        };
+        for with_knowledge in order {
+            let started = Instant::now();
+            let arm = if with_knowledge {
+                "withKnowledge"
+            } else {
+                "withoutKnowledge"
+            };
+            let mut vault_context = if with_knowledge {
+                frozen["cases"][index]["knowledge"]["vault_context"].clone()
+            } else {
+                without_knowledge()
+            };
+            let mut payload = if with_knowledge {
+                frozen["cases"][index]["knowledge"]["snapshot_payload"].clone()
+            } else {
+                json!({})
+            };
+            if with_knowledge {
+                knowledge::normalize_source_based_resolution(
+                    &mut vault_context,
+                    &mut payload,
+                    &case.events,
+                )
+                .map_err(anyhow::Error::msg)?;
+            }
+            let mut args = llm::SuggestMarkdownSummaryArgs {
+                vault_context,
+                mode: "daily-consolidation".into(),
+                task: None,
+            };
+            llm::normalize_source_based_context(&mut args, &case.events)
+                .map_err(anyhow::Error::msg)?;
+            let result = llm::compose_source_based_prepared_summary(
+                args.clone(),
+                case.events.clone(),
+                &ledger,
+                |_, _, _| Ok(()),
+            )
+            .await;
+            let mut artifact = json!({
+                "schema_version":1,"manifest_sha256":manifest_sha256,
+                "date":case.date,"with_knowledge":with_knowledge,"model_used":false,
+                "preparation_mode":"source_based","snapshot_id":case.snapshot_id,
+                "extraction_sha256":extraction_sha256,
+                "elapsed_ms":started.elapsed().as_millis(),"status":"failed",
+                "parser_accepted":false,"persistable":false,"error":null,
+                "structured_draft":null,"daily_revision_content":null,"preview_markdown":null,
+                "normalized_context_payload":if with_knowledge { payload.clone() } else { Value::Null }
+            });
+            match result {
+                Ok(proposal) => {
+                    if let Some(draft) = proposal.structured_draft {
+                        artifact["parser_accepted"] = json!(true);
+                        artifact["structured_draft"] = serde_json::to_value(&draft)?;
+                        let content = llm::daily_revision_content(draft, Vec::new(), &args);
+                        artifact["preview_markdown"] =
+                            json!(llm::render_daily_revision_preview(&content, &[], &[]));
+                        artifact["daily_revision_content"] = serde_json::to_value(&content)?;
+                        match validate_candidate_for_save(
+                            &content,
+                            &case.events,
+                            with_knowledge.then_some(&payload),
+                        ) {
+                            Ok(()) => {
+                                artifact["persistable"] = json!(true);
+                                artifact["status"] = json!("succeeded");
+                                succeeded += 1;
+                            }
+                            Err(error) => artifact["error"] = json!(error.to_string()),
+                        }
+                    } else {
+                        artifact["error"] = json!("structured content missing");
+                    }
+                }
+                Err(error) => artifact["error"] = json!(error),
+            }
+            write_new_json(&output.join(format!("{}-{arm}.json", case.date)), &artifact)?;
+            println!(
+                "source evaluation date={} arm={arm} status={} elapsed_ms={}",
+                case.date, artifact["status"], artifact["elapsed_ms"]
+            );
+        }
+    }
+    ensure!(
+        succeeded == 4,
+        "only {succeeded}/4 candidates passed both production parser and save contract"
+    );
+    Ok(())
+}
+
 #[test]
 #[ignore = "requires private October 13–14 fixtures; performs no model calls"]
 fn preflight_real_day_source_cards() -> Result<()> {
@@ -495,6 +725,7 @@ fn preflight_real_day_source_cards() -> Result<()> {
     if let Some(manifest) = &frozen {
         validate_frozen_cases(manifest, &input)?;
     }
+    let mut layouts = Vec::new();
     for (index, case) in input.cases.iter().enumerate() {
         llm::validate_source_extractability(&case.events)
             .map_err(|error| anyhow::anyhow!("{}: {error}", case.date))?;
@@ -502,20 +733,264 @@ fn preflight_real_day_source_cards() -> Result<()> {
         if let Some(manifest) = &frozen {
             contexts.push(manifest["cases"][index]["knowledge"]["vault_context"].clone());
         }
-        for vault_context in contexts {
+        for (context_index, vault_context) in contexts.into_iter().enumerate() {
             let args = llm::SuggestMarkdownSummaryArgs {
                 vault_context,
                 mode: "daily-consolidation".to_owned(),
                 task: None,
             };
-            llm::validate_prepared_source_layout(&case.events, &args)
+            let groups = llm::validate_prepared_source_layout(&case.events, &args)
                 .map_err(|error| anyhow::anyhow!("{} layout: {error}", case.date))?;
+            layouts.push(json!({
+                "date": case.date, "with_knowledge": context_index != 0, "groups": groups
+            }));
         }
         println!(
             "source card and mandatory-layout preflight date={} events={} passed",
             case.date,
             case.events.len()
         );
+    }
+    if let Ok(output) = std::env::var("LOG_INBOX_EVALUATION_PREFLIGHT_OUTPUT") {
+        let requested = Path::new(&output);
+        let parent = fs::canonicalize(requested.parent().context("preflight output parent")?)?;
+        let path = parent.join(requested.file_name().context("preflight output file")?);
+        ensure!(
+            !path.starts_with(fs::canonicalize(&input.workspace_root)?)
+                && !path.starts_with(fs::canonicalize(std::env::current_dir()?)?),
+            "preflight output must be outside the workspace and checkout"
+        );
+        write_new_json(&path, &json!({"layouts": layouts}))?;
+    }
+    Ok(())
+}
+
+/// Export exact production requests for a separately frozen semantic capability
+/// sample. This does not contact a provider or inspect the Markdown workspace.
+#[cfg(unix)]
+fn capability_output(input: &EvaluationInput) -> Result<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let requested = std::env::var("LOG_INBOX_CAPABILITY_OUTPUT")?;
+    let path = Path::new(&requested);
+    ensure!(
+        fs::symlink_metadata(path)?.file_type().is_dir(),
+        "real output directory required"
+    );
+    let output = fs::canonicalize(path)?;
+    ensure!(
+        !output.starts_with(fs::canonicalize(&input.workspace_root)?)
+            && !output.starts_with(fs::canonicalize(std::env::current_dir()?)?)
+            && fs::metadata(&output)?.permissions().mode() & 0o077 == 0,
+        "private output outside workspace and checkout required"
+    );
+    Ok(output)
+}
+
+fn capability_window_ids(item: &Value) -> Result<(Vec<String>, Vec<String>)> {
+    let ids: Vec<String> = serde_json::from_value(item["card_ids"].clone())?;
+    ensure!(
+        (2..=24).contains(&ids.len()),
+        "bounded capability sample required"
+    );
+    match std::env::var("LOG_INBOX_CAPABILITY_STAGE")
+        .as_deref()
+        .unwrap_or("single")
+    {
+        "single" => Ok((ids, Vec::new())),
+        "prefix" => Ok((ids[..ids.len() / 2].to_vec(), Vec::new())),
+        "continuation" => Ok((ids[..ids.len() / 2].to_vec(), ids[ids.len() / 2..].to_vec())),
+        _ => anyhow::bail!("unknown capability stage"),
+    }
+}
+
+fn capability_prefix_content(id: &str) -> Result<String> {
+    let prefix = std::env::var("LOG_INBOX_CAPABILITY_PREFIX_OUTPUT")?;
+    let response = read_json(&Path::new(&prefix).join(format!("{id}-response.json")))?;
+    ensure!(
+        response["choices"][0]["finish_reason"] == "stop",
+        "prefix did not finish normally"
+    );
+    Ok(response["choices"][0]["message"]["content"]
+        .as_str()
+        .context("prefix content required")?
+        .to_owned())
+}
+
+#[tokio::test]
+#[ignore = "requires private failed-preparation fixture; performs no model calls"]
+async fn export_first_daily_topic_request() -> Result<()> {
+    let input: EvaluationInput = serde_json::from_slice(&read_bounded(Path::new(
+        &std::env::var("LOG_INBOX_EVALUATION_INPUT")?,
+    ))?)?;
+    let output = capability_output(&input)?;
+    let config = llm::LlmConfig::from_env().context("explicit local model required")?;
+    ensure!(
+        llm::knowledge_text_stays_local(&config),
+        "local model required"
+    );
+    let case = input.cases.first().context("evaluation case required")?;
+    let exported = llm::export_first_daily_topic_request(&config, &case.events)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    write_new_json(&output.join("first-daily-topic-request.json"), &exported)?;
+    println!("first daily topic request exported date={}", case.date);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires private frozen capability sample"]
+async fn export_semantic_capability_requests() -> Result<()> {
+    let input: EvaluationInput = serde_json::from_slice(&read_bounded(Path::new(
+        &std::env::var("LOG_INBOX_EVALUATION_INPUT")?,
+    ))?)?;
+    let sample = read_json(Path::new(&std::env::var("LOG_INBOX_CAPABILITY_INPUT")?))?;
+    let output = capability_output(&input)?;
+    let config = llm::LlmConfig::from_env().context("explicit local model required")?;
+    ensure!(
+        llm::knowledge_text_stays_local(&config),
+        "local model required"
+    );
+    for item in sample["samples"].as_array().context("samples required")? {
+        let id = item["id"].as_str().context("sample ID required")?;
+        ensure!(
+            id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "invalid sample ID"
+        );
+        let case = input
+            .cases
+            .iter()
+            .find(|case| item["date"] == case.date)
+            .context("unknown sample date")?;
+        let (ids, next) = capability_window_ids(item)?;
+        let exported = if next.is_empty() {
+            llm::export_topic_window_request(&config, &case.events, &ids).await
+        } else {
+            llm::export_topic_continuation_request(
+                &config,
+                &case.events,
+                &ids,
+                &capability_prefix_content(id)?,
+                &next,
+            )
+            .await
+        }
+        .map_err(anyhow::Error::msg)?;
+        write_new_json(&output.join(format!("{id}-request.json")), &exported)?;
+        println!(
+            "capability request exported sample={id} cards={}",
+            ids.len()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires private frozen capability responses"]
+async fn validate_semantic_capability_responses() -> Result<()> {
+    let input: EvaluationInput = serde_json::from_slice(&read_bounded(Path::new(
+        &std::env::var("LOG_INBOX_EVALUATION_INPUT")?,
+    ))?)?;
+    let sample = read_json(Path::new(&std::env::var("LOG_INBOX_CAPABILITY_INPUT")?))?;
+    let output = capability_output(&input)?;
+    for item in sample["samples"].as_array().context("samples required")? {
+        let id = item["id"].as_str().context("sample ID required")?;
+        ensure!(
+            id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "invalid sample ID"
+        );
+        let case = input
+            .cases
+            .iter()
+            .find(|case| item["date"] == case.date)
+            .context("unknown sample date")?;
+        let (ids, next) = capability_window_ids(item)?;
+        let response = read_json(&output.join(format!("{id}-response.json")))?;
+        let choice = &response["choices"][0];
+        ensure!(
+            choice["finish_reason"] == "stop",
+            "response did not finish normally"
+        );
+        let content = choice["message"]["content"]
+            .as_str()
+            .context("content required")?;
+        let result = if next.is_empty() {
+            llm::validate_topic_window_response(&case.events, &ids, content).await
+        } else {
+            llm::validate_topic_continuation_response(
+                &case.events,
+                &ids,
+                &capability_prefix_content(id)?,
+                &next,
+                content,
+            )
+            .await
+        };
+        let validated = match result {
+            Ok(topics) => json!({"structurally_valid":true,"proposed":topics}),
+            Err(error) => json!({"structurally_valid":false,"error":error}),
+        };
+        write_new_json(&output.join(format!("{id}-validation.json")), &validated)?;
+        println!(
+            "capability response sample={id} structurally_valid={}",
+            validated["structurally_valid"]
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires private current-contract source ledgers for request inspection"]
+async fn inspect_current_selection_requests() -> Result<()> {
+    let input: EvaluationInput = serde_json::from_slice(&read_bounded(Path::new(
+        &std::env::var("LOG_INBOX_EVALUATION_INPUT")?,
+    ))?)?;
+    let manifest = read_json(Path::new(&std::env::var(
+        "LOG_INBOX_EVALUATION_FROZEN_MANIFEST",
+    )?))?;
+    validate_frozen_cases(&manifest, &input)?;
+    let output = capability_output(&input)?;
+    let source_directory = std::env::var("LOG_INBOX_CAPABILITY_SOURCE_LEDGERS")?;
+    let config = llm::LlmConfig::from_env().context("explicit local model required")?;
+    for (case_index, case) in input.cases.iter().enumerate() {
+        let prior = read_json(
+            &Path::new(&source_directory).join(format!("{}-source-facts.json", case.date)),
+        )?;
+        // Current-only inspection: never upgrade a historical interpretation by
+        // stamping its contract or inventing the newly required subject labels.
+        ensure!(
+            prior["status"] == "succeeded",
+            "successful source ledger required"
+        );
+        ensure!(
+            prior["source_facts"]["contract"] == llm::DAILY_GENERATION_CONTRACT,
+            "current-contract source ledger required; historical comparisons remain frozen artifacts"
+        );
+        let ledger = serde_json::from_value(prior["source_facts"].clone())?;
+        let groups =
+            manifest["cases"][case_index]["knowledge"]["snapshot_payload"]["workstream_evidence"]
+                .as_object()
+                .context("frozen workstream evidence required")?;
+        for (group_index, (_, event_ids)) in groups.iter().enumerate() {
+            let ids: Vec<String> = serde_json::from_value(event_ids.clone())?;
+            let events = case
+                .events
+                .iter()
+                .filter(|event| ids.contains(&event.id))
+                .cloned()
+                .collect::<Vec<_>>();
+            let args = llm::SuggestMarkdownSummaryArgs {
+                mode: "daily-consolidation".into(),
+                task: None,
+                vault_context: without_knowledge(),
+            };
+            let inspection =
+                llm::inspect_composition_request(&config, &args, &events, &case.events, &ledger)
+                    .map_err(anyhow::Error::msg)?;
+            write_new_json(
+                &output.join(format!("{}-group-{group_index}-inspection.json", case.date)),
+                &inspection,
+            )?;
+        }
     }
     Ok(())
 }
@@ -565,6 +1040,76 @@ fn shared_source_extraction_is_bound_to_manifest_evidence_and_terminal_state() -
     ensure!(validate_extraction_artifact(&failed, "manifest", &case).is_err());
     failed["source_facts"] = Value::Null;
     validate_extraction_artifact(&failed, "manifest", &case)?;
+    Ok(())
+}
+
+#[test]
+fn evaluation_rejects_parser_only_content_and_unauthorized_links() -> Result<()> {
+    let event = |id: &str| -> Result<StoredLogEvent> {
+        Ok(serde_json::from_value(json!({
+            "id":id,"received_at":"2026-10-13T12:00:00Z",
+            "timestamp":"2026-10-13T12:00:00Z","source":"evaluation",
+            "level":"info","message":"Reported work.","metadata":{},
+            "fingerprint":null,"truncated":false,"reviewed":false
+        }))?)
+    };
+    let events = vec![event("a")?, event("b")?];
+    let mut value = json!({"schema_version":1,"manual_entry_ids":[],
+        "workstreams":[{"id":"work","title":"Work","evidence_event_ids":["a","b"],
+            "outcome":[{"text":"Reported outcome.","evidence_event_ids":["a"]}]}]});
+    let content = serde_json::from_value(value.clone())?;
+    ensure!(validate_candidate_for_save(&content, &events, None).is_err());
+    value["workstreams"][0]["validation"] = json!([
+        {"text":"Reported check.","evidence_event_ids":["b"]}
+    ]);
+    let content = serde_json::from_value(value.clone())?;
+    validate_candidate_for_save(&content, &events, None)?;
+    value["workstreams"][0]["canonical_links"] = json!(["[[Product]]"]);
+    let content = serde_json::from_value(value)?;
+    ensure!(validate_candidate_for_save(&content, &events, None).is_err());
+    validate_candidate_for_save(
+        &content,
+        &events,
+        Some(&json!({
+            "workstream_links":{"work":["[[Product]]"]},
+            "workstream_evidence":{"work":["a","b"]}
+        })),
+    )?;
+    Ok(())
+}
+
+/// Recheck earlier immutable experiment outputs using the production save checks.
+/// Emits only bounded status/count diagnostics; never calls a provider or reads notes.
+#[test]
+#[ignore = "requires private frozen evaluation artifacts"]
+fn audit_frozen_candidate_persistability() -> Result<()> {
+    let input: EvaluationInput = serde_json::from_slice(&read_bounded(Path::new(
+        &std::env::var("LOG_INBOX_EVALUATION_INPUT")?,
+    ))?)?;
+    let manifest = read_json(Path::new(&std::env::var(
+        "LOG_INBOX_EVALUATION_FROZEN_MANIFEST",
+    )?))?;
+    validate_frozen_cases(&manifest, &input)?;
+    let directory = fs::canonicalize(std::env::var("LOG_INBOX_EVALUATION_AUDIT_DIR")?)?;
+    for (index, case) in input.cases.iter().enumerate() {
+        for with_knowledge in [false, true] {
+            let arm = if with_knowledge {
+                "withKnowledge"
+            } else {
+                "withoutKnowledge"
+            };
+            let artifact = read_json(&directory.join(format!("{}-{arm}.json", case.date)))?;
+            let content = serde_json::from_value(artifact["daily_revision_content"].clone())?;
+            let payload = with_knowledge
+                .then_some(&manifest["cases"][index]["knowledge"]["snapshot_payload"]);
+            let persistable = validate_candidate_for_save(&content, &case.events, payload).is_ok();
+            println!(
+                "{}",
+                json!({"date":case.date,"with_knowledge":with_knowledge,
+                "prior_status":artifact["status"],"persistable":persistable})
+            );
+        }
+    }
     Ok(())
 }
 
@@ -622,5 +1167,25 @@ fn frozen_replay_checks_fixture_evidence_and_knowledge_without_reading_notes() -
             "tampered replay accepted: {pointer}"
         );
     }
+    let mut alternate = identity.clone();
+    alternate["model"] = json!("alternate-local-model");
+    ensure!(
+        validate_replay(&manifest, &input, &alternate).is_err(),
+        "implicit model change accepted"
+    );
+    alternate["model_change_from"] = identity["model"].clone();
+    validate_replay(&manifest, &input, &alternate)?;
+    alternate["model_change_from"] = json!("wrong-baseline");
+    ensure!(
+        validate_replay(&manifest, &input, &alternate).is_err(),
+        "wrong model baseline accepted"
+    );
+    alternate["model_change_from"] = identity["model"].clone();
+    let mut changed = manifest.clone();
+    changed["cases"][0]["events_sha256"] = json!("different-evidence");
+    ensure!(
+        validate_replay(&changed, &input, &alternate).is_err(),
+        "model change bypassed evidence check"
+    );
     Ok(())
 }

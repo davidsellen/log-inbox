@@ -170,6 +170,27 @@ The server resolves the active workspace and calendar date, freezes the day dest
 
 ### `POST /api/v2/daily/{YYYY-MM-DD}/generate`
 
+
+Preparation accepts optional `preparation_mode: "source_based" | "semantic"`.
+An ordinary request that omits the mode defaults to source-based preparation,
+which makes no model requests and does not require provider configuration.
+Explicit `connection_id`/`model` selections are rejected in source mode. Semantic
+mode preserves provider resolution, consent and strict model validation; it does
+not automatically fall back to source mode. Both modes preserve the existing
+immutable evidence, edited-candidate, cancellation and explicit Apply contracts.
+Attempts and revision provenance capture the mode. Daily reads expose
+`revision_preparation_mode`; missing historical mode means semantic generation,
+not a newly classified source record. Context adjustments and comparisons inherit
+the displayed revision's captured mode. Safe expired-evidence manual amendments
+retain historical content/provenance; an incompatible explicit mode change cannot
+regenerate from partial evidence. Schedules default to source-based preparation.
+
+Source-mode Knowledge snapshots contain reviewed navigation without note prose,
+and preserve raw source identity groups rather than applying Knowledge aliases.
+Both source-mode comparison arms use the same exact source ledger and mode. Source comparisons
+need no model or provider consent and do not count as model performance samples.
+
+
 The optional `reference_mode` is `configured` (default) or `none`. `none` is an explicit one-attempt recovery: it omits reference mappings, aliases, links and excerpts without changing collections or mappings. It cannot be combined with context exclusions. The day response's `revision_reference_mode` describes the current revision, not the latest attempted generation.
 
 Attempts additionally expose `reference_mode`, `completed_groups`/`total_groups`, `failure_code` and `recovery_actions`. Counts advance only after validation; `stage=requesting_model_fallback` discloses sequential fallback. `reference_context_invalid` offers `retry_without_references`; transient failures offer `retry`. Technical detail remains bounded and redacted. Reference snapshots must pass the persistence validator before a model request begins.
@@ -182,9 +203,9 @@ When new automated evidence exists and the current revision contains structured 
 
 If source evidence from the current snapshot has expired, generation preserves that complete revision and refuses to replace it from a partial event set. Owner-authored manual notes can still be attached without a model call. The owner may explicitly leave each newly arrived event for later; active deferrals are excluded from regeneration and Apply freshness checks only for that exact revision and event digest.
 
-Automated evidence always uses the strict structured model contract, even if an ingest producer claims `entry_kind=manual`. Before the model call, enabled Knowledge collections are read through the workspace capability and used only for reviewed mappings or unique exact title, alias, and typed-reference matches. A local endpoint may receive the bounded excerpts described in the Knowledge contract. Per-workstream exclusions suppress only excerpt text; canonical-link authorization and grouping remain unchanged. Omitted adjustment fields preserve the current revision's frozen exclusions. Stale or no-longer-resolvable explicit adjustments return `409 Conflict` instead of silently changing meaning. Other Knowledge resolution failures degrade explicitly to evidence-only generation and are recorded as a bounded diagnostic without returning internal paths or errors.
+Automated evidence always uses the strict structured evidence contract, even if an ingest producer claims `entry_kind=manual`. Semantic preparation additionally enforces the model response contract. Before preparation, enabled Knowledge collections are read through the workspace capability and used only for reviewed mappings or unique exact title, alias, and typed-reference matches. Source mode uses reviewed navigation and retains raw source groups; a local semantic endpoint may receive the bounded excerpts described in the Knowledge contract. In semantic mode, per-workstream exclusions suppress only excerpt text; canonical-link authorization and grouping remain unchanged. Omitted adjustment fields preserve the current revision's frozen exclusions. Stale or no-longer-resolvable explicit adjustments return `409 Conflict` instead of silently changing meaning. Knowledge resolution failures stop preparation with a bounded reference-context error and preserve the candidate; recovery may explicitly retry without references.
 
-Manual-only days create a reviewable revision without an LLM. Failures after acceptance, including model absence, oversized input, provider failure, invalid JSON, schema mismatch, missing evidence or unsafe grouping, appear on the attempt; raw log text is never substituted as a candidate. Generation changes SQLite review state only. It does not create a folder or Markdown file. The configured timeout bounds the whole attempt, not each workstream independently. Startup marks unfinished attempts interrupted and preserves existing revisions.
+Manual-only days create a reviewable revision without an LLM. Failures after acceptance, including oversized input, missing evidence or unsafe grouping, and in semantic mode model absence, provider failure, invalid JSON or schema mismatch, appear on the attempt; raw log text is never substituted as a candidate. Generation changes SQLite review state only. It does not create a folder or Markdown file. The configured timeout bounds the whole attempt, not each workstream independently. Startup marks unfinished attempts interrupted and preserves existing revisions.
 
 ### `POST /api/v2/daily/{YYYY-MM-DD}/generation/{attempt_id}/cancel`
 
@@ -218,6 +239,15 @@ Requires `review:write` and CSRF. Body contains the exact current dismissed revi
 
 Requires `review:write` and CSRF. Body contains the exact `expected_revision_id` and a complete `DailyRevisionContent` object. The storage boundary validates schema version, manual-entry ownership, unique workstreams, canonical-link shape, complete snapshot coverage, and evidence on every factual item. A successful edit creates a new immutable `structured_edit` revision; compare-and-swap prevents a stale editor from replacing a newer candidate. Arbitrary Markdown is not accepted by this route.
 
+Schema-version-1 workstreams may include `reported_history` entries containing
+`original_field` and a source-owned `fact`. Legacy absence means empty. Clients must
+retain the current history unchanged when saving titles or highlights; removing,
+editing or injecting it returns a validation error. Highlights remain editable with
+the existing provenance-map rules. Complete evidence coverage includes history,
+while read-only source reports remain visibly separate from current actions. The
+readable view applies evidence exclusions to both; Copy/preview/Apply export the
+concise highlights without dumping source history into Markdown.
+
 The Daily read model renders the final preview deterministically. Owner-authored manual prose remains verbatim and separate. Model-authored titles, facts, and questions are escaped as plain Markdown text; only validated server-owned canonical links are active. Facts supported solely by omitted, duplicate, or superseded evidence are absent from the preview.
 
 ## Generation configuration and provenance
@@ -235,7 +265,7 @@ All routes below use the current workspace, authenticated dashboard session, all
 | `POST /api/v2/settings/generation/connections/{id}/models/test` | `{model}`; synthetic production-contract validation, then persists tested profile |
 | `PUT /api/v2/settings/generation/default` | `{connection_id,model}`; requires tested model and valid consent/credentials |
 
-Generation and context-comparison start requests accept optional `connection_id` and `model` together; omitting both uses the saved default or initial environment connection. Invalid selections do not silently fall back. An accepted attempt freezes its configuration and exposes nonsecret `model_selection`. Daily reads expose `generation_provenance` for the displayed revision; missing legacy provenance is null. Reuse compares the captured model configuration as well as evidence/context. Manual-only records need no model request. Reference adjustments use the same selection contract.
+Semantic generation and semantic context-comparison start requests accept optional `connection_id` and `model` together; omitting both uses the saved default or initial environment connection. Invalid selections do not silently fall back. An accepted attempt freezes its configuration and exposes nonsecret `model_selection`. Daily reads expose `generation_provenance` for the displayed revision; missing legacy provenance is null. Reuse compares the captured model configuration as well as evidence/context. Manual-only records need no model request. Reference adjustments use the same selection contract.
 
 Comparison retries return the existing immutable experiment; an explicitly conflicting model selection returns conflict. Both arms share the captured configuration and promoted revisions inherit that comparison's provenance. Excerpt-bearing comparisons remain local-only. Apply preview retains raw `previous_block`/`next_block` and hashes; readable marker hiding is presentation-only.
 

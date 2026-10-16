@@ -47,6 +47,18 @@ Raw events expire from `received_at`, while snapshot IDs, digests, ordering, and
 
 Accepted redacted content is stored completely. Ingestion rejects values above the API limits rather than accepting partial evidence. LLM prompt projections have smaller independent limits and never overwrite stored content.
 
+Schema-version-1 workstreams may retain optional `reported_history` inside the
+existing immutable revision JSON; no database migration is required. Each entry
+has `original_field` and a `fact` with one evidence ID and one matching source
+clause. Coverage is validated over the union of concise highlights and history,
+with the same snapshot membership and clause-map checks. History is read-only in
+structured edits, survives raw-source expiry with its revision, and is suppressed
+from the displayed history when its source is omitted, duplicate or superseded.
+The stored audit remains immutable. Missing history in legacy JSON means empty.
+New history is bounded separately; existing owner activity records retain their
+prior contract. The evaluation harness uses the same pure evidence and frozen-link
+validator as revision persistence before calling a candidate persistable.
+
 ## Knowledge Collections and Mappings
 
 `knowledge_collections` stores workspace-scoped, reviewed include roots and exclusions with a semantic revision digest. Definitions never contain Markdown content and never create, move, or delete workspace files.

@@ -163,6 +163,7 @@ struct KnowledgeExcerptExclusionRequest {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GenerateDailyRequest {
+    preparation_mode: Option<llm::PreparationMode>,
     #[serde(default)]
     replace_edited: bool,
     connection_id: Option<String>,
@@ -1963,6 +1964,7 @@ async fn refocus_daily_day(
         },
         "manual_entries": manual_entries,
         "current_revision": current_revision,
+        "revision_preparation_mode": current_revision.as_ref().map(|revision| revision_preparation_mode(&state, &revision.id)).transpose()?,
         "revision_reference_mode": current_context_snapshot.as_ref().and_then(|snapshot| snapshot.payload.get("reference_mode")).and_then(Value::as_str).unwrap_or("configured"),
         "current_snapshot": current_snapshot,
         "current_context_snapshot": current_context_snapshot.as_ref().map(public_context_snapshot),
@@ -2176,7 +2178,7 @@ async fn refocus_daily_context(
         "local_date": local_date,
         "revision_id": revision.id,
         "status": status,
-        "mode": if context_snapshot.payload.get("schema_version").and_then(Value::as_u64) == Some(2) { "bounded_knowledge" } else { "exact_links_only" },
+        "mode": if context_snapshot.payload.get("preparation_mode").and_then(Value::as_str) == Some("source_based") { "exact_links_only" } else if context_snapshot.payload.get("schema_version").and_then(Value::as_u64) == Some(2) { "bounded_knowledge" } else { "exact_links_only" },
         "message": message,
         "snapshot": public_context_snapshot(&context_snapshot),
         "workstreams": workstreams,
@@ -3687,15 +3689,52 @@ async fn refocus_generate_daily(
                 "generation_busy: Another draft is being prepared. Wait or cancel it first.",
             )
         })?;
-    let selected = generation::resolve_for_day(
-        &state,
-        local_date,
-        input.connection_id.as_deref(),
-        input.model.as_deref(),
-    )
-    .await?;
+    let inherited_mode = if context_adjustments.is_some() {
+        let profile = active_refocus_workspace(&state)?;
+        let revision = state
+            .store
+            .current_proposal_revision(&profile.id, local_date)
+            .map_err(generation::database_error)?;
+        revision
+            .map(|revision| revision_preparation_mode(&state, &revision.id))
+            .transpose()?
+    } else {
+        None
+    };
+    let mode = inherited_mode
+        .or(input.preparation_mode)
+        .unwrap_or_default();
+    if inherited_mode.is_some_and(|inherited| {
+        input
+            .preparation_mode
+            .is_some_and(|requested| requested != inherited)
+    }) {
+        return Err(ApiError::bad_request(
+            "Reference adjustments must preserve the candidate preparation mode.",
+        ));
+    }
+    if mode == llm::PreparationMode::SourceBased
+        && (input.connection_id.is_some() || input.model.is_some())
+    {
+        return Err(ApiError::bad_request(
+            "Source-based preparation does not accept a model selection.",
+        ));
+    }
+    let selected = if mode == llm::PreparationMode::Semantic {
+        generation::resolve_for_day(
+            &state,
+            local_date,
+            input.connection_id.as_deref(),
+            input.model.as_deref(),
+        )
+        .await?
+    } else {
+        None
+    };
     let (mut attempt, mut value) =
         generation::begin_with_references(&state, local_date, "manual", input.reference_mode)?;
+    attempt.preparation_mode = mode;
+    attempt.preparation_mode_explicit = input.preparation_mode.is_some();
     attempt.capture_model(selected)?;
     value["model_selection"] = attempt.model_provenance();
     tokio::spawn(async move {
@@ -3715,7 +3754,24 @@ async fn refocus_generate_daily(
     Ok((StatusCode::ACCEPTED, Json(json!({"attempt": value}))))
 }
 
-async fn generate_context_comparison_arms(
+fn revision_preparation_mode(
+    state: &AppState,
+    revision_id: &str,
+) -> Result<llm::PreparationMode, ApiError> {
+    let provenance = state
+        .store
+        .generation_revision_provenance(revision_id)
+        .map_err(generation::database_error)?;
+    Ok(provenance
+        .as_ref()
+        .and_then(|value| value.get("preparation_mode"))
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or(llm::PreparationMode::Semantic))
+}
+
+async fn generate_context_comparison_arms_mode(
+    mode: llm::PreparationMode,
     config: Option<&llm::LlmConfig>,
     context_snapshot: &log_inbox_core::models::ContextSnapshot,
     destination_path: &str,
@@ -3730,6 +3786,7 @@ async fn generate_context_comparison_arms(
         .get("excerpts")
         .and_then(Value::as_array)
         .is_some_and(|excerpts| !excerpts.is_empty())
+        && mode == llm::PreparationMode::Semantic
         && !config.is_some_and(llm::knowledge_text_stays_local)
     {
         return Err(ApiError::conflict(
@@ -3762,6 +3819,11 @@ async fn generate_context_comparison_arms(
         "Create a concise, evidence-backed daily engineering record. Preserve distinct outcomes, decisions, trade-offs, validation, blockers, and follow-up."
             .to_owned(),
     );
+    if mode == llm::PreparationMode::SourceBased {
+        let mut payload = context_snapshot.payload.clone();
+        knowledge::normalize_source_based_resolution(&mut with_context, &mut payload, &events)
+            .map_err(ApiError::invalid_references)?;
+    }
     let with_args = llm::SuggestMarkdownSummaryArgs {
         vault_context: with_context,
         mode: "daily-consolidation".to_owned(),
@@ -3772,14 +3834,34 @@ async fn generate_context_comparison_arms(
         mode: "daily-consolidation".to_owned(),
         task,
     };
-    let with_proposal =
-        llm::generate_automated_daily_summary(config, with_args.clone(), events.clone())
+    let (with_proposal, without_proposal) = if mode == llm::PreparationMode::SourceBased {
+        let ledger = llm::prepare_source_based_ledger(&events).map_err(ApiError::unprocessable)?;
+        let with = llm::compose_source_based_prepared_summary(
+            with_args.clone(),
+            events.clone(),
+            &ledger,
+            |_, _, _| Ok(()),
+        )
+        .await
+        .map_err(ApiError::unprocessable)?;
+        let without = llm::compose_source_based_prepared_summary(
+            without_args.clone(),
+            events,
+            &ledger,
+            |_, _, _| Ok(()),
+        )
+        .await
+        .map_err(ApiError::unprocessable)?;
+        (with, without)
+    } else {
+        let with = llm::generate_automated_daily_summary(config, with_args.clone(), events.clone())
             .await
             .map_err(ApiError::unprocessable)?;
-    let without_proposal =
-        llm::generate_automated_daily_summary(config, without_args.clone(), events)
+        let without = llm::generate_automated_daily_summary(config, without_args.clone(), events)
             .await
             .map_err(ApiError::unprocessable)?;
+        (with, without)
+    };
     let with_draft = with_proposal
         .structured_draft
         .ok_or_else(|| ApiError::internal("comparison generator omitted structured content"))?;
@@ -3948,25 +4030,49 @@ async fn refocus_start_context_comparison(
         .store
         .get_events_by_ids(&snapshot.event_ids)
         .map_err(|error| ApiError::conflict(error.to_string()))?;
-    let selected = providers::resolve(
-        &state,
-        &profile.id,
-        input.connection_id.as_deref(),
-        input.model.as_deref(),
-    )
-    .await?
-    .ok_or_else(|| ApiError::unprocessable("Daily comparison requires a configured model"))?;
-    let config = selected.config.clone();
+    let mode = revision_preparation_mode(&state, &revision.id)?;
+    if mode == llm::PreparationMode::SourceBased
+        && (input.connection_id.is_some() || input.model.is_some())
+    {
+        return Err(ApiError::bad_request(
+            "Source-based comparison does not accept a model selection.",
+        ));
+    }
+    let selected = if mode == llm::PreparationMode::Semantic {
+        Some(
+            providers::resolve(
+                &state,
+                &profile.id,
+                input.connection_id.as_deref(),
+                input.model.as_deref(),
+            )
+            .await?
+            .ok_or_else(|| {
+                ApiError::unprocessable("Daily comparison requires a configured model")
+            })?,
+        )
+    } else {
+        None
+    };
+    let config = selected.as_ref().map(|model| model.config.clone());
     let (mut attempt, _) = generation::begin(&state, local_date, "comparison")?;
-    attempt.capture_model(Some(selected))?;
-    attempt.stage("requesting_model")?;
+    attempt.preparation_mode = mode;
+    attempt.capture_model(selected)?;
+    attempt.stage(
+        if attempt.preparation_mode == llm::PreparationMode::SourceBased {
+            "preparing_sources"
+        } else {
+            "requesting_model"
+        },
+    )?;
     let result = async {
     let (context_content, without_context_content) = tokio::select! {
         biased;
         _ = attempt.cancel.changed() => Err(ApiError::unprocessable("Generation canceled.")),
         _ = tokio::time::sleep_until(attempt.deadline) => Err(ApiError::unprocessable("Generation timed out.")),
-        result = generate_context_comparison_arms(
-        Some(&config),
+        result = generate_context_comparison_arms_mode(
+        mode,
+        config.as_ref(),
         &context_snapshot,
         &day.destination_path,
         events,
@@ -3982,7 +4088,7 @@ async fn refocus_start_context_comparison(
             &revision.id,
             &context_content,
             &without_context_content,
-            &llm::generation_configuration_digest(&config),
+            attempt.model_provenance()["fingerprint"].as_str().expect("attempt fingerprint"),
             &llm::daily_generation_contract_digest(),
             &attempt.model_provenance(),
         )
@@ -4098,7 +4204,8 @@ async fn generate_daily_candidate(
         .clone()
         .try_lock_owned()
         .map_err(|_| ApiError::conflict("generation_busy: Another draft is being prepared."))?;
-    let (attempt, _) = generation::begin(state, local_date, "scheduled")?;
+    let (mut attempt, _) = generation::begin(state, local_date, "scheduled")?;
+    attempt.preparation_mode = llm::PreparationMode::Semantic;
     generation::run(
         state,
         local_date,
@@ -4183,7 +4290,17 @@ async fn generate_daily_candidate_inner(
         .transpose()
         .map_err(generation::database_error)?
         .flatten();
-    let model_changed = attempt.model.is_some()
+    let mode_changed = current.as_ref().is_some_and(|_| {
+        previous_provenance
+            .as_ref()
+            .and_then(|p| p.get("preparation_mode"))
+            .cloned()
+            .and_then(|v| serde_json::from_value::<llm::PreparationMode>(v).ok())
+            .unwrap_or(llm::PreparationMode::Semantic)
+            != attempt.preparation_mode
+    });
+    let model_changed = (attempt.preparation_mode == llm::PreparationMode::SourceBased
+        || attempt.model.is_some())
         && previous_provenance
             .as_ref()
             .and_then(|p| p.get("fingerprint"))
@@ -4199,7 +4316,7 @@ async fn generate_daily_candidate_inner(
             && !replace_edited
         {
             return Err(ApiError::conflict(
-                "Confirm replacement before generating an AI summary of this activity record.",
+                "Confirm replacement before preparing a structured draft from this activity record.",
             ));
         }
         let deferred_event_ids = state
@@ -4229,19 +4346,27 @@ async fn generate_daily_candidate_inner(
         if snapshot_evidence.iter().any(|item| !item.available) {
             // A prompt-contract upgrade invalidates live reuse, but does not change
             // the captured provider/model for a safe manual-only amendment.
-            let selection_changed = model_changed
-                && !attempt.model.as_ref().is_some_and(|model| {
-                    previous_provenance
-                        .as_ref()
-                        .and_then(|value| value.get("fingerprint"))
-                        .and_then(Value::as_str)
-                        .is_some_and(|fingerprint| {
-                            llm::generation_configuration_matches_legacy_contract(
-                                &model.config,
-                                fingerprint,
-                            )
-                        })
-                });
+            let selection_changed = (mode_changed && attempt.preparation_mode_explicit)
+                || (!mode_changed
+                    && attempt.preparation_mode == llm::PreparationMode::Semantic
+                    && model_changed
+                    && !attempt.model.as_ref().is_some_and(|model| {
+                        previous_provenance
+                            .as_ref()
+                            .and_then(|value| {
+                                value
+                                    .get("configuration_digest")
+                                    .or_else(|| value.get("fingerprint"))
+                            })
+                            .and_then(Value::as_str)
+                            .is_some_and(|fingerprint| {
+                                fingerprint == model.fingerprint
+                                    || llm::generation_configuration_matches_legacy_contract(
+                                        &model.config,
+                                        fingerprint,
+                                    )
+                            })
+                    }));
             if selection_changed
                 || requested_context_adjustments.is_some()
                 || attempt.reference_mode == generation::ReferenceMode::None
@@ -4400,7 +4525,10 @@ async fn generate_daily_candidate_inner(
         .as_ref()
         .map(|m| &m.config)
         .is_some_and(llm::knowledge_text_stays_local);
-    if context_adjustment_requested && !selected_model_is_local {
+    if context_adjustment_requested
+        && !selected_model_is_local
+        && attempt.preparation_mode == llm::PreparationMode::Semantic
+    {
         return Err(ApiError::conflict(
             "Reference-note excerpt adjustments require a local model. Use ordinary generation for an external activity-only draft.",
         ));
@@ -4418,7 +4546,7 @@ async fn generate_daily_candidate_inner(
             &collections,
             &mappings,
             &evidence.events,
-            selected_model_is_local,
+            selected_model_is_local && attempt.preparation_mode == llm::PreparationMode::Semantic,
             &context_exclusions,
         ) {
             Ok(Some(resolution)) => (Some(resolution.snapshot_payload), resolution.vault_context),
@@ -4442,6 +4570,11 @@ async fn generate_daily_candidate_inner(
         }
     };
     let payload = desired_context_payload.get_or_insert_with(|| json!({"schema_version":1,"resolver_version":"none","root_binding":workspace.root_binding(),"workstream_links":{},"workstream_evidence":{},"diagnostics":{}}));
+    if attempt.preparation_mode == llm::PreparationMode::SourceBased {
+        knowledge::normalize_source_based_resolution(&mut vault_context, payload, &evidence.events)
+            .map_err(ApiError::invalid_references)?;
+    }
+    payload["preparation_mode"] = json!(attempt.preparation_mode);
     payload["generation_model"] = attempt.model_provenance();
     payload["generation_contract"] = Value::String(llm::daily_generation_contract_digest());
     payload["reference_mode"] = Value::String(attempt.reference_mode.as_str().to_owned());
@@ -4519,7 +4652,13 @@ async fn generate_daily_candidate_inner(
                 .to_owned(),
         ),
     };
-    attempt.stage("requesting_model")?;
+    attempt.stage(
+        if attempt.preparation_mode == llm::PreparationMode::SourceBased {
+            "preparing_sources"
+        } else {
+            "requesting_model"
+        },
+    )?;
     let progress_store = state.store.clone();
     let progress_id = attempt.id.clone();
     let progress_retries = attempt.save_retries.clone();
@@ -4528,10 +4667,11 @@ async fn generate_daily_candidate_inner(
         biased;
         _ = attempt.cancel.changed() => Err("Generation canceled.".to_owned()),
         _ = tokio::time::sleep_until(attempt.deadline) => Err("Generation timed out.".to_owned()),
-        result = llm::generate_automated_daily_summary_with_progress(
+        result = llm::generate_daily_preparation_with_progress(
         attempt.model.as_ref().map(|m| &m.config),
         args.clone(),
         evidence.events,
+        attempt.preparation_mode,
         move |completed, total, fallback| generation::save_with_retries(&progress_id, progress_deadline, &progress_retries, || progress_store.update_generation_attempt_progress(&progress_id, completed, total, fallback)).map(|_| ()).map_err(|error| if error.failure_code == Some("database_busy") { "database_busy".to_owned() } else { error.message }),
         ) => result,
     };
@@ -5560,55 +5700,123 @@ mod knowledge_destination_tests {
     }
 
     pub(super) fn generation_model_response(body: &Value) -> Value {
-        const FIELDS: [&str; 6] = [
-            "outcome",
-            "decision",
-            "trade_off",
-            "validation",
-            "blocker",
-            "follow_up",
-        ];
         let prompt = body["messages"][1]["content"].as_str().unwrap();
-        assert!(prompt.starts_with("Stage: fact composition"));
-        let groups: Value = serde_json::from_str(
-            prompt
-                .split_once("\n\nExtracted evidence groups:\n")
+        let properties = body["response_format"]["json_schema"]["schema"]["properties"]
+            .as_object()
+            .unwrap();
+        let content = if prompt.starts_with("Stage: topic partition") {
+            let count = properties["assignments"]["minItems"].as_u64().unwrap() as usize;
+            assert_eq!(properties["assignments"]["maxItems"], count);
+            json!({"assignments":vec![0; count]})
+        } else {
+            assert!(prompt.starts_with("Stage: fact composition"));
+            let groups: Value = serde_json::from_str(
+                prompt
+                    .split_once("\n\nExtracted evidence groups:\n")
+                    .unwrap()
+                    .1
+                    .split_once("\n\nReturn JSON")
+                    .unwrap()
+                    .0,
+            )
+            .unwrap();
+            const FIELDS: [&str; 6] = [
+                "outcome",
+                "decision",
+                "trade_off",
+                "validation",
+                "blocker",
+                "follow_up",
+            ];
+            let fact_topics = groups[0]["facts"]
+                .as_array()
                 .unwrap()
-                .1
-                .split_once("\n\nReturn JSON")
-                .unwrap()
-                .0,
-        )
-        .unwrap();
-        let groups = groups.as_array().unwrap();
-        assert_eq!(groups.len(), 1);
-        let mut fields = serde_json::Map::new();
-        for field in FIELDS {
-            let mut slots = serde_json::Map::new();
-            for source in groups[0]["sources"].as_array().unwrap() {
-                let key = source["source_key"].as_str().unwrap();
-                let options = &body["response_format"]["json_schema"]["schema"]["properties"]
-                    [field]["properties"][key]["enum"];
-                if options.is_null() {
-                    continue;
-                }
-                let selected = if options.as_array().unwrap().contains(&Value::Null) {
-                    Value::Null
-                } else {
-                    source["facts"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .filter(|fact| fact["field"] == field)
-                        .min_by_key(|fact| fact["rendered_characters"].as_u64().unwrap())
-                        .unwrap()["id"]
-                        .clone()
-                };
-                slots.insert(key.to_owned(), selected);
-            }
-            fields.insert(field.to_owned(), Value::Object(slots));
-        }
-        let content = Value::Object(fields);
+                .iter()
+                .map(|row| (row[0].as_u64().unwrap(), row[1].to_string()))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            let decoded_choices = groups[0]["bundle_choices"].as_array().unwrap().iter().map(|row| {
+                let topics = row[2].as_array().unwrap().iter().map(|fact| fact_topics[&fact.as_u64().unwrap()].clone())
+                    .collect::<HashSet<_>>();
+                let facts = row[2].as_array().unwrap().iter().map(Value::to_string).collect::<Vec<_>>();
+                json!({"id":row[0], "field":FIELDS[row[1].as_u64().unwrap() as usize], "fact_ids":facts, "topic_ids":topics})
+            }).collect::<Vec<_>>();
+            let choices = decoded_choices.iter().collect::<Vec<_>>();
+            Value::Object(
+                properties
+                    .iter()
+                    .map(|(field, schema)| {
+                        if schema["maxItems"] == 0 {
+                            return (field.clone(), json!([]));
+                        }
+                        let authorized = schema["items"]["enum"].as_array().unwrap();
+                        let candidates = choices
+                            .iter()
+                            .copied()
+                            .filter(|choice| {
+                                choice["field"] == field.as_str()
+                                    && authorized.contains(&choice["id"])
+                            })
+                            .collect::<Vec<_>>();
+                        let mut needed = groups[0]["mandatory_topic_fields"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|requirement| {
+                                FIELDS[requirement[0].as_u64().unwrap() as usize] == field.as_str()
+                            })
+                            .flat_map(|requirement| requirement[1].as_array().unwrap())
+                            .map(Value::to_string)
+                            .collect::<HashSet<_>>();
+                        if needed.is_empty() {
+                            needed = candidates
+                                .iter()
+                                .flat_map(|choice| choice["topic_ids"].as_array().unwrap())
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect();
+                        }
+                        let mut used = HashSet::new();
+                        let mut selected = Vec::new();
+                        while !needed.is_empty() && selected.len() < 4 {
+                            let choice = candidates
+                                .iter()
+                                .copied()
+                                .filter(|choice| {
+                                    choice["fact_ids"]
+                                        .as_array()
+                                        .unwrap()
+                                        .iter()
+                                        .all(|id| !used.contains(id.as_str().unwrap()))
+                                })
+                                .max_by_key(|choice| {
+                                    (
+                                        choice["topic_ids"]
+                                            .as_array()
+                                            .unwrap()
+                                            .iter()
+                                            .filter(|id| needed.contains(id.as_str().unwrap()))
+                                            .count(),
+                                        choice["fact_ids"].as_array().unwrap().len(),
+                                    )
+                                })
+                                .unwrap();
+                            for id in choice["topic_ids"].as_array().unwrap() {
+                                needed.remove(id.as_str().unwrap());
+                            }
+                            for id in choice["fact_ids"].as_array().unwrap() {
+                                used.insert(id.as_str().unwrap());
+                            }
+                            selected.push(choice["id"].clone());
+                        }
+                        assert!(
+                            needed.is_empty(),
+                            "fixture must cover every offered topic within four facts"
+                        );
+                        (field.clone(), Value::Array(selected))
+                    })
+                    .collect(),
+            )
+        };
         json!({"choices":[{"message":{"content":content.to_string()}}]})
     }
 
@@ -6340,6 +6548,236 @@ mod knowledge_destination_tests {
     }
 
     #[tokio::test]
+    async fn source_based_api_default_ignores_provider_and_freezes_mode() {
+        let (mut state, profile, date) = generation_test_state();
+        state.llm_config = Some(llm::LlmConfig::for_test("http://127.0.0.1:1"));
+        std::fs::create_dir_all(state.workspace.canonical_root().join("Products")).unwrap();
+        std::fs::write(
+            state.workspace.canonical_root().join("Products/Alpha.md"),
+            "# Alpha\nReference background must not become a source fact.",
+        )
+        .unwrap();
+        state
+            .store
+            .save_knowledge_collection(
+                None,
+                &profile.id,
+                "Products",
+                "Reviewed navigation",
+                &["Products".to_owned()],
+                &[],
+                true,
+                None,
+            )
+            .unwrap();
+        let credentials = generate_session_credentials();
+        state
+            .store
+            .create_dashboard_session(
+                &credentials,
+                &["draft:generate".into(), "logs:read".into()],
+                Utc::now(),
+                Duration::hours(1),
+                Duration::hours(1),
+            )
+            .unwrap();
+        let cookie = format!("log_inbox_session={}", credentials.session_token);
+        let app = build_router(state.clone());
+        let uri = format!("/api/v2/daily/{date}/generate");
+        let rejected = json_response(
+            app.clone(),
+            "POST",
+            &uri,
+            json!({"model":"test"}),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        let response = json_response(
+            app.clone(),
+            "POST",
+            &uri,
+            json!({}),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            response_json(response).await["attempt"]["model_selection"]["preparation_mode"],
+            "source_based"
+        );
+        wait_for_generation(&app, &cookie, &date.to_string()).await;
+        let first = state
+            .store
+            .current_proposal_revision(&profile.id, date)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            revision_preparation_mode(&state, &first.id).unwrap(),
+            llm::PreparationMode::SourceBased
+        );
+        let context = state
+            .store
+            .proposal_context_snapshot(&first.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(context.payload["preparation_mode"], "source_based");
+        let response = json_response(
+            app.clone(),
+            "POST",
+            &uri,
+            json!({}),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        wait_for_generation(&app, &cookie, &date.to_string()).await;
+        assert_eq!(
+            state
+                .store
+                .current_proposal_revision(&profile.id, date)
+                .unwrap()
+                .unwrap()
+                .id,
+            first.id
+        );
+        let comparison_response = json_response(
+            app.clone(),
+            "POST",
+            &format!("/api/v2/daily/{date}/context-comparisons"),
+            json!({"expected_revision_id":first.id}),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(
+            comparison_response.status(),
+            StatusCode::OK,
+            "{}",
+            response_json(comparison_response).await
+        );
+        let comparison = state
+            .store
+            .context_comparison_for_revision(&first.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state
+                .store
+                .generation_comparison_provenance(&comparison.id)
+                .unwrap()
+                .unwrap()["preparation_mode"],
+            "source_based"
+        );
+        let left: DailyRevisionContent = comparison.arm_a_content.clone();
+        let right: DailyRevisionContent = comparison.arm_b_content.clone();
+        assert_eq!(
+            left.workstreams
+                .iter()
+                .map(|w| (&w.id, &w.evidence_event_ids))
+                .collect::<Vec<_>>(),
+            right
+                .workstreams
+                .iter()
+                .map(|w| (&w.id, &w.evidence_event_ids))
+                .collect::<Vec<_>>()
+        );
+        assert_ne!(
+            left.workstreams[0].canonical_links,
+            right.workstreams[0].canonical_links
+        );
+        let response = json_response(
+            app.clone(),
+            "POST",
+            &uri,
+            json!({"preparation_mode":"semantic"}),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let attempt = state
+                    .store
+                    .latest_generation_attempt(&profile.id, date)
+                    .unwrap()
+                    .unwrap();
+                if attempt["state"] != "running" {
+                    assert_eq!(attempt["state"], "failed");
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            state
+                .store
+                .current_proposal_revision(&profile.id, date)
+                .unwrap()
+                .unwrap()
+                .id,
+            first.id
+        );
+        // A source-contract upgrade must also retain historical provenance on
+        // a safe manual-only amendment after the event has expired.
+        let mut historical = state
+            .store
+            .generation_revision_provenance(&first.id)
+            .unwrap()
+            .unwrap();
+        historical["fingerprint"] = json!("prior-source-contract");
+        rusqlite::Connection::open(state.store.database_path()).unwrap().execute("UPDATE generation_provenance SET provenance_json=?2 WHERE kind='revision' AND record_id=?1", rusqlite::params![first.id, serde_json::to_string(&historical).unwrap()]).unwrap();
+        let snapshot = state
+            .store
+            .evidence_snapshot(first.snapshot_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        let connection = rusqlite::Connection::open(state.store.database_path()).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .unwrap();
+        for event_id in &snapshot.event_ids {
+            connection
+                .execute("DELETE FROM log_events WHERE id=?1", [event_id])
+                .unwrap();
+        }
+        state
+            .store
+            .create_manual_daily_entry(&profile.id, date, "Owner context after source expiry", &[])
+            .unwrap();
+        let response = json_response(
+            app.clone(),
+            "POST",
+            &uri,
+            json!({}),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        wait_for_generation(&app, &cookie, &date.to_string()).await;
+        let amended = state
+            .store
+            .current_proposal_revision(&profile.id, date)
+            .unwrap()
+            .unwrap();
+        assert_eq!(amended.origin, "structured_edit");
+        assert_eq!(
+            state
+                .store
+                .generation_revision_provenance(&amended.id)
+                .unwrap(),
+            Some(historical)
+        );
+    }
+
+    #[tokio::test]
     async fn model_failures_persist_actionable_codes_without_response_content() {
         for (reason, content, expected_code) in [
             (
@@ -6354,7 +6792,12 @@ mod knowledge_destination_tests {
             ),
         ] {
             let (mut state, profile, date) = generation_test_state();
-            let model = Router::new().route("/chat/completions", post(move || async move {
+            let model = Router::new().route("/chat/completions", post(move |Json(body): Json<Value>| async move {
+                let prompt = body["messages"][1]["content"].as_str().unwrap();
+                if prompt.starts_with("Stage: topic partition") {
+                    return Json(generation_model_response(&body));
+                }
+                assert!(prompt.starts_with("Stage: fact composition"));
                 Json(json!({"choices":[{"finish_reason":reason,"message":{"content":content}}],"usage":{"prompt_tokens":100,"completion_tokens":512}}))
             }));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -6421,7 +6864,7 @@ mod knowledge_destination_tests {
             .await
             .unwrap();
         assert_eq!(first.id, reused.id);
-        assert_eq!(*captured.lock().unwrap(), vec!["test"]);
+        assert_eq!(*captured.lock().unwrap(), vec!["test", "test"]);
         state.llm_config.as_mut().unwrap().model = "second".to_owned();
         let second = generate_daily_candidate(&state, date, false, None)
             .await
@@ -6444,6 +6887,7 @@ mod knowledge_destination_tests {
             .try_lock_owned()
             .unwrap();
         let (mut attempt, _) = generation::begin(&state, date, "manual").unwrap();
+        attempt.preparation_mode = llm::PreparationMode::Semantic;
         attempt.capture_model(selected).unwrap();
         state.llm_config.as_mut().unwrap().model = "third".to_owned();
         let frozen = generation::run(&state, date, false, None, attempt, guard)
@@ -6492,7 +6936,10 @@ mod knowledge_destination_tests {
                 .unwrap()["model"],
             "third"
         );
-        assert_eq!(*captured.lock().unwrap(), vec!["test", "second", "third"]);
+        assert_eq!(
+            *captured.lock().unwrap(),
+            vec!["test", "test", "second", "second", "third", "third"]
+        );
         server.abort();
     }
 
@@ -6518,6 +6965,7 @@ mod knowledge_destination_tests {
             "id":"work","title":"Reviewed work","evidence_event_ids":[event_id],"canonical_links":[],
             "outcome":[{"text":"Reported outcome.","evidence_event_ids":[event_id],"source_clauses":[{"text":"Reported outcome.","evidence_event_id":event_id}]}],
             "validation":[{"text":"Reported check.","evidence_event_ids":[event_id],"source_clauses":[{"text":"Reported check.","evidence_event_id":event_id}]}],
+            "reported_history":[{"original_field":"validation","fact":{"text":"Reported check.","evidence_event_ids":[event_id],"source_clauses":[{"text":"Reported check.","evidence_event_id":event_id}]}}],
             "decision":[],"trade_off":[],"blocker":[],"follow_up":[]
         }]});
         let revision = state
@@ -6537,6 +6985,18 @@ mod knowledge_destination_tests {
             .unwrap();
         let cookie = format!("log_inbox_session={}", credentials.session_token);
         let app = build_router(state.clone());
+        let mut tampered = content.clone();
+        tampered["workstreams"][0]["reported_history"] = json!([]);
+        let rejected = json_response(
+            app.clone(),
+            "PUT",
+            &format!("/api/v2/daily/{date}/candidate"),
+            json!({"expected_revision_id":revision.id,"content":tampered}),
+            Some(&cookie),
+            Some(&credentials.csrf_token),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
         let mut edited = content;
         edited["workstreams"][0]["outcome"][0]["text"] = json!("Owner clarified the outcome.");
         let rejected = json_response(
@@ -6573,6 +7033,11 @@ mod knowledge_destination_tests {
         .await;
         assert_eq!(saved.status(), StatusCode::OK);
         let saved = response_json(saved).await;
+        assert_eq!(
+            saved["content"]["workstreams"][0]["reported_history"],
+            edited["workstreams"][0]["reported_history"]
+        );
+
         assert_eq!(
             saved["content"]["workstreams"][0]["outcome"][0]["text"],
             "Owner clarified the outcome."
@@ -6827,6 +7292,13 @@ mod knowledge_destination_tests {
                         let release = release.clone();
                         let captured = captured.clone();
                         async move {
+                            if body["messages"][1]["content"]
+                                .as_str()
+                                .unwrap()
+                                .starts_with("Stage: topic partition")
+                            {
+                                return Json(generation_model_response(&body));
+                            }
                             *captured.lock().unwrap() = Some(body.clone());
                             assert!(
                                 body["messages"][1]["content"]
@@ -6933,6 +7405,7 @@ mod knowledge_destination_tests {
             };
             let (mut attempt, value) =
                 generation::begin_with_references(&state, date, "manual", mode).unwrap();
+            attempt.preparation_mode = llm::PreparationMode::Semantic;
             if scenario == "timeout" {
                 // Start the timeout only after proving the model request is pending.
                 // Paused Tokio time makes this independent of parallel SQLite/test load.
@@ -8293,22 +8766,35 @@ mod knowledge_destination_tests {
         let runs = state.store.daily_schedule_runs(&profile.id, 14).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].local_date.to_string(), "2026-09-08");
-        assert_eq!(runs[0].state, "failed");
-        assert!(
-            runs[0]
-                .last_error
-                .as_deref()
-                .unwrap()
-                .contains("requires a configured LLM")
-        );
+        assert_eq!(runs[0].state, "completed");
+        assert!(runs[0].last_error.is_none());
+        let prepared_date = NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+        let revision = state
+            .store
+            .current_proposal_revision(&profile.id, prepared_date)
+            .unwrap()
+            .unwrap();
+        let provenance = state
+            .store
+            .generation_revision_provenance(&revision.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(provenance["preparation_mode"], "source_based");
+        assert!(provenance.get("model").is_none());
         assert_eq!(
             state
                 .store
-                .daily_day(&profile.id, NaiveDate::from_ymd_opt(2026, 9, 8).unwrap())
+                .daily_day(&profile.id, prepared_date)
                 .unwrap()
                 .unwrap()
                 .generation_status,
-            "failed"
+            "ready"
+        );
+        assert!(
+            !revision.content["workstreams"]
+                .as_array()
+                .unwrap()
+                .is_empty()
         );
         assert!(
             state
@@ -8476,6 +8962,17 @@ mod knowledge_destination_tests {
             "daily-structured-v6-source-claims",
             "daily-structured-v7-source-fact-ledger",
             "daily-structured-v8-source-card-selection",
+            "daily-structured-v9-source-slots",
+            "daily-structured-v10-budgeted-source-choices",
+            "daily-structured-v11-topic-highlights-and-history",
+            "daily-structured-v12-compact-topic-bundles",
+            "daily-structured-v13-source-context-topics",
+            "daily-structured-v14-subject-labelled-topics",
+            "daily-structured-v15-joint-subject-partition",
+            "daily-structured-v16-fixed-card-partition",
+            "daily-structured-v17-source-representatives",
+            "daily-structured-v18-source-frontier",
+            "daily-structured-v19-source-based",
         ] {
             let (mut state, profile, date) = generation_test_state();
             state.llm_config = Some(llm::LlmConfig::for_test("http://127.0.0.1:9"));
@@ -8538,6 +9035,91 @@ mod knowledge_destination_tests {
                 .store
                 .create_manual_daily_entry(&profile.id, date, "Additional owner context", &[])
                 .unwrap();
+            // The new omitted-mode default must permit a safe historical amendment,
+            // retaining its semantic provenance instead of relabeling it source-based.
+            let guard = state
+                .daily_generation_lock
+                .clone()
+                .try_lock_owned()
+                .unwrap();
+            let (attempt, _) = generation::begin(&state, date, "manual").unwrap();
+            let implicit = generation::run(&state, date, false, None, attempt, guard)
+                .await
+                .unwrap();
+            assert_eq!(
+                state
+                    .store
+                    .generation_revision_provenance(&implicit.id)
+                    .unwrap(),
+                Some(provenance.clone())
+            );
+            assert_eq!(
+                revision_preparation_mode(&state, &implicit.id).unwrap(),
+                llm::PreparationMode::Semantic
+            );
+            let guard = state
+                .daily_generation_lock
+                .clone()
+                .try_lock_owned()
+                .unwrap();
+            let (mut attempt, _) = generation::begin(&state, date, "manual").unwrap();
+            attempt.preparation_mode_explicit = true;
+            let error = generation::run(&state, date, false, None, attempt, guard)
+                .await
+                .unwrap_err();
+            assert_eq!(error.status, StatusCode::CONFLICT);
+            assert!(error.message.contains("expired"));
+            if contract == "daily-structured-v18-source-frontier" {
+                state
+                    .store
+                    .create_manual_daily_entry(
+                        &profile.id,
+                        date,
+                        "Another owner note through the ordinary browser request",
+                        &[],
+                    )
+                    .unwrap();
+                let credentials = generate_session_credentials();
+                state
+                    .store
+                    .create_dashboard_session(
+                        &credentials,
+                        &["draft:generate".into(), "logs:read".into()],
+                        Utc::now(),
+                        Duration::hours(1),
+                        Duration::hours(1),
+                    )
+                    .unwrap();
+                let cookie = format!("log_inbox_session={}", credentials.session_token);
+                let app = build_router(state.clone());
+                let response = json_response(
+                    app.clone(),
+                    "POST",
+                    &format!("/api/v2/daily/{date}/generate"),
+                    json!({"replace_edited":false}),
+                    Some(&cookie),
+                    Some(&credentials.csrf_token),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::ACCEPTED);
+                wait_for_generation(&app, &cookie, &date.to_string()).await;
+                let amended = state
+                    .store
+                    .current_proposal_revision(&profile.id, date)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    state
+                        .store
+                        .generation_revision_provenance(&amended.id)
+                        .unwrap(),
+                    Some(provenance.clone())
+                );
+                assert_eq!(
+                    revision_preparation_mode(&state, &amended.id).unwrap(),
+                    llm::PreparationMode::Semantic
+                );
+            }
             let amended = generate_daily_candidate(&state, date, false, None)
                 .await
                 .expect("contract-only change must not require inference from partial evidence");

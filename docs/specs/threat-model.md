@@ -78,7 +78,7 @@ Tests must cover session fixation, expiry/revocation, missing or cross-session C
 
 ## UI-managed generation connections
 
-Named OpenAI-compatible connections and tested models are owner-managed with existing session/CSRF/scope boundaries. External activity egress requires endpoint-specific consent, renewed on endpoint changes; a cloud default also authorizes scheduled activity generation. Reference-note excerpts and manual-note prose remain local. Legacy nonlocal environment endpoints require consent before new generation.
+Named OpenAI-compatible connections and tested models are owner-managed with existing session/CSRF/scope boundaries. External activity egress for explicitly selected Semantic preparation requires endpoint-specific consent, renewed on endpoint changes. A cloud model default does not authorize scheduled model calls: default and scheduled preparation use source-based mode without a provider. Reference-note excerpts and manual-note prose remain local. Legacy nonlocal environment endpoints require consent before new Semantic preparation.
 
 Only loopback and the private Compose `ollama` hostname accept HTTP. Other endpoints require HTTPS and public routable addresses. DNS results are validated and pinned per attempt; unsafe/private/link-local/metadata destinations, URL credentials, redirects and proxy environment routing are rejected. Discovery and synthetic tests are bounded and never use real-day activity.
 

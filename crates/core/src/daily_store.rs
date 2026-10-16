@@ -1432,6 +1432,36 @@ impl Store {
                 "current proposal revision changed"
             );
         }
+        if origin == "structured_edit" {
+            let current_content: Option<String> = transaction.query_row(
+                "SELECT r.content_json FROM daily_days d JOIN proposal_revisions r ON r.id = d.current_revision_id WHERE d.workspace_id = ?1 AND d.local_date = ?2",
+                params![workspace_id, local_date.to_string()], |row| row.get(0),
+            ).optional()?;
+            let history = |value: &Value| -> Result<
+                std::collections::BTreeMap<String, Vec<crate::models::ReportedFact>>,
+            > {
+                let parsed: DailyRevisionContent = serde_json::from_value(value.clone())?;
+                Ok(parsed
+                    .workstreams
+                    .into_iter()
+                    .filter(|workstream| !workstream.reported_history.is_empty())
+                    .map(|workstream| (workstream.id, workstream.reported_history))
+                    .collect())
+            };
+            let previous = current_content
+                .as_deref()
+                .map(serde_json::from_str::<Value>)
+                .transpose()?;
+            anyhow::ensure!(
+                history(content)?
+                    == previous
+                        .as_ref()
+                        .map(history)
+                        .transpose()?
+                        .unwrap_or_default(),
+                "reported history is read-only; retain the verified source reports"
+            );
+        }
         let revision_number: u64 = transaction.query_row(
             "SELECT COALESCE(MAX(revision_number), 0) + 1 FROM proposal_revisions WHERE workspace_id = ?1 AND local_date = ?2",
             params![workspace_id, local_date.to_string()],
@@ -2401,6 +2431,7 @@ impl Store {
             if content.is_activity_record() {
                 anyhow::ensure!(
                     workstream.canonical_links.is_empty()
+                        && workstream.reported_history.is_empty()
                         && [
                             &workstream.outcome,
                             &workstream.decision,
@@ -2471,8 +2502,11 @@ impl Store {
             );
             return Ok(());
         };
-        validate_workstream_evidence(&content.workstreams, &snapshot.event_ids)?;
-        validate_context_links(&content.workstreams, context_snapshot)
+        validate_daily_evidence_content(
+            &content.workstreams,
+            &snapshot.event_ids,
+            context_snapshot.map(|snapshot| &snapshot.payload),
+        )
     }
 
     fn proposal_revision(&self, id: &str) -> Result<Option<ProposalRevision>> {
@@ -3020,6 +3054,23 @@ fn snapshot_evidence_from_row(row: &Row<'_>) -> rusqlite::Result<SnapshotEvidenc
     })
 }
 
+/// Validate the persisted evidence and frozen Knowledge contract without database access.
+pub fn validate_daily_evidence_content(
+    workstreams: &[DailyWorkstream],
+    expected_event_ids: &[String],
+    context_payload: Option<&serde_json::Value>,
+) -> Result<()> {
+    anyhow::ensure!(
+        workstreams
+            .iter()
+            .all(|workstream| workstream.reported_history.is_empty())
+            || serde_json::to_vec(workstreams)?.len() <= 512 * 1024,
+        "daily workstreams exceed the bounded content limit"
+    );
+    validate_workstream_evidence(workstreams, expected_event_ids)?;
+    validate_context_links(workstreams, context_payload)
+}
+
 fn validate_workstream_evidence(
     workstreams: &[DailyWorkstream],
     expected_event_ids: &[String],
@@ -3072,6 +3123,25 @@ fn validate_workstream_evidence(
                 .all(|event_id| covered.insert(*event_id)),
             "snapshot evidence appears in multiple workstreams"
         );
+        anyhow::ensure!(
+            workstream.reported_history.len() <= 1024,
+            "reported history exceeds the bounded source-card limit"
+        );
+        for report in &workstream.reported_history {
+            anyhow::ensure!(
+                matches!(
+                    report.original_field.as_str(),
+                    "outcome" | "decision" | "trade_off" | "validation" | "blocker" | "follow_up"
+                ),
+                "reported history has an unknown original field"
+            );
+            anyhow::ensure!(
+                report.fact.evidence_event_ids.len() == 1
+                    && report.fact.source_clauses.len() == 1
+                    && report.fact.text.chars().count() <= 320,
+                "reported history must retain one bounded source-owned clause"
+            );
+        }
         let facts = [
             &workstream.outcome,
             &workstream.decision,
@@ -3083,6 +3153,12 @@ fn validate_workstream_evidence(
         ]
         .into_iter()
         .flatten()
+        .chain(
+            workstream
+                .reported_history
+                .iter()
+                .map(|report| &report.fact),
+        )
         .collect::<Vec<_>>();
         anyhow::ensure!(!facts.is_empty(), "workstream requires a factual field");
         let mut supported = HashSet::new();
@@ -3121,11 +3197,11 @@ fn validate_workstream_evidence(
 
 fn validate_context_links(
     workstreams: &[DailyWorkstream],
-    context_snapshot: Option<&crate::models::ContextSnapshot>,
+    context_payload: Option<&serde_json::Value>,
 ) -> Result<()> {
     for workstream in workstreams {
-        let allowed = context_snapshot
-            .and_then(|snapshot| snapshot.payload.get("workstream_links"))
+        let allowed = context_payload
+            .and_then(|payload| payload.get("workstream_links"))
             .and_then(serde_json::Value::as_object)
             .and_then(|links| links.get(&workstream.id))
             .and_then(serde_json::Value::as_array)
@@ -3141,8 +3217,8 @@ fn validate_context_links(
             "canonical link is not authorized by the frozen Knowledge context"
         );
         if !workstream.canonical_links.is_empty() {
-            let expected_evidence = context_snapshot
-                .and_then(|snapshot| snapshot.payload.get("workstream_evidence"))
+            let expected_evidence = context_payload
+                .and_then(|payload| payload.get("workstream_evidence"))
                 .and_then(serde_json::Value::as_object)
                 .and_then(|groups| groups.get(&workstream.id))
                 .and_then(serde_json::Value::as_array)
@@ -3224,6 +3300,220 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reported_history_completes_coverage_without_expanding_highlights() {
+        let mut content = comparison_content("a", "Highlights", vec![]);
+        let work = &mut content.workstreams[0];
+        for index in 0..20 {
+            let id = format!("source-{index}");
+            work.evidence_event_ids.push(id.clone());
+            work.reported_history.push(crate::models::ReportedFact {
+                original_field: "follow_up".into(),
+                fact: DailyFact {
+                    text: format!("Earlier report {index}: acceptance pending."),
+                    evidence_event_ids: vec![id.clone()],
+                    source_clauses: vec![crate::models::DailySourceClause {
+                        text: format!("Earlier report {index}: acceptance pending."),
+                        evidence_event_id: id,
+                    }],
+                },
+            });
+        }
+        let expected = work.evidence_event_ids.clone();
+        validate_daily_evidence_content(&content.workstreams, &expected, None).unwrap();
+        let good = content.clone();
+        content.workstreams[0].outcome.clear();
+        assert!(validate_daily_evidence_content(&content.workstreams, &expected, None).is_err());
+        // A start-only group can retain reports without inventing an outcome.
+        content.workstreams[0].evidence_event_ids.remove(0);
+        validate_daily_evidence_content(&content.workstreams, &expected[1..], None).unwrap();
+        for mutation in ["field", "owner", "map", "bounds", "links", "missing"] {
+            let mut bad = good.clone();
+            let work = &mut bad.workstreams[0];
+            match mutation {
+                "field" => work.reported_history[0].original_field = "activity".into(),
+                "owner" => {
+                    work.reported_history[0].fact.evidence_event_ids = vec!["foreign".into()]
+                }
+                "map" => work.reported_history[0].fact.source_clauses[0].text = "forged".into(),
+                "bounds" => work.reported_history = vec![work.reported_history[0].clone(); 1025],
+                "links" => work.canonical_links = vec!["[[Products/Unknown]]".into()],
+                "missing" => {
+                    work.reported_history.pop();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_daily_evidence_content(&bad.workstreams, &expected, None).is_err(),
+                "{mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_bound_preserves_legacy_large_activity_records() {
+        let mut content = comparison_content("a", "Owner activity", vec![]);
+        let work = &mut content.workstreams[0];
+        work.activity = vec![DailyFact {
+            text: "x".repeat(600_000),
+            evidence_event_ids: vec!["a".into()],
+            source_clauses: vec![],
+        }];
+        work.outcome.clear();
+        validate_daily_evidence_content(&content.workstreams, &["a".into()], None).unwrap();
+        assert!(
+            serde_json::to_value(&content).unwrap()["workstreams"][0]
+                .get("reported_history")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn structured_edits_preserve_read_only_history() {
+        let fixture = context_comparison_fixture();
+        let mut content = fixture.without_context_content.clone();
+        let fact = content.workstreams[0].outcome[0].clone();
+        content.workstreams[0]
+            .reported_history
+            .push(crate::models::ReportedFact {
+                original_field: "outcome".into(),
+                fact: DailyFact {
+                    source_clauses: vec![crate::models::DailySourceClause {
+                        text: fact.text.clone(),
+                        evidence_event_id: fact.evidence_event_ids[0].clone(),
+                    }],
+                    ..fact
+                },
+            });
+        let injected = fixture
+            .store
+            .create_proposal_revision(
+                &fixture.profile.id,
+                fixture.date,
+                Some(&fixture.snapshot.id),
+                "structured_edit",
+                &serde_json::to_value(&content).unwrap(),
+            )
+            .unwrap_err();
+        assert!(injected.to_string().contains("read-only"));
+        assert_eq!(
+            fixture
+                .store
+                .current_proposal_revision(&fixture.profile.id, fixture.date)
+                .unwrap()
+                .unwrap()
+                .id,
+            fixture.source.id
+        );
+        let generated = fixture
+            .store
+            .create_proposal_revision(
+                &fixture.profile.id,
+                fixture.date,
+                Some(&fixture.snapshot.id),
+                "generated",
+                &serde_json::to_value(&content).unwrap(),
+            )
+            .unwrap();
+        fixture
+            .store
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE log_events SET received_at = ?1",
+                params![(Utc::now() - chrono::Duration::days(31)).to_rfc3339()],
+            )
+            .unwrap();
+        assert_eq!(fixture.store.prune_old_events(30).unwrap(), 1);
+        content.workstreams[0].title = "Owner title".into();
+        fixture
+            .store
+            .create_generated_revision_if_current(
+                &fixture.profile.id,
+                fixture.date,
+                Some(&fixture.snapshot.id),
+                None,
+                "structured_edit",
+                &serde_json::to_value(&content).unwrap(),
+                Some(&generated.id),
+            )
+            .unwrap();
+        let reopened = Store::open(fixture.store.database_path().to_owned()).unwrap();
+        let retained = reopened
+            .current_proposal_revision(&fixture.profile.id, fixture.date)
+            .unwrap()
+            .unwrap();
+        let retained: DailyRevisionContent = serde_json::from_value(retained.content).unwrap();
+        assert_eq!(
+            retained.workstreams[0].reported_history,
+            content.workstreams[0].reported_history
+        );
+        let current = reopened
+            .current_proposal_revision(&fixture.profile.id, fixture.date)
+            .unwrap()
+            .unwrap();
+        let stale = reopened
+            .create_generated_revision_if_current(
+                &fixture.profile.id,
+                fixture.date,
+                Some(&fixture.snapshot.id),
+                None,
+                "structured_edit",
+                &serde_json::to_value(&content).unwrap(),
+                Some(&generated.id),
+            )
+            .unwrap_err();
+        assert!(
+            stale
+                .to_string()
+                .contains("current proposal revision changed")
+        );
+        for mutation in ["unknown_field", "forged_text"] {
+            let mut altered = content.clone();
+            let report = &mut altered.workstreams[0].reported_history[0];
+            if mutation == "unknown_field" {
+                report.original_field = "invented".into();
+            } else {
+                report.fact.text = "Forged report".into();
+                report.fact.source_clauses[0].text = "Forged report".into();
+            }
+            assert!(
+                reopened
+                    .create_generated_revision_if_current(
+                        &fixture.profile.id,
+                        fixture.date,
+                        Some(&fixture.snapshot.id),
+                        None,
+                        "structured_edit",
+                        &serde_json::to_value(&altered).unwrap(),
+                        Some(&current.id)
+                    )
+                    .is_err(),
+                "{mutation}"
+            );
+            assert_eq!(
+                reopened
+                    .current_proposal_revision(&fixture.profile.id, fixture.date)
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                current.id
+            );
+        }
+        content.workstreams[0].reported_history.clear();
+        let error = fixture
+            .store
+            .create_proposal_revision(
+                &fixture.profile.id,
+                fixture.date,
+                Some(&fixture.snapshot.id),
+                "structured_edit",
+                &serde_json::to_value(&content).unwrap(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("read-only"));
+    }
+
     fn comparison_content(
         event_id: &str,
         title: &str,
@@ -3247,6 +3537,7 @@ mod tests {
                 blocker: Vec::new(),
                 follow_up: Vec::new(),
                 activity: Vec::new(),
+                reported_history: Vec::new(),
             }],
             manual_entry_ids: Vec::new(),
             open_questions: Vec::new(),

@@ -67,7 +67,7 @@ export function createDashboard({ api, openDay, openSettings }) {
       "Currently preparing",
       overview
         ? active
-          ? `${prettyDate(active.local_date)}${selected?.model ? ` · ${selected.provider || selected.connection_id || "Provider"} / ${selected.model}` : ""}`
+          ? `${prettyDate(active.local_date)}${selected?.preparation_mode === "source_based" ? " · Source-based · No model used" : selected?.model ? ` · ${selected.provider || selected.connection_id || "Provider"} / ${selected.model}` : ""}`
           : "No active preparation"
         : "Unavailable",
     );
@@ -201,6 +201,7 @@ export function createDashboard({ api, openDay, openSettings }) {
     let unknown = 0;
     for (const attempt of attempts) {
       const model = attempt.model_selection;
+      if (model?.preparation_mode === "source_based") continue;
       if (!model?.model || !(attempt.total_groups > 0)) {
         unknown += 1;
         continue;

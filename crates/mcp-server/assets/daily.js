@@ -1169,7 +1169,10 @@ async function generate(referenceMode, contextAdjustments, retry = false) {
       method: "POST",
       body: JSON.stringify({
         replace_edited: editedWithNewEvidence,
-        ...generationModels.requestSelection({ retry }),
+        ...generationModels.requestSelection({
+          retry,
+          preserveRevision: Boolean(contextAdjustments),
+        }),
         ...(withoutReferences ? { reference_mode: "none" } : {}),
         ...(contextAdjustments || {}),
       }),
@@ -1219,7 +1222,7 @@ async function regenerateWithContext() {
       method: "POST",
       body: JSON.stringify({
         replace_edited: replacesEdits,
-        ...generationModels.requestSelection(),
+        ...generationModels.requestSelection({ preserveRevision: true }),
         expected_revision_id: state.contextDraft.revisionId,
         context_exclusions,
       }),
@@ -1285,7 +1288,10 @@ async function startComparison() {
         method: "POST",
         body: JSON.stringify({
           expected_revision_id: revisionId,
-          ...generationModels.requestSelection(),
+          ...generationModels.requestSelection({
+            preserveRevision: true,
+            includeMode: false,
+          }),
         }),
       },
     );
@@ -1645,7 +1651,29 @@ function renderCandidate(content) {
       for (const text of facts) list.append(el("li", "", text));
       section.append(list);
     }
-    if (!count) continue;
+    const reports = (workstream.reported_history || [])
+      .map((report) => ({
+        label: fieldLabels[report.original_field],
+        text: reviewedFactText(report.fact, excluded),
+      }))
+      .filter((report) => report.label && report.text !== null);
+    if (reports.length) {
+      const details = document.createElement("details");
+      details.append(el("summary", "", `Source reports · ${reports.length}`));
+      details.append(
+        el(
+          "p",
+          "subtle",
+          "Historical reports from the cited activity. Earlier follow-ups are reports at that time, not current actions. Only the highlights are copied or saved to your note.",
+        ),
+      );
+      const list = document.createElement("ul");
+      for (const report of reports)
+        list.append(el("li", "", `${report.label}: ${report.text}`));
+      details.append(list);
+      section.append(details);
+    }
+    if (!count && !reports.length) continue;
     for (const link of workstream.canonical_links || [])
       section.append(el("p", "subtle", `Reference: ${link}`));
     if (!workstream.canonical_links?.length)
@@ -1775,7 +1803,7 @@ function renderGeneration() {
       $("generation-status").hidden = state.retryError?.date !== state.date;
       $("reference-recovery").hidden = true;
     }
-    $("generate").textContent = "Create AI summary";
+    $("generate").textContent = "Prepare structured draft";
   }
   renderIntake(state.overview?.intake);
   renderDayAvailability();
@@ -1824,6 +1852,7 @@ function renderAttemptMessage(attempt) {
       {
         queued: "Waiting to start",
         preparing: "Preparing sources",
+        preparing_sources: "Preparing source-based draft · No model used",
         requesting_model: "Writing draft",
         requesting_model_fallback: "Retrying smaller groups one at a time",
         saving: "Saving prepared draft",

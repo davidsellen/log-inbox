@@ -10,6 +10,21 @@ export function createGenerationModels({ app, api, openSettings }) {
   let selectedConnection = null;
   let baseline = "";
   const choices = new Map();
+  const modes = new Map();
+  function nextMode({ retry = false, preserveRevision = false } = {}) {
+    if (preserveRevision)
+      return app.data?.revision_preparation_mode || "semantic";
+    if (modes.has(app.date)) return modes.get(app.date);
+    const attempt = app.data?.generation_attempt;
+    if (
+      retry ||
+      ["failed", "timed_out", "interrupted", "canceled"].includes(
+        attempt?.state,
+      )
+    )
+      return attempt?.model_selection?.preparation_mode || "semantic";
+    return "source_based";
+  }
   const pendingChoices = new Map();
   const key = (selection) =>
     selection
@@ -56,9 +71,12 @@ export function createGenerationModels({ app, api, openSettings }) {
         const row = document.createElement("li");
         const model = attempt.model_selection;
         const title = document.createElement("strong");
-        title.textContent = model?.model
-          ? `${model.provider || model.connection_id || "Provider"} / ${model.model}`
-          : "Unknown model (older attempt)";
+        title.textContent =
+          model?.preparation_mode === "source_based"
+            ? "Source-based · No model used"
+            : model?.model
+              ? `${model.provider || model.connection_id || "Provider"} / ${model.model}`
+              : "Unknown model (older attempt)";
         const detail = document.createElement("p");
         const status = (attempt.state || "unknown").replaceAll("_", " ");
         const operation =
@@ -70,7 +88,7 @@ export function createGenerationModels({ app, api, openSettings }) {
         detail.textContent = `${attempt.local_date} · ${operation} · ${status} · ${durationLabel(attempt.elapsed_ms)} · ${attempt.completed_groups}/${attempt.total_groups} workstreams`;
         const context = document.createElement("p");
         context.className = "subtle";
-        context.textContent = `${attempt.started_at ? new Date(attempt.started_at).toLocaleString() : "Start unavailable"} · ${attempt.reference_mode === "none" ? "Without reference notes" : "Configured reference notes"}${attempt.failure_code ? ` · ${attempt.failure_code}` : ""}${attempt.total_groups === 0 ? " · No recorded model progress; exclude from speed comparisons" : ""}`;
+        context.textContent = `${attempt.started_at ? new Date(attempt.started_at).toLocaleString() : "Start unavailable"} · ${attempt.reference_mode === "none" ? "Without reference notes" : "Configured reference notes"}${attempt.failure_code ? ` · ${attempt.failure_code}` : ""}${model?.preparation_mode === "source_based" ? " · No model used; exclude from model speed comparisons" : attempt.total_groups === 0 ? " · No recorded model progress; exclude from speed comparisons" : ""}`;
         row.append(title, detail, context);
         list.append(row);
       }
@@ -139,35 +157,52 @@ export function createGenerationModels({ app, api, openSettings }) {
       pendingChoices.delete(app.date);
     }
     const selection = nextSelection();
+    const mode = nextMode();
+    $("generation-preparation-mode").value = mode;
+    $("generation-preparation-mode").disabled =
+      busy || Boolean(app.overview?.active_generation);
+    $("generation-model-change").hidden = mode !== "semantic";
+    if (mode !== "semantic") $("generation-model-options").hidden = true;
     $("next-generation-model").textContent =
-      `Next generation uses ${label(selection)}${choices.has(app.date) ? " · this attempt only" : key(selection) !== key(data?.default) ? " · retry selection" : " · saved default"}`;
+      mode === "source_based"
+        ? "Source-based preparation · review grouping · No model used"
+        : `Next generation uses ${label(selection)}${choices.has(app.date) ? " · this attempt only" : key(selection) !== key(data?.default) ? " · retry selection" : " · saved default"}`;
     $("generation-model-change").disabled =
       busy || Boolean(app.overview?.active_generation);
     $("generation-model-picker").disabled =
       busy || Boolean(app.overview?.active_generation);
     fillModels($("generation-model-picker"), key(selection));
-    $("generation-model-notice").textContent = error
-      ? `${error} Existing drafts remain available.`
-      : connection(selection?.connection_id)?.external &&
-          !connection(selection?.connection_id)?.consent
-        ? "This external connection needs consent in Settings → Generation before it can receive activity."
-        : connection(selection?.connection_id)?.external
-          ? "Activity and link metadata go to this external service. Your manual-note prose and reference-note excerpts stay local."
-          : "";
+    $("generation-model-notice").textContent =
+      mode === "source_based"
+        ? "Chronological source highlights need your review of grouping and current state. Reviewed reference links add navigation."
+        : error
+          ? `${error} Existing drafts remain available.`
+          : connection(selection?.connection_id)?.external &&
+              !connection(selection?.connection_id)?.consent
+            ? "This external connection needs consent in Settings → Generation before it can receive activity."
+            : connection(selection?.connection_id)?.external
+              ? "Activity and link metadata go to this external service. Your manual-note prose and reference-note excerpts stay local."
+              : "";
     const provenance = app.data?.generation_provenance;
     $("draft-generation-model").hidden = !app.data?.current_revision;
-    $("draft-generation-model").textContent = provenance?.model
-      ? `Generated with ${label(provenance)}`
-      : app.data?.current_revision?.origin === "manual"
-        ? "Manual notes · no model used"
-        : app.data?.current_revision?.content?.schema_version === 2
-          ? "Activity record · no model used"
-          : "Generation model unavailable for this older draft";
+    $("draft-generation-model").textContent =
+      provenance?.preparation_mode === "source_based"
+        ? "Current draft: Source-based preparation · review grouping · No model used"
+        : provenance?.model
+          ? `Current draft: Semantic · ${label(provenance)}`
+          : app.data?.current_revision?.origin === "manual"
+            ? "Manual notes · no model used"
+            : app.data?.current_revision?.content?.schema_version === 2
+              ? "Activity record · no model used"
+              : "Generation model unavailable for this older draft";
     const attempt = app.data?.generation_attempt;
-    $("attempt-generation-model").hidden = !attempt?.model_selection?.model;
-    $("attempt-generation-model").textContent = attempt?.model_selection?.model
-      ? `Attempt used ${label(attempt.model_selection)}`
-      : "";
+    $("attempt-generation-model").hidden = !attempt?.model_selection;
+    $("attempt-generation-model").textContent =
+      attempt?.model_selection?.preparation_mode === "source_based"
+        ? "Attempt: Source-based · No model used"
+        : attempt?.model_selection?.model
+          ? `Attempt used ${label(attempt.model_selection)}`
+          : "";
   }
   function editConnection(id = "") {
     selectedConnection = id;
@@ -242,8 +277,8 @@ export function createGenerationModels({ app, api, openSettings }) {
     const selected = value ? JSON.parse(value) : null;
     const item = connection(selected?.connection_id);
     $("generation-default-help").textContent = item?.external
-      ? "Saving this default uses the external service for manual generation and scheduled preparation. Activity and link metadata may leave this server; manual-note prose and reference-note excerpts remain local."
-      : "Used for new manual drafts and scheduled preparation. A Daily selection changes one attempt only.";
+      ? "Saving this default uses the external service for explicit Semantic preparation. Activity and link metadata may leave this server; manual-note prose and reference-note excerpts remain local."
+      : "Used for explicit Semantic preparation. Source-based preparation uses no model.";
     $("generation-save-default").disabled =
       !app.csrf ||
       busy ||
@@ -379,24 +414,54 @@ export function createGenerationModels({ app, api, openSettings }) {
       Boolean(data && $("generation-default").value !== key(data.default))
     );
   }
-  function requestSelection({ retry = false } = {}) {
+  function requestSelection({
+    retry = false,
+    preserveRevision = false,
+    includeMode = true,
+  } = {}) {
+    const mode = nextMode({ retry, preserveRevision });
+    const expired =
+      Boolean(app.data?.current_snapshot) &&
+      (app.data?.expired_evidence_count > 0 ||
+        !app.data?.automated_evidence?.events?.length);
+    // An untouched default is not an explicit mode switch. Let the server keep
+    // historical provenance when only manual notes can safely be amended.
+    const omitUntouchedExpiredMode =
+      expired &&
+      !modes.has(app.date) &&
+      !choices.has(app.date) &&
+      !preserveRevision &&
+      !retry;
+    const payload =
+      includeMode && !omitUntouchedExpiredMode
+        ? { preparation_mode: mode }
+        : {};
+    if (omitUntouchedExpiredMode || mode === "source_based") return payload;
     if (
       !app.data?.automated_evidence?.events?.length &&
       !app.data?.current_snapshot
     )
-      return {};
+      return payload;
     if (!app.data?.automated_evidence?.events?.length && !choices.has(app.date))
-      return {};
+      return payload;
     let selection =
       retry && !choices.has(app.date)
         ? app.data?.generation_attempt?.model_selection
         : nextSelection();
     // No browser selection is sent when settings are unavailable; the server
     // resolves its configured default rather than blocking Daily review.
-    if (!selection?.connection_id || !selection?.model) return {};
-    return { connection_id: selection.connection_id, model: selection.model };
+    if (!selection?.connection_id || !selection?.model) return payload;
+    return {
+      ...payload,
+      connection_id: selection.connection_id,
+      model: selection.model,
+    };
   }
   function bindEvents() {
+    $("generation-preparation-mode").addEventListener("change", (event) => {
+      modes.set(app.date, event.target.value);
+      renderDaily();
+    });
     $("generation-timing-history").addEventListener("toggle", () => {
       if ($("generation-timing-history").open) void loadHistory();
     });
@@ -451,7 +516,7 @@ export function createGenerationModels({ app, api, openSettings }) {
           "/default",
           "PUT",
           JSON.parse($("generation-default").value),
-          "Default saved. Future manual drafts and scheduled preparation use this model.",
+          "Default saved. Explicit Semantic preparation uses this model.",
         );
     });
     $("generation-connection-list").addEventListener("change", (event) => {
@@ -511,7 +576,7 @@ export function createGenerationModels({ app, api, openSettings }) {
         `/connections/${encodeURIComponent(selectedConnection)}/consent`,
         "PUT",
         { consent: true },
-        "External generation allowed for this connection, including scheduled preparation when selected as default.",
+        "External generation allowed for this connection, when Semantic preparation is selected.",
       );
     });
     $("generation-discover-models").addEventListener("click", async () => {

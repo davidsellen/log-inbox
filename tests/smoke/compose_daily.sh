@@ -87,6 +87,8 @@ curl -fsS --max-time 10 --get "$daily_url/api/v2/history/search" --data-urlencod
   -H "$daily_headers" -b "$cookie_jar" | jq -e '.matches | any(.kind == "activity")' >/dev/null
 curl -fsS --max-time 10 "$daily_url/assets/daily-history.js" -H "$daily_headers" >/dev/null
 
+# Default source preparation must work with the configured provider unavailable.
+$compose stop fake-llm >/dev/null
 generate_body="$smoke_root/generate.json"
 generate_status=$(curl -sS --max-time 20 -o "$generate_body" -w '%{http_code}' "$daily_url/api/v2/daily/$local_date/generate" \
   -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
@@ -115,6 +117,7 @@ while [ "$attempt" -le 30 ]; do
   attempt=$((attempt + 1))
 done
 revision_id=$(printf '%s' "$day" | jq -er '.current_revision.id')
+printf '%s' "$day" | jq -e '.generation_provenance.preparation_mode == "source_based" and .generation_provenance.model == null and .revision_preparation_mode == "source_based"' >/dev/null
 event_id=$(printf '%s' "$day" | jq -er '.current_snapshot.event_ids[0]')
 decision=$(jq -n --arg revision "$revision_id" '{expected_revision_id:$revision,disposition:"include",related_event_id:null,reason:"Compose smoke evidence"}')
 curl -fsS --max-time 10 -X PUT "$daily_url/api/v2/daily/$local_date/evidence/$event_id" \
@@ -129,19 +132,22 @@ curl -fsS --max-time 10 "$daily_url/api/v2/daily/$local_date/apply" \
 
 grep -F 'Owner content before the managed block.' "$target" >/dev/null
 grep -F 'Completed the live Compose smoke workflow.' "$target" >/dev/null
-grep -F 'tests.0: live Compose smoke' "$target" >/dev/null
+grep -F 'live Compose smoke' "$target" >/dev/null
 # Each visible source clause must cite exactly the event used by extraction.
 printf '%s' "$day" | jq -e --arg event "$event_id" '
   .current_revision.content.workstreams[0] as $stream |
   ($stream.outcome | length == 1) and
   ($stream.validation | length == 1) and
   ($stream.outcome[0].text | contains("Completed the live Compose smoke workflow.")) and
-  ($stream.validation[0].text | contains("tests.0: live Compose smoke")) and
+  ($stream.validation[0].text | contains("live Compose smoke")) and
   ($stream.outcome[0].evidence_event_ids == [$event]) and
-  ($stream.validation[0].evidence_event_ids == [$event])
+  ($stream.validation[0].evidence_event_ids == [$event]) and
+  ($stream.reported_history | any(.original_field == "validation" and (.fact.text | contains("[\"live Compose smoke\"]")))) and
+  ($stream.reported_history | all(.fact.evidence_event_ids == [$event] and (.fact.source_clauses | length == 1)))
 ' >/dev/null
 test "$(grep -c 'log-inbox:daily:.*:begin' "$target")" -eq 1
 applied_hash=$(sha256sum "$target" | awk '{print $1}')
+reported_history=$(printf '%s' "$day" | jq -c '[.current_revision.content.workstreams[].reported_history]')
 
 $compose restart daily >/dev/null
 daily_port=$($compose port daily 8788 | awk -F: 'END {print $NF}')
@@ -160,8 +166,9 @@ while [ "$attempt" -le 30 ]; do
   attempt=$((attempt + 1))
 done
 test "$(sha256sum "$target" | awk '{print $1}')" = "$applied_hash"
-curl -fsS --max-time 10 "$daily_url/api/v2/daily/$local_date" -H "$daily_headers" -b "$cookie_jar" \
-  | jq -e '.apply_status.state == "finalized" and .day.review_status == "applied"' >/dev/null
+restarted_day=$(curl -fsS --max-time 10 "$daily_url/api/v2/daily/$local_date" -H "$daily_headers" -b "$cookie_jar")
+printf '%s' "$restarted_day" | jq -e '.apply_status.state == "finalized" and .day.review_status == "applied"' >/dev/null
+test "$(printf '%s' "$restarted_day" | jq -c '[.current_revision.content.workstreams[].reported_history]')" = "$reported_history"
 
 printf 'Compose Daily smoke passed for %s\n' "$local_date"
 curl -fsS --max-time 10 "$daily_url/api/v2/settings/dashboard" -H "$daily_headers" -b "$cookie_jar" \
