@@ -36,7 +36,7 @@ impl Drop for ModelRequestTiming {
         );
     }
 }
-pub const DAILY_GENERATION_CONTRACT: &str = "daily-structured-v20-source-headings";
+pub const DAILY_GENERATION_CONTRACT: &str = "daily-structured-v21-source-highlights";
 const CONTEXT_METADATA_KEYS: &[&str] = &[
     "repo",
     "branch",
@@ -239,6 +239,7 @@ pub fn generation_configuration_matches_legacy_contract(
         "daily-structured-v17-source-representatives",
         "daily-structured-v18-source-frontier",
         "daily-structured-v19-source-based",
+        "daily-structured-v20-source-headings",
     ]
     .into_iter()
     .any(|contract| {
@@ -2045,7 +2046,18 @@ fn composition_plans(
                 ));
             }
         }
-        singles.sort_by_key(|choice| (choice.clauses[0].0, choice.fact_ids[0].clone()));
+        let ordinals = sources
+            .iter()
+            .enumerate()
+            .flat_map(|(source_index, source)| {
+                source
+                    .facts
+                    .iter()
+                    .enumerate()
+                    .map(move |(fact_index, fact)| (fact.id.as_str(), (source_index, fact_index)))
+            })
+            .collect::<BTreeMap<_, _>>();
+        singles.sort_by_key(|choice| (choice.clauses[0].0, ordinals[choice.fact_ids[0].as_str()]));
         // Every bounded singleton remains eligible. Bounded extra bundles never
         // consume or prune that base catalog, regardless of topic cardinality.
         let mut choices = singles.clone();
@@ -2757,6 +2769,158 @@ pub(crate) fn normalize_source_based_context(
     Ok(())
 }
 
+// Task lanes affect selection only, never source grouping or claims of closure.
+fn source_highlight_lane(event: &StoredLogEvent) -> String {
+    for key in ["task_id", "session_id"] {
+        if let Some(value) = event.metadata.get(key).and_then(Value::as_str)
+            && !value.trim().is_empty()
+        {
+            return format!("{key}:{}", value.trim());
+        }
+    }
+    format!("event:{}", event.id)
+}
+
+fn source_highlight_selection(
+    field: &str,
+    plan: &FieldBudgetPlan,
+    events: &[StoredLogEvent],
+    ledger: &DailySourceLedger,
+) -> Vec<String> {
+    let mut event_cards = Vec::new();
+    for event in events {
+        let Some(source) = ledger
+            .sources
+            .iter()
+            .find(|source| source.event_id == event.id)
+        else {
+            continue;
+        };
+        let mut cards = source
+            .facts
+            .iter()
+            .enumerate()
+            .filter_map(|(ordinal, fact)| {
+                let choice = plan
+                    .choices
+                    .iter()
+                    .find(|choice| choice.fact_ids == [fact.id.clone()])?;
+                let preference = if field == "outcome" {
+                    usize::from(fact.source_pointer != "/message")
+                } else if field == "validation" {
+                    // Existing whole typed parents retain scope and not_run/pending values.
+                    fact.source_pointer.split('/').count()
+                } else {
+                    0
+                };
+                Some((preference, ordinal, choice))
+            })
+            .collect::<Vec<_>>();
+        cards.sort_by_key(|(preference, ordinal, _)| (*preference, *ordinal));
+        let mut displays = BTreeSet::new();
+        cards.retain(|(_, _, choice)| displays.insert(choice.text.as_str()));
+        if !cards.is_empty() {
+            event_cards.push((
+                event,
+                cards
+                    .into_iter()
+                    .map(|(_, _, choice)| choice)
+                    .collect::<Vec<_>>(),
+            ));
+        }
+    }
+    event_cards.sort_by_key(|(event, _)| (std::cmp::Reverse(event.timestamp), event.id.as_str()));
+    let mut queue = Vec::new();
+    let mut heads = BTreeSet::new();
+    let mut task_heads = BTreeSet::new();
+    let mut tasks = BTreeSet::new();
+    // First represent distinct tasks, then distinct events, before taking extra
+    // clauses. Within each event, source extraction order beats lexical fact IDs.
+    for (event, cards) in &event_cards {
+        if tasks.insert(source_highlight_lane(event)) {
+            heads.insert(cards[0].fact_ids[0].clone());
+            task_heads.insert(cards[0].fact_ids[0].clone());
+            queue.push(cards[0]);
+        }
+    }
+    for (_, cards) in &event_cards {
+        if heads.insert(cards[0].fact_ids[0].clone()) {
+            queue.push(cards[0]);
+        }
+    }
+    for ordinal in 1..event_cards
+        .iter()
+        .map(|(_, cards)| cards.len())
+        .max()
+        .unwrap_or(0)
+    {
+        for (_, cards) in &event_cards {
+            if let Some(choice) = cards.get(ordinal) {
+                queue.push(*choice);
+            }
+        }
+    }
+    let positions = queue
+        .iter()
+        .enumerate()
+        .map(|(position, choice)| (choice.fact_ids[0].as_str(), position))
+        .collect::<BTreeMap<_, _>>();
+    let mut used = BTreeSet::new();
+    let mut selected = Vec::new();
+    while selected.len() < 4 {
+        let Some(anchor) = queue
+            .iter()
+            .find(|choice| !used.contains(&choice.fact_ids[0]))
+        else {
+            break;
+        };
+        let choice = plan
+            .choices
+            .iter()
+            .filter(|choice| {
+                choice.fact_ids.contains(&anchor.fact_ids[0])
+                    && choice
+                        .fact_ids
+                        .iter()
+                        .all(|id| !used.contains(id) && positions.contains_key(id.as_str()))
+            })
+            .min_by_key(|choice| {
+                let covered_heads = choice
+                    .fact_ids
+                    .iter()
+                    .filter(|id| heads.contains(*id))
+                    .count();
+                let mut priority = choice
+                    .fact_ids
+                    .iter()
+                    .filter(|id| heads.contains(*id))
+                    .map(|id| positions[id.as_str()])
+                    .collect::<Vec<_>>();
+                priority.sort_unstable();
+                // Packing is rewarded only for useful event heads, not arbitrary leaf
+                // counts. Extra low-priority cards lose ties to the smaller bundle.
+                (
+                    std::cmp::Reverse(
+                        choice
+                            .fact_ids
+                            .iter()
+                            .filter(|id| task_heads.contains(*id))
+                            .count(),
+                    ),
+                    std::cmp::Reverse(covered_heads),
+                    priority,
+                    choice.fact_ids.len(),
+                    choice.text.chars().count(),
+                    choice.id.as_str(),
+                )
+            })
+            .expect("each queued card has an offered singleton");
+        used.extend(choice.fact_ids.iter().cloned());
+        selected.push(choice.id.clone());
+    }
+    selected
+}
+
 pub(crate) async fn compose_source_based_prepared_summary(
     mut args: SuggestMarkdownSummaryArgs,
     events: Vec<StoredLogEvent>,
@@ -2784,33 +2948,14 @@ pub(crate) async fn compose_source_based_prepared_summary(
         let (_, _, _, plans) = composition_request_prepared(&scoped, single, ledger)?;
         let mut selected = Map::new();
         for field in DAILY_FACT_FIELDS {
-            let mut singles = plans[field]
-                .choices
-                .iter()
-                .filter(|choice| choice.fact_ids.len() == 1)
-                .collect::<Vec<_>>();
-            // Newest reports lead selection; the parser renders their chronology
-            // and retains every unselected original card in reported history.
-            singles.sort_by_key(|choice| {
-                (
-                    std::cmp::Reverse(choice.clauses[0].0),
-                    choice.fact_ids[0].clone(),
-                )
-            });
-            let mut displays = BTreeSet::new();
             selected.insert(
                 field.into(),
-                json!(
-                    singles
-                        .into_iter()
-                        .filter(|choice| displays.insert((
-                            choice.text.clone(),
-                            choice.clauses[0].1.evidence_event_id.clone()
-                        )))
-                        .take(4)
-                        .map(|choice| choice.id.clone())
-                        .collect::<Vec<_>>()
-                ),
+                json!(source_highlight_selection(
+                    field,
+                    &plans[field],
+                    single,
+                    ledger
+                )),
             );
         }
         let mut draft = parse_planned_composition(
@@ -5216,6 +5361,150 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn source_highlights_diversify_tasks_and_keep_reported_qualifications() {
+        let mut events = Vec::new();
+        for (index, task) in ["delivery", "diagnosis", "review", "review"]
+            .iter()
+            .enumerate()
+        {
+            let mut event = grouping_event(
+                &format!("diverse-{index}"),
+                json!({
+                    "repo":"example", "work_item":42, "task_id":task,
+                    "event_type":"complete", "status":"succeeded",
+                }),
+            );
+            event.timestamp += chrono::Duration::minutes(index as i64);
+            event.message = match index {
+                0 => "Delivered the shared rendering behavior to the local application; external acceptance remains pending.".into(),
+                1 => "Diagnosed an expired credential; the probable cause has not been verified by a successful login.".into(),
+                2 => "Earlier review found a missing boundary check.".into(),
+                _ => (0..12).map(|ordinal| format!("Review clause {ordinal} records a separate local check." )).collect::<Vec<_>>().join(" "),
+            };
+            if index == 3 {
+                event.metadata.insert(
+                    "tests".into(),
+                    json!({"scope":"local only", "runtime":"not_run", "acceptance":"pending"}),
+                );
+                event.metadata.insert(
+                    "follow_up".into(),
+                    json!("Human approval and live acceptance remain pending."),
+                );
+            }
+            events.push(event);
+        }
+        let ledger = prepare_source_based_ledger(&events).unwrap();
+        let proposal = compose_source_based_prepared_summary(
+            source_only_args(&events),
+            events.clone(),
+            &ledger,
+            |_, _, _| Ok(()),
+        )
+        .await
+        .unwrap();
+        let repeated = compose_source_based_prepared_summary(
+            source_only_args(&events),
+            events.clone(),
+            &ledger,
+            |_, _, _| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&proposal.structured_draft).unwrap(),
+            serde_json::to_value(&repeated.structured_draft).unwrap()
+        );
+        let draft = proposal.structured_draft.unwrap();
+        assert_eq!(draft.workstreams.len(), 1);
+        let work = &draft.workstreams[0];
+        for expected in [
+            "Delivered the shared rendering behavior",
+            "probable cause has not been verified",
+            "Review clause 0",
+        ] {
+            assert!(
+                work.outcome.iter().any(|fact| fact.text.contains(expected)),
+                "missing {expected}"
+            );
+        }
+        assert!(work.validation.iter().any(|fact| {
+            ["local only", "not_run", "pending"]
+                .iter()
+                .all(|text| fact.text.contains(text))
+        }));
+        assert!(work.follow_up.iter().any(|fact| {
+            fact.text
+                .contains("Human approval and live acceptance remain pending.")
+        }));
+        assert_eq!(
+            work.reported_history.len(),
+            ledger
+                .sources
+                .iter()
+                .map(|source| source.facts.len())
+                .sum::<usize>()
+        );
+        for facts in [&work.outcome, &work.validation, &work.follow_up] {
+            assert!(facts.len() <= 4);
+            assert!(facts.iter().all(|fact| fact.text.chars().count() <= 320
+                && daily_source_clauses_are_valid(
+                    &fact.text,
+                    &fact.evidence_event_ids,
+                    &fact.source_clauses
+                )));
+        }
+    }
+
+    #[test]
+    fn source_highlights_use_extraction_order_and_main_message_before_ancillary_cards() {
+        let mut event = grouping_event("ordered", json!({"activity":"Ancillary activity report"}));
+        event.message = (0..12)
+            .map(|ordinal| format!("Source clause {ordinal} preserves its original position."))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let events = vec![event];
+        let ledger = prepare_source_based_ledger(&events).unwrap();
+        let (_, _, _, mut plans) =
+            composition_request_prepared(&source_only_args(&events), &events, &ledger).unwrap();
+        // Exercise queue ordering independently of the optional bounded bundles.
+        plans
+            .get_mut("outcome")
+            .unwrap()
+            .choices
+            .retain(|choice| choice.fact_ids.len() == 1);
+        let plan = &plans["outcome"];
+        let selected = source_highlight_selection("outcome", plan, &events, &ledger);
+        let texts = selected
+            .iter()
+            .map(|id| {
+                &plan
+                    .choices
+                    .iter()
+                    .find(|choice| &choice.id == id)
+                    .unwrap()
+                    .text
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(texts.len(), 4);
+        for (ordinal, text) in texts.iter().enumerate() {
+            assert!(
+                text.contains(&format!("Source clause {ordinal} ")),
+                "{text}"
+            );
+        }
+        let mut malformed = grouping_event(
+            "fallback",
+            json!({"task_id":["ambiguous"], "session_id":" Exact Session "}),
+        );
+        assert_eq!(
+            source_highlight_lane(&malformed),
+            "session_id:Exact Session"
+        );
+        malformed.metadata.insert("session_id".into(), json!(false));
+        assert_eq!(source_highlight_lane(&malformed), "event:fallback");
+    }
+
+    #[tokio::test]
     async fn source_based_knowledge_keeps_raw_groups_and_only_adds_reviewed_navigation() {
         let events = vec![
             grouping_event("one", json!({"repo":"repo","work_item":1})),
@@ -5303,7 +5592,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn source_based_selects_four_latest_singletons_and_keeps_all_history() {
+    async fn source_based_packs_bounded_event_reports_and_keeps_all_history() {
         let events = (0..7)
             .map(|index| {
                 let mut event =
@@ -5327,10 +5616,20 @@ mod tests {
         .unwrap();
         let draft = proposal.structured_draft.unwrap();
         let work = &draft.workstreams[0];
-        assert_eq!(work.outcome.len(), 4);
+        assert!(work.outcome.len() <= 4);
         assert_eq!(work.reported_history.len(), 7);
-        assert!(work.outcome[0].text.contains("bounded change 3"));
-        assert!(work.outcome[3].text.contains("bounded change 6"));
+        for index in 0..7 {
+            assert!(
+                work.outcome
+                    .iter()
+                    .any(|fact| fact.text.contains(&format!("bounded change {index}")))
+            );
+        }
+        assert!(
+            work.outcome
+                .iter()
+                .all(|fact| fact.text.chars().count() <= 320)
+        );
     }
 
     #[tokio::test]
@@ -7998,6 +8297,23 @@ mod tests {
             }
             format!("{:x}", Sha256::digest(serde_json::to_vec(&value).unwrap()))
         };
+        let v20 = generation_configuration_digest_with_contract(
+            &config,
+            "daily-structured-v20-source-headings",
+            true,
+        );
+        assert!(generation_configuration_matches_legacy_contract(
+            &config, &v20
+        ));
+        assert_ne!(generation_configuration_digest(&config), v20);
+        assert!(!generation_configuration_matches_legacy_contract(
+            &config,
+            &generation_configuration_digest_with_contract(
+                &config,
+                "daily-structured-v20-source-headings",
+                false
+            ),
+        ));
         let v14 = generation_configuration_digest_with_contract(
             &config,
             "daily-structured-v14-subject-labelled-topics",
@@ -8380,7 +8696,7 @@ mod tests {
         }
         assert_eq!(
             DAILY_GENERATION_CONTRACT,
-            "daily-structured-v20-source-headings"
+            "daily-structured-v21-source-highlights"
         );
     }
 

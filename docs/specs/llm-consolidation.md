@@ -8,7 +8,7 @@ Preparation turns one server-resolved day of bounded automated evidence into a s
 2. Rust groups events using namespaced repository, work-item, pull-request, task, session, and source identities. Numeric/string/URL and consistent object references share identity normalization with Knowledge. A task may inherit its single unambiguous external identity. Otherwise an exact feature branch can associate tasks without explicit identities; integration branches and conflicting or malformed identities cannot authorize that merge.
 3. The service freezes event IDs and content digests in an immutable evidence snapshot.
 4. When Knowledge collections or mappings are enabled, the server resolves reviewed mappings and unique exact title, alias, or typed-reference matches. Conflicting matches produce no link. Repository-wide mappings may authorize a link but cannot merge distinct work items; only reviewed work-item/PR relationships may alias groups.
-5. Rust deterministically extracts all eligible bounded fact cards from each automated source separately, without Knowledge. Rust validates each card and assigns source-owned fact IDs. In default source-based mode, Rust retains each conservative source identity bucket and selects at most four recent eligible source reports per field, without inference or a configured provider. Optional semantic mode first asks the configured endpoint to propose bounded source-only topics, then to select source-backed highlights. Neither mode invents factual prose or citation lists. Only semantic mode sends activity to a provider; nonlocal endpoints require connection-specific consent. Only verified local semantic endpoints may receive bounded canonical-note excerpts.
+5. Rust deterministically extracts all eligible bounded fact cards from each automated source separately, without Knowledge. Rust validates each card and assigns source-owned fact IDs. In default source-based mode, Rust retains each conservative source identity bucket and selects at most four bounded source-report bundles per field, prioritizing distinct reported tasks/events and their main reports, without inference or a configured provider. Optional semantic mode first asks the configured endpoint to propose bounded source-only topics, then to select source-backed highlights. Neither mode invents factual prose or citation lists. Only semantic mode sends activity to a provider; nonlocal endpoints require connection-specific consent. Only verified local semantic endpoints may receive bounded canonical-note excerpts.
 6. Rust renders validated display projections with source times, derives citations only from visible supporting clauses, retains every original card as typed reported history, and validates group membership, complete evidence coverage, factual evidence IDs, canonical links, and text limits using the persisted revision contract. Malformed extraction, stale-only selection and invalid composition fail visibly.
 7. A valid result becomes an immutable proposal revision bound to its evidence and optional Knowledge snapshots in SQLite. Invalid, incomplete, or unrepresentable results are visible failures. Semantic model errors never silently switch the selected mode.
 8. The server renders the reviewed structure deterministically for preview. Only explicit dashboard Apply invokes the Markdown writer.
@@ -33,7 +33,7 @@ Copy and Apply. Both modes share deterministic source extraction and the same va
 are derived exclusively from selected server-owned source facts. Existing stored
 revisions and historical string-compatible readers retain their format; no
 migration or automatic rewrite is performed. The generation contract is
-`daily-structured-v20-source-headings`, invalidating ordinary cache reuse from older
+`daily-structured-v21-source-highlights`, invalidating ordinary cache reuse from older
 contracts. Final output retains four facts per field and 320 characters per fact.
 Oversized selected bundles fail rather than being clipped.
 Required visible source clauses may be impossible to fit within these inherited
@@ -71,12 +71,23 @@ UTF-8 branch name in headings; malformed/control-character names use a safe
 generic branch label.
 
 Rust creates one nonsemantic bucket assignment containing every eligible card,
-rebuilds and validates the complete ledger against original events, then selects
-at most four recent eligible singleton reports for each field. Selected reports
-are rendered chronologically. All original eligible reports remain available in
-typed reported history with precise source clauses. These are bounded highlights,
-not a claim to semantic completeness. An earlier blocker or next-step report is
-labeled historically; a later report does not prove closure of an independent gate.
+rebuilds and validates the complete ledger against original events, then ranks
+eligible cards per field. The priority queue first covers distinct exact task
+identities (session or event identity when absent), then remaining events, then
+remaining clauses. These identities prioritize reports within a source bucket;
+they do not merge buckets or establish semantic subjects. Main outcome messages
+and existing scope-bearing validation values precede ancillary leaves, with
+original source order preserved rather than lexical fact-ID order.
+
+Selection uses only existing singleton/pair/triple catalog choices, with at most
+four choices per field and 320 characters per choice. Packing is anchored to the
+next queued card and favors diverse report heads; extra low-priority leaves do
+not earn a coverage bonus. Singleton fallback preserves representability.
+Selected reports are rendered chronologically. All original eligible reports
+remain in typed reported history with precise source clauses. This bounded,
+deterministic heuristic does not guarantee semantic completeness or surface every
+qualification. An earlier blocker or next-step report remains explicitly historical;
+a later report never proves closure of an independent gate.
 Existing ownership, lifecycle, field coverage, citation and size checks still
 apply. Oversized/unrepresentable required source material fails visibly.
 

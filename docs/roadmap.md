@@ -305,6 +305,99 @@ the associated pull request and lifecycle report.
 ### Next Product KB ingestion delivery
 
 
+**Source highlight coverage — authorized 2026-10-16 (implemented and locally verified).**
+Improve important outcome and pending-work visibility before Product KB ingestion.
+Starting clean `main`: `34bbcc6690f063ce9f1345cf1a8e708c7b696214`;
+branch `codex/source-highlight-coverage` uses the runtime-required prefix.
+Root owns this record, specifications, evaluation and local deployment. Factory
+Sol/high planning and independent review, with a bounded Sol/medium engine worker;
+Ponytail lite applies within scope. The requested endpoint is local verification.
+
+1. Replace newest-event slot monopolization with a deterministic task/event
+   priority queue, using original source order and preferring main reports and
+   existing scope-bearing validation parents. Pack only existing bounded catalog
+   singleton/pair/triple choices; retain singleton fallback. This diversifies
+   reported tasks/events and prefers complete source reports.
+   Preserve exact quotes, qualifications, strict evidence ownership, conservative
+   grouping, complete history, four facts per field and existing text bounds.
+   Never infer that a later completion closes an independent earlier gate.
+2. Keep the original October13–14 evidence, Knowledge and twelve-item rubric
+   frozen. Compare new four-arm results to the prior 4/12 fully highlighted
+   baseline, independently checking source support, pending states, repetition
+   and editing burden. No fixture-specific production ranking or output repair.
+3. Run focused regressions and required integrated checks, independently review
+   the actual task diff, then back up app data and deploy locally. Verify health,
+   preserved notes/revisions and the source preparation flow without Apply.
+
+| Stage/scenario | Required evidence | State |
+| --- | --- | --- |
+| Selection and bounds | Generic task/event diversity, main-message/source-order, scoped validation, exact pending clauses, deterministic packing regressions | Passed |
+| Evidence/history/legacy safety | Strict parser/save, ownership, expiry and cache regressions; four-arm save validation; full history identical to baseline | Passed |
+| Real-day usefulness | Independent original-rubric comparison:6/12 versus4/12 full;118/118 dated bullets supported | Partial; substantial editing remains |
+| Integrated review and checks | Independent complete code diff;278 Rust tests,230 browser tests, fmt/Clippy/client format, release Compose smoke | Passed |
+| Local preservation/deployment | Offline backup integrity, health/login, preserved October13–15 revisions/notes/evidence; new October16 source candidate | Passed; no Apply |
+
+Frozen trial1 completed with the original32/44 events and unchanged rubric.
+All four candidates pass production parser and save validation. Each date shares
+one source ledger across Knowledge arms; no model or production DB insert is used.
+
+| Date | Baseline fully highlighted rubric items | New fully highlighted items | New highlights / retained history per arm |
+| --- | --- | --- | --- |
+| October13 | 2/6 | 3/6 | 27 / 147 |
+| October14 | 2/6 | 3/6 | 32 / 191 |
+
+Independent assessment finds age-validation delivery/limitations and signer-return
+aggregate-PDF behavior now complete in highlights, increasing total coverage from
+4/12 to6/12. All118 dated highlighted bullet claims (166 source clauses across
+four arms) are supported in the inspected evidence; support does not imply
+currentness or completeness. All original history is preserved. Remaining six
+rubric items are partial: font delivery/live-PDF qualifications/decision details,
+PR9417 interrupted full build and policy gates, the expired-key probable diagnosis,
+and the separate unimplemented OIDC story still need source-history inspection.
+
+The drafts remain useful audit/review starting records requiring substantial
+editing. Fewer bullets do not mean more concise output: Markdown grows from4368
+to6272 characters on October13 and6075 to7810 on October14 (activity-only).
+Historical review instructions still create stale clutter; no closure is inferred.
+Knowledge changes navigation only; paired factual content/history is identical,
+with zero source excerpts and no demonstrated factual/editing benefit. Composition
+in this single trial took136–196ms per arm; this is neither full API latency nor a
+performance benchmark. The bounded selector is a modest coverage improvement,
+not a passed human-usefulness or Product KB gate.
+
+Private immutable trial inputs/rubric and pretrial hypothesis:
+`/tmp/log-inbox-highlight-evaluation-20261016/freeze.json`; actual four arms and
+independent assessment in `trial-1/`. All source-pointer quotes (147/191 per date)
+were checked against original events. No fixture/rubric changes or candidate
+repair occurred. New contract `daily-structured-v21-source-highlights` invalidates
+ordinary older-candidate reuse; v20 retains the safe historical expiry amendment
+path. There is no schema change or automatic revision rewrite.
+
+Stage ledger: factory Sol/high plan, bounded Sol/medium implementation and
+independent Sol/high actual-code/output reviews complete. Independent complete
+code review covers `llm.rs` and `main.rs` against base/merge-base `34bbcc6`,
+code-diff SHA256 `974ea9aded5b945d80fa1a5fdab910b1f9050e3fe7ee59e90d932f2b11c6a77e`:
+no findings. Reviewer loopback-fixture permission gaps were covered by the
+coordinator's permitted full workspace run:278 passed,10 explicitly ignored.
+Rust format/all-target Clippy, client format and Chromium/Firefox230 tests passed.
+Release Compose smoke passed preparation with its fake provider stopped,
+reviewed Apply, owner-content preservation, restart and navigation/history checks
+in disposable storage. Final production build passed; no remote CI was run for
+this local delivery.
+
+Local verification: [Daily October16](http://127.0.0.1:8788/?date=2026-10-16)
+shows a ready source-based draft with no model:40 uniquely owned events,9 source
+groups,150 history cards, exact v21 provenance and unchanged manual notes/Apply
+state. No existing October13–15 revision or note was regenerated. Both services
+are healthy and running the exact built images; data/workspace/master-key mounts
+and environment are unchanged. Offline primary SQLite backup passes quick_check
+with39 tables; existing archived backups and rollback binaries were retained in
+ignored `tmp/deployments/source-highlights-20261016/`. An initial backup inventory
+assertion included archived databases; explicit primary-database verification
+subsequently passed against the same offline copy. Runtime and release checks
+are recorded privately in `/tmp/log-inbox-highlight-validation-20261016/`.
+Knowledge remains optional; Product KB ingestion and agent recall stay gated.
+
 **Source-based preparation — authorized 2026-10-16 (implemented and locally verified).**
 The owner accepted the revised recovery strategy and explicitly requested the
 software factory, source-based preparation with optional semantic grouping,
