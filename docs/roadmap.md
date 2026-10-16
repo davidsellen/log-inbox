@@ -364,6 +364,18 @@ workspace Clippy and all86 core tests pass. Remote
 [CI run103](https://github.com/davidsellen/log-inbox/actions/runs/38889038721)
 passed on `bac50a6`. Semantic acceptance and release gates remain unchanged.
 
+Local deployment — 2026-10-16: after the failed semantic gate was disclosed,
+the owner explicitly requested deployment. Deployed runtime `481d40d` to the
+existing loopback stack with both ordinary and provider-key Compose files.
+An offline app-data backup passed SQLite integrity checking (39 tables); the
+shared data volume, workspace binding and read-only provider-key mount are
+preserved. Both service health endpoints, owner login, served Daily asset hash
+and authenticated October13/14 reads passed (32/44 evidence records and existing
+revisions). The browser sign-in page renders. No new generation or Apply was
+performed. Old Docker image layers were unavailable; exact running binaries and
+the offline database were retained privately for rollback. Local deployment does
+not close semantic acceptance, authorize KB ingestion or mark PR2 ready to merge.
+
 | Acceptance scenario | Evidence at v15 working tree | Result |
 | --- | --- | --- |
 | Same source facts, precise ownership and strict rejection | Three actual responses validated by production parser; Rust/Compose regressions | Pass |
@@ -372,7 +384,8 @@ passed on `bac50a6`. Semantic acceptance and release gates remain unchanged.
 | Cross-window exact subject reuse | Deterministic half-split protocol frozen; no inference after failed prerequisite | Not run |
 | Useful summaries with/without Knowledge, October13–14 | Original evidence and prior failed trials preserved; prerequisite fails | Not run |
 | Build and integration | 269 Rust, 224 browser, fmt/Clippy/client, release, isolated Compose/restart | Pass |
-| Existing local stack, merge and branch cleanup | Release blocked; keep running stack and unmerged source branch | Blocked |
+| Existing local stack | Explicit owner deployment; health/authentication/binding/32+44 evidence reads verified | Pass locally; semantic limitation remains |
+| Merge and branch cleanup | Draft PR and unmerged source branch retained | Blocked by semantic acceptance |
 
 Next delivery must change the grouping approach rather than repeat another blind
 prompt/model sweep. Bound the proposal to an auditable source-linked subject map
