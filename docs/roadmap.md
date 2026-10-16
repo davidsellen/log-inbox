@@ -346,7 +346,9 @@ Chromium/Firefox browser checks and the release build passed. Initial sandbox-on
 browser/socket failures were
 reproduced as permission errors and rerun with local-process/socket access.
 Independent complete review plus v15 follow-up found no remaining code defects;
-that does not establish semantic acceptance. Draft publication is pending. Local deployment, full-day
+that does not establish semantic acceptance. Implementation commit `9cb3752` is
+pushed in [draft PR2](https://github.com/davidsellen/log-inbox/pull/2). Remote CI
+was not yet reported at publication. Local deployment, full-day
 comparison, merge and remote source-branch deletion are blocked by semantic
 acceptance; Product KB ingestion remains gated. No model-output repair, weakened
 checks or selective retries were used. Private evidence is preserved under
