@@ -2577,15 +2577,20 @@ test("Omitting one cited source hides whole editorial prose without splicing", a
   await expect(draft).toContainText("Some recap text is hidden");
 });
 
-test("Untouched recap preserves citation order and does not block navigation", async ({ page }) => {
+test("Server-ordered recap preserves citations and only guards actual edits", async ({ page }) => {
   await mockDaily(page);
   const data = dailyResponse();
   data.current_revision.origin = "structured_edit";
   data.current_revision.content.workstreams[0].evidence_event_ids.push("evt_2");
   data.current_snapshot_evidence.push({ event_id: "evt_2", disposition: "include" });
+  // serde_json sorts object keys, including nested facts and topics.
   data.current_revision.content.recap = {
-    summary: { text: "Both reported changes are retained.", evidence_event_ids: ["evt_2", "evt_1"] },
-    topics: [{ title: "Review", done: { text: "Reviewed the changes.", evidence_event_ids: ["evt_2", "evt_1"] } }]
+    summary: { evidence_event_ids: ["evt_2", "evt_1"], text: "Both reported changes are retained." },
+    topics: [{
+      done: { evidence_event_ids: ["evt_2", "evt_1"], text: "Reviewed the changes." },
+      pending: { evidence_event_ids: ["evt_1"], text: "Check live acceptance." },
+      title: "Review"
+    }]
   };
   await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
   let dialogs = 0;
@@ -2594,6 +2599,14 @@ test("Untouched recap preserves citation order and does not block navigation", a
   await page.getByRole("button", { name: "Next day", exact: true }).click();
   await expect(page.getByLabel("Daily log date")).toHaveValue("2026-09-09");
   expect(dialogs).toBe(0);
+  await page.getByRole("button", { name: "Previous day", exact: true }).click();
+  await expect(page.getByLabel("Day summary", { exact: true })).toHaveValue("Both reported changes are retained.");
+  await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+  await page.getByLabel("Day summary", { exact: true }).fill("An unsaved recap edit.");
+  await page.getByRole("button", { name: "Next day", exact: true }).click();
+  await expect(page.getByLabel("Daily log date")).toHaveValue("2026-09-08");
+  await expect(page.getByLabel("Day summary", { exact: true })).toHaveValue("An unsaved recap edit.");
+  expect(dialogs).toBe(1);
 });
 
 

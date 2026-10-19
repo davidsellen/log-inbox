@@ -2057,6 +2057,16 @@ function setDayLoadState(loading, error = "") {
 
 // Navigation's discard guard stays beside the form fields it understands.
 function unsavedDayChanges() {
+  // Compare schema values in a fixed order; server JSON object keys may differ.
+  const recapKeys = [
+    "summary",
+    "topics",
+    "title",
+    "done",
+    "pending",
+    "text",
+    "evidence_event_ids",
+  ];
   const workstreams = state.data?.current_revision?.content?.workstreams || [];
   const changedTitle = [
     ...document.querySelectorAll("#candidate .title-input"),
@@ -2073,8 +2083,11 @@ function unsavedDayChanges() {
   return (
     changedTitle ||
     changedFact ||
-    JSON.stringify(readRecapEditor()) !==
-      JSON.stringify(state.data?.current_revision?.content?.recap || null) ||
+    JSON.stringify(readRecapEditor(), recapKeys) !==
+      JSON.stringify(
+        state.data?.current_revision?.content?.recap || null,
+        recapKeys,
+      ) ||
     contextDraftChanged() ||
     evidenceDecisionSelects().some(
       (input) =>

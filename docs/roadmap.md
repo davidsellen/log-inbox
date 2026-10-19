@@ -304,6 +304,19 @@ the associated pull request and lifecycle report.
 
 ### Next Product KB ingestion delivery
 
+**PR delivery — authorized 2026-10-19.** Published the five local delivery
+commits through [PR #3](https://github.com/davidsellen/log-inbox/pull/3), targeting
+`main` at `34bbcc6`. Full integrated independent review at `bdca681` found an
+untouched recap could trigger the navigation discard guard because server and
+browser JSON object keys have different insertion orders. The fix compares recap
+values in schema-key order while preserving citation/topic array order and nulls.
+The regression reproduces the false guard before the fix and checks untouched
+navigation plus genuine unsaved edits afterward; ten focused Chromium/Firefox
+cases and client formatting/syntax checks passed. Retain existing local deployment evidence separately
+from this client follow-up; GitHub CI and follow-up review determine PR readiness.
+Merge is outside this request. Automatic concise generation and Product KB
+ingestion remain deferred under the existing usefulness gates.
+
 **Recap Knowledge links — authorized 2026-10-19 (fixed, deployed and applied).**
 The owner reports missing Forms and Log Inbox links after the short recap was
 applied. Starting clean `b01b86c` on the same local branch. The recap renderer
