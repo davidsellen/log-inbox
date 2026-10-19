@@ -1602,3 +1602,36 @@ this development task; test writes use disposable workspaces.
 Review fixes: expose safe preview discard/cancellation, serialize one plan across canonical destinations, align review scopes, preserve all unfinished Daily write ownership and check it before a new journal is inserted, and reject updates exceeding per-note/aggregate Reference budgets. Regressions cover these paths. Full review uses checkout/branch above, HEAD/base/merge-base `bb5a111aa60357940f1ba214e2328a3f667d9291`; followups reviewed affected code/tests/docs after each fix. Actual disk-full/fsync fault injection for KB and arbitrary concurrent external-editor races remain unverified; the inherited atomic writer, synthesized staged/renamed recovery and live restart are tested.
 
 Final validation: `cargo test --workspace -- --test-threads=4` passed 307 tests with 13 ignored; `cargo clippy --workspace --all-targets -- -D warnings`, Rust formatting, client formatting, both browser engines (250 tests), shell syntax and documentation-link/diff checks passed. Initial sandbox runs could not start local provider mocks/browsers; permitted runs completed. One original 5-second generation test timed out under concurrent Docker/browser load; the final reduced-parallelism full suite passed without changing that test or its deadline. Final live smoke used only disposable synthetic data and matched the reviewed runtime files before and after its release build/run.
+
+
+### Local deployment — 2026-10-19
+
+The owner subsequently requested a commit and deployment to the existing local
+installation. Feature commit `f6408269a36bf45e36ff29ebbdc72fabd2bcae0b` on
+`codex/accepted-work-kb-capture` contains the reviewed/tested runtime. Built and
+started only the existing collector and Daily services using the same Compose
+project, provider override, environment, ports and mounts; the model service was
+left running. Both services report healthy at the existing loopback addresses.
+
+Before upgrade, stopped both app writers and copied their app data, then created
+and integrity-checked a consistent SQLite backup. Previous images are retained as
+local rollback tags. Recovery material and the deployment receipt are private,
+ignored files under `tmp/deployments/kb-capture-f640826`; do not restore the old
+schema snapshot over newly received evidence without reconciliation.
+
+Live verification: schema 27 → 29; all 1000 backed-up event IDs retained; nine existing
+protected configuration/Daily/review tables have identical row hashes; all 32
+tracked Daily/canonical-note hashes unchanged. Running image IDs match the new
+builds; environment, provider/workspace mounts and port bindings are unchanged.
+Authenticated submission/candidate/promotion GET endpoints returned 200, and the
+served KB client matches the committed asset. The live browser reaches normal
+owner sign-in; authenticated page interaction is left for the owner. The previous
+250 browser tests and exact-source release Compose workflow remain the UI and
+write/restart evidence. No owner candidate is accepted and no canonical note is
+written as part of deployment.
+
+Try the flow at `http://127.0.0.1:8788/?view=knowledge`: sign in and open Product KB
+submissions. The deployment's structured terminal report supplies real source
+material for capture and review, with implementation, verification and local
+deployment retained as separate reported claims. KB acceptance and canonical
+confirmation remain the owner's actions. No remote publication was requested.

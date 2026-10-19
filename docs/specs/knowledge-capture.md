@@ -140,5 +140,7 @@ since that backup and every unfinished KB operation before restoring; never repl
 a live database with an old copy and silently lose new evidence. Canonical files
 already changed by explicit confirmation are not reverted by database rollback;
 reconcile them using the frozen original bytes and current file hashes under owner
-review. Local tests use disposable workspaces/databases; this task does not migrate
-the owner's running installation.
+review. Local tests use disposable workspaces/databases. A separately requested local
+deployment on 2026-10-19 upgraded the owner installation from schema 27 to 29 after
+a verified backup and preserved existing events, review/configuration state and
+tracked Markdown hashes; see the roadmap deployment record.
