@@ -69,3 +69,7 @@ Return process and storage health.
 - Meaningful agent work should emit a correlated opening event and a terminal `complete`, `blocked`, or `failed` event.
 - Optional `metadata.outcome` carries a short self-contained reported result with its qualifications; it does not establish independent verification, acceptance or Knowledge-write authority. Keep checks and pending actions in their corresponding validation/blocker/follow-up fields.
 - See [Agent activity reporting](../agent-integration.md) for the recommended lifecycle and metadata contract.
+
+## Optional Knowledge submissions
+
+Events may carry bounded `metadata.knowledge_submission` version1. Ingestion still only redacts and stores; an owner separately validates/captures the original event. Exact submission-key materialization retries deduplicate even though event ingestion remains non-idempotent. No producer receives review or note-write authority. See the [payload contract](knowledge-capture.md#submission-version-1) and [producer example](../agent-integration.md#submitting-accepted-work-to-product-kb).

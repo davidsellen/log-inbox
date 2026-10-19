@@ -149,3 +149,7 @@ The coordinated cutover is delivered. Before the Daily writer became the only ru
 5. Remove legacy writer routes, browser filesystem state, proposal files, and split write mounts.
 
 The ordinary runtime now contains no legacy routes, workers, browser filesystem state, proposal files, or split mounts. Remaining legacy database records and optional external source files are migration inputs only. A failed or interrupted cutover preserves them and its journal; no compatibility alias can route a legacy write through the Daily writer.
+
+## Separate Product KB capture
+
+[Accepted-work Knowledge capture](knowledge-capture.md) uses original redacted events, immutable candidates and separate owner review/promotion. It does not create a Daily day or derive approval from Daily Apply. Accepted, implemented, verified, merged and deployed remain independent claims.

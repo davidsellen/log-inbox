@@ -16,6 +16,8 @@ Daily review is the product. Knowledge context is optional. Log Inbox is not a v
 
 The authenticated Daily workflow, stable workspace profile, immutable revisions, recent-day catch-up, scheduled candidate preparation, retention, optional bounded Knowledge context, exact managed-block preview, journaled Apply/recovery, and reviewed legacy-data cutover are implemented. The [roadmap](docs/roadmap.md) separates delivered behavior from the remaining pilot evidence and explicitly gated integration work.
 
+Accepted plans and implementation results can also be submitted directly for owner-reviewed Product KB capture, independently of Daily generation. In **Settings → Reference notes**, capture a submission, accept its exact revision, then preview and confirm a separate canonical-note update. See [accepted-work KB capture](docs/specs/knowledge-capture.md).
+
 The optional **Dashboard** shows preparation status, recent days to review, and bounded model timing/outcome samples. Open it from the header or `/?view=dashboard`; Daily remains the main review workflow. [Dashboard behavior](docs/specs/dashboard.md#compact-dashboard) explains inactive schedule records and comparison limits.
 
 The browser never mounts or browses a local folder. The service receives one existing Markdown workspace as a host mount; Settings only defines the daily-note convention inside it. Log Inbox writes nothing until **Confirm Apply**, and then changes only its owned managed block.

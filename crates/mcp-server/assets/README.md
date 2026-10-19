@@ -36,3 +36,5 @@ Run `npm run format:client`, then `npm run check:client` and `npm run test:brows
 Rust embeds each asset with `include_str!` and serves only the explicit allowlist in `dashboard_asset`. A new module needs an allowlist entry and a browser fixture asset entry. No general-purpose filesystem serving is needed.
 
 The Dashboard reads existing Daily, automation and generation-history endpoints. Partial failures mark sections unavailable or last known without replacing Daily edits. It uses native DOM and existing CSS; no dashboard/chart dependency is required.
+
+`daily-kb.js` owns original-event Product KB capture, candidate review and separate canonical update previews/recovery. Reference notes supplies its shared authenticated API client; the module uses native DOM and no provider/model requests.

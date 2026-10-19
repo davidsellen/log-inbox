@@ -281,3 +281,7 @@ Comparison retries return the existing immutable experiment; an explicitly confl
 ### Generation timing history
 
 `GET /api/v2/settings/generation/history` requires existing `logs:read` authorization and returns at most 100 attempts scoped to the active workspace. Each row contains attempt ID/day/operation/state, timestamps, nullable terminal elapsed milliseconds, timeout, reference mode, workstream progress, failure code, inference-progress availability, and allowlisted nonsecret model provenance. Running/invalid timestamps have unknown duration; backward wall-clock intervals have unknown duration. No prompts, content, credentials, or raw errors are returned. Existing attempt records supply durable history without a schema migration.
+
+## Accepted-work KB endpoints
+
+The authenticated `/api/v2/knowledge/submissions`, `/candidates` and `/promotions` routes provide original-source capture, exact-hash owner review and a separate canonical-note preview/confirmation. [Knowledge capture API](knowledge-capture.md#api) is the authoritative request, scope and recovery contract. Existing Daily endpoints do not grant KB approval.

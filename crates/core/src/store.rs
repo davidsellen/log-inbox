@@ -1116,6 +1116,66 @@ impl Store {
             transaction.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES(27,'generation connections and provenance',?1)", params![Utc::now().to_rfc3339()])?;
             transaction.commit()?;
         }
+        if current < 28 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                "CREATE TABLE knowledge_candidates (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspace_profiles(id) ON DELETE RESTRICT,
+                    producer_source TEXT NOT NULL,
+                    submission_key TEXT NOT NULL,
+                    plan_id TEXT NOT NULL,
+                    source_event_id TEXT NOT NULL UNIQUE,
+                    source_event_digest TEXT NOT NULL,
+                    payload_digest TEXT NOT NULL,
+                    candidate_hash TEXT NOT NULL,
+                    submission_json TEXT NOT NULL,
+                    supersedes TEXT UNIQUE,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(workspace_id, producer_source, submission_key)
+                );
+                CREATE INDEX knowledge_candidates_workspace ON knowledge_candidates(workspace_id,created_at,id);
+                CREATE TABLE knowledge_dispositions (
+                    candidate_id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspace_profiles(id) ON DELETE RESTRICT,
+                    candidate_hash TEXT NOT NULL,
+                    disposition TEXT NOT NULL CHECK(disposition IN ('accept','reject')),
+                    reason TEXT NOT NULL,
+                    actor TEXT NOT NULL CHECK(actor='owner'),
+                    created_at TEXT NOT NULL
+                );
+                CREATE TRIGGER knowledge_candidates_immutable_update BEFORE UPDATE ON knowledge_candidates BEGIN
+                    SELECT RAISE(ABORT,'Knowledge candidates are immutable'); END;
+                CREATE TRIGGER knowledge_candidates_immutable_delete BEFORE DELETE ON knowledge_candidates BEGIN
+                    SELECT RAISE(ABORT,'Knowledge candidates are immutable'); END;
+                CREATE TRIGGER knowledge_dispositions_immutable_update BEFORE UPDATE ON knowledge_dispositions BEGIN
+                    SELECT RAISE(ABORT,'Knowledge dispositions are immutable'); END;
+                CREATE TRIGGER knowledge_dispositions_immutable_delete BEFORE DELETE ON knowledge_dispositions BEGIN
+                    SELECT RAISE(ABORT,'Knowledge dispositions are immutable'); END;",
+            )?;
+            transaction.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES(28,'immutable Knowledge submissions and owner review',?1)", params![Utc::now().to_rfc3339()])?;
+            transaction.commit()?;
+        }
+        if current < 29 {
+            let transaction = conn.transaction()?;
+            transaction.execute_batch(
+                "CREATE TABLE knowledge_promotion_operations (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspace_profiles(id) ON DELETE RESTRICT,
+                    candidate_id TEXT NOT NULL REFERENCES knowledge_candidates(id) ON DELETE RESTRICT,
+                    record_json TEXT NOT NULL,
+                    original_content BLOB NOT NULL,
+                    updated_content BLOB NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('prepared','writing','finalized','conflict','cancelled')),
+                    failure_reason TEXT
+                );
+                CREATE INDEX knowledge_promotion_workspace ON knowledge_promotion_operations(workspace_id);
+                CREATE TRIGGER knowledge_promotion_immutable BEFORE UPDATE OF id,workspace_id,candidate_id,record_json,original_content,updated_content ON knowledge_promotion_operations BEGIN
+                    SELECT RAISE(ABORT,'Knowledge write authority is immutable'); END;",
+            )?;
+            transaction.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES(29,'reviewed Knowledge write journal',?1)", params![Utc::now().to_rfc3339()])?;
+            transaction.commit()?;
+        }
         ensure_foreign_key_integrity(&conn)?;
         Ok(())
     }
@@ -2534,7 +2594,7 @@ fn normalize_level(level: Option<&str>) -> String {
     }
 }
 
-fn stored_event_from_row(row: &Row<'_>) -> rusqlite::Result<StoredLogEvent> {
+pub(crate) fn stored_event_from_row(row: &Row<'_>) -> rusqlite::Result<StoredLogEvent> {
     let metadata_json: String = row.get(6)?;
     Ok(StoredLogEvent {
         id: row.get(0)?,
@@ -2655,10 +2715,10 @@ mod tests {
     #[test]
     fn applies_versioned_schema_migrations_idempotently() {
         let store = temp_store();
-        assert_eq!(store.schema_version().expect("version reads"), 27);
+        assert_eq!(store.schema_version().expect("version reads"), 29);
 
         store.initialize().expect("reinitialization succeeds");
-        assert_eq!(store.schema_version().expect("version remains"), 27);
+        assert_eq!(store.schema_version().expect("version remains"), 29);
     }
 
     #[test]
@@ -2726,7 +2786,7 @@ mod tests {
         let verification = store
             .create_verified_backup(&backup_path)
             .expect("backup succeeds");
-        assert_eq!(verification.schema_version, 27);
+        assert_eq!(verification.schema_version, 29);
         assert_eq!(verification.event_count, 1);
         assert_eq!(verification.integrity_check, "ok");
         assert!(store.create_verified_backup(&backup_path).is_err());
