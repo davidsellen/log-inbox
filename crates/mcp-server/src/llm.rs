@@ -4972,6 +4972,7 @@ pub(crate) fn activity_record(
         });
     }
     DailyRevisionContent {
+        recap: None,
         schema_version: 2,
         workstreams,
         manual_entry_ids,
@@ -5045,6 +5046,40 @@ pub fn render_daily_revision_preview(
             }
         })
         .collect::<Vec<_>>();
+    if let Some(recap) = &content.recap {
+        let visible = |fact: &log_inbox_core::models::DailyRecapFact| {
+            !fact.evidence_event_ids.is_empty()
+                && !fact
+                    .evidence_event_ids
+                    .iter()
+                    .any(|id| excluded.contains(id.as_str()))
+        };
+        let mut sections = Vec::new();
+        if visible(&recap.summary) {
+            sections.push(safe_model_markdown_text(&recap.summary.text));
+        }
+        for topic in &recap.topics {
+            let facts = [("Done", &topic.done), ("Pending", &topic.pending)]
+                .into_iter()
+                .filter_map(|(label, fact)| {
+                    fact.as_ref().filter(|fact| visible(fact)).map(|fact| {
+                        format!("- **{label}:** {}", safe_model_markdown_text(&fact.text))
+                    })
+                })
+                .collect::<Vec<_>>();
+            if !facts.is_empty() {
+                sections.push(format!(
+                    "### {}\n\n{}",
+                    safe_model_markdown_text(&topic.title),
+                    facts.join("\n")
+                ));
+            }
+        }
+        if !selected_manual.is_empty() {
+            sections.push(format!("### My notes\n\n{}", selected_manual.join("\n")));
+        }
+        return sections.join("\n\n");
+    }
     let workstreams = content
         .workstreams
         .iter()
@@ -5176,6 +5211,7 @@ pub(crate) fn daily_revision_content(
     args: &SuggestMarkdownSummaryArgs,
 ) -> DailyRevisionContent {
     DailyRevisionContent {
+        recap: None,
         schema_version: 1,
         workstreams: draft
             .workstreams
@@ -9097,6 +9133,42 @@ mod tests {
             );
         }
         server.abort();
+    }
+
+    #[test]
+    fn editorial_recap_preview_is_short_escaped_and_hides_whole_excluded_facts() {
+        let content: DailyRevisionContent = serde_json::from_value(json!({
+            "schema_version":1, "manual_entry_ids":[], "open_questions":["Old repeated question"],
+            "workstreams":[{"id":"one","title":"Raw history", "evidence_event_ids":["a","b"],"outcome":[{"text":"Raw technical outcome","evidence_event_ids":["a"]}]}],
+            "recap":{"summary":{"text":"A short day <script> with **text**.","evidence_event_ids":["a","b"]},"topics":[
+                {"title":"Review","done":{"text":"Draft delivered.","evidence_event_ids":["a"]},"pending":{"text":"Live acceptance remains unverified.","evidence_event_ids":["b"]}}
+            ]}
+        })).unwrap();
+        let preview = render_daily_revision_preview(&content, &[], &[]);
+        assert_eq!(
+            preview,
+            format!(
+                "{}\n\n### Review\n\n- **Done:** Draft delivered.\n- **Pending:** Live acceptance remains unverified.",
+                safe_model_markdown_text("A short day <script> with **text**.")
+            )
+        );
+        assert!(!preview.contains("Raw technical"));
+        assert!(!preview.contains("Old repeated"));
+        let excluded = SnapshotEvidence {
+            event_id: "b".into(),
+            available: true,
+            position: 0,
+            event_digest: "digest".into(),
+            disposition: Some("omit".into()),
+            related_event_id: None,
+            decision_actor: None,
+            decision_reason: None,
+            decided_at: None,
+        };
+        assert_eq!(
+            render_daily_revision_preview(&content, &[], &[excluded]),
+            "### Review\n\n- **Done:** Draft delivered."
+        );
     }
 
     #[test]

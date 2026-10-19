@@ -16,6 +16,7 @@ const dailyAssets = Object.fromEntries(await Promise.all([
   "daily.js",
   "daily-navigation.js",
   "daily-helpers.js",
+  "daily-recap.js",
   "daily-references.js",
   "daily-settings.js",
   "daily-generation.js",
@@ -2421,4 +2422,120 @@ test("Untouched partial-expiry amendment omits failed semantic mode and model", 
   await page.locator("#generation-model-picker").selectOption({label:"Local / small"});
   await page.locator("#generate").click();
   await expect.poll(()=>bodies[1]).toEqual({replace_edited:false,preparation_mode:"semantic",connection_id:"environment",model:"small"});
+});
+
+test("Editorial recap is short, editable and keeps supporting reports", async ({ page }) => {
+  await mockDaily(page);
+  const data = dailyResponse();
+  data.current_revision.origin = "structured_edit";
+  data.current_revision.content.open_questions = ["Confirm outstanding provider acceptance."];
+  const fact = text => ({ text, evidence_event_ids: ["evt_1"] });
+  data.current_revision.content.recap = {
+    summary: fact("The Daily review is ready locally. Provider acceptance still needs checking."),
+    topics: [{ title: "Daily review", done: fact("Built and checked the review flow."), pending: fact("Check live provider acceptance.") }]
+  };
+  data.preview_markdown = "The Daily review is ready locally. Provider acceptance still needs checking.\n\n### Daily review\n\n- **Done:** Built and checked the review flow.\n- **Pending:** Check live provider acceptance.";
+  const originalWork = structuredClone(data.current_revision.content.workstreams);
+  let saved;
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  await page.route("**/api/v2/daily/2026-09-08/candidate", route => {
+    saved = route.request().postDataJSON();
+    data.current_revision.content = saved.content;
+    data.current_revision.id = "revision_2";
+    return route.fulfill({ json: { id: "revision_2" } });
+  });
+  await openDaily(page);
+  const support = page.locator(".supporting-activity");
+  await expect(support).not.toHaveAttribute("open", "");
+  await expect(page.getByText("Built a predictable Daily review.", { exact: true })).toBeHidden();
+  await expect(page.getByText("Confirm outstanding provider acceptance.", { exact: true })).toBeHidden();
+  await support.locator(":scope > summary").click();
+  await expect(page.getByText("Confirm outstanding provider acceptance.", { exact: true })).toBeVisible();
+  await support.locator(":scope > summary").click();
+  await expect(page.locator("#readable-draft")).toContainText("Check live provider acceptance.");
+  await page.evaluate(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async text => { window.copiedDraft = text; } } }));
+  await page.getByRole("button", { name: "Copy draft", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.copiedDraft)).toBe(data.preview_markdown);
+  await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+  await expect(page.getByLabel("Workstream 1 title")).toBeDisabled();
+  await page.getByLabel("Day summary", { exact: true }).fill("Reviewed the local Daily flow; live acceptance remains pending.");
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.getByRole("button", { name: "Next day", exact: true }).click();
+  await expect(page.getByLabel("Day summary", { exact: true })).toHaveValue("Reviewed the local Daily flow; live acceptance remains pending.");
+  await page.getByRole("button", { name: "Save edits", exact: true }).click();
+  await expect.poll(() => saved?.content.recap.summary.text).toBe("Reviewed the local Daily flow; live acceptance remains pending.");
+  expect(saved.expected_revision_id).toBe("revision_1");
+  expect(saved.content.workstreams).toEqual(originalWork);
+  await page.reload();
+  await expect(page.locator("#readable-draft")).toContainText("Reviewed the local Daily flow; live acceptance remains pending.");
+  await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+  await page.getByLabel("Day summary", { exact: true }).fill("Unsaved recap");
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Cancel editing", exact: true }).click();
+  await expect(page.locator("#readable-draft")).toContainText("Reviewed the local Daily flow; live acceptance remains pending.");
+});
+
+test("Owner can add and remove an evidence-linked short recap", async ({ page }) => {
+  await mockDaily(page);
+  const data = dailyResponse();
+  let saved;
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  await page.route("**/api/v2/daily/2026-09-08/candidate", route => {
+    saved = route.request().postDataJSON();
+    data.current_revision.content = saved.content;
+    data.current_revision.id = "revision_2";
+    return route.fulfill({ json: { id: "revision_2" } });
+  });
+  await openDaily(page);
+  await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+  await page.getByRole("button", { name: "Add short recap", exact: true }).click();
+  await page.getByLabel("Day summary", { exact: true }).fill("Improved the Daily review flow.");
+  await page.getByLabel("Day summary supporting reports", { exact: true }).selectOption(["evt_1"]);
+  await page.getByLabel("Topic 1 title", { exact: true }).fill("Daily review");
+  await page.getByLabel("Done for topic 1", { exact: true }).fill("Implemented the review flow.");
+  await page.getByLabel("Done for topic 1 supporting reports", { exact: true }).selectOption(["evt_1"]);
+  await page.getByRole("button", { name: "Save edits", exact: true }).click();
+  await expect.poll(() => saved?.content.recap.topics[0].done.evidence_event_ids).toEqual(["evt_1"]);
+  await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+  await page.getByRole("button", { name: "Remove recap", exact: true }).click();
+  await expect(page.getByLabel("Workstream 1 title")).toBeEnabled();
+  await page.getByRole("button", { name: "Save edits", exact: true }).click();
+  await expect.poll(() => saved?.content.recap).toBeUndefined();
+});
+
+test("Omitting one cited source hides whole editorial prose without splicing", async ({ page }) => {
+  await mockDaily(page);
+  const data = dailyResponse();
+  data.current_snapshot_evidence.push({ event_id: "evt_2", disposition: "omit" });
+  data.current_revision.content.workstreams[0].evidence_event_ids.push("evt_2");
+  data.current_revision.content.recap = {
+    summary: { text: "Mixed-source summary must disappear entirely.", evidence_event_ids: ["evt_1", "evt_2"] },
+    topics: [{ title: "Review", done: { text: "Kept supported outcome.", evidence_event_ids: ["evt_1"] }, pending: { text: "Omitted pending interpretation.", evidence_event_ids: ["evt_2"] } }]
+  };
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  await openDaily(page);
+  const draft = page.locator("#readable-draft");
+  await expect(draft).not.toContainText("Mixed-source summary must disappear entirely.");
+  await expect(draft).not.toContainText("Omitted pending interpretation.");
+  await expect(draft).toContainText("Kept supported outcome.");
+  await expect(draft).toContainText("Some recap text is hidden");
+});
+
+test("Untouched recap preserves citation order and does not block navigation", async ({ page }) => {
+  await mockDaily(page);
+  const data = dailyResponse();
+  data.current_revision.origin = "structured_edit";
+  data.current_revision.content.workstreams[0].evidence_event_ids.push("evt_2");
+  data.current_snapshot_evidence.push({ event_id: "evt_2", disposition: "include" });
+  data.current_revision.content.recap = {
+    summary: { text: "Both reported changes are retained.", evidence_event_ids: ["evt_2", "evt_1"] },
+    topics: [{ title: "Review", done: { text: "Reviewed the changes.", evidence_event_ids: ["evt_2", "evt_1"] } }]
+  };
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  let dialogs = 0;
+  page.on("dialog", dialog => { dialogs++; return dialog.dismiss(); });
+  await openDaily(page);
+  await page.getByRole("button", { name: "Next day", exact: true }).click();
+  await expect(page.getByLabel("Daily log date")).toHaveValue("2026-09-09");
+  expect(dialogs).toBe(0);
 });

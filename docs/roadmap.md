@@ -304,6 +304,82 @@ the associated pull request and lifecycle report.
 
 ### Next Product KB ingestion delivery
 
+**Human Daily recap — authorized 2026-10-19 (implemented and locally deployed).**
+The owner requests a short human paragraph and a few topics showing Done versus
+Pending. Reuse the clean local branch `codex/source-highlight-coverage`, starting
+at `9573c44`; root owns this record, UI, integration and local deployment.
+Factory Sol/high planning recommends a separate editorial recap, authored by the
+owner or an authorized writing agent, using existing immutable candidate edits.
+Sol/medium owns bounded backend implementation; independent Sol/high review
+follows. Ponytail lite limits the delivery to one paragraph and one Done/Pending
+bullet per topic, with at most five topics. Automatic synthesis is not claimed.
+
+1. Add optional evidence-linked recap prose without changing source facts or
+   history. Validate snapshot citations, bounds and explicit structured-edit origin.
+2. Show and export the short recap; collapse the detailed reports in the app.
+   Existing drafts without recaps retain their current presentation. Source
+   exclusions hide entire dependent prose, never partial paraphrases.
+3. Support normal edit/save/cancel and revision conflict protection. Author an
+   actual October16 draft from retained evidence, including unresolved gates;
+   preserve the prior revision and note, and do not Apply it automatically.
+4. Independently review, run required checks, back up app data and deploy locally.
+   Product KB ingestion and automatic narrative generation remain separate work.
+
+| Scenario | Evidence | State |
+| --- | --- | --- |
+| Concise editorial recap | Independently checked October16 paragraph and three Done/Pending topics; new draft saved | Passed editorial example; not automatic synthesis |
+| Citation/revision safety | Snapshot ownership, whole-prose exclusions, legacy hashes, immutable revisions and stale-save rejection; all49 sources, nine groups and206 history cards preserved | Passed |
+| Editing/export | Chromium/Firefox save/cancel/reload/navigation/Copy; real release recap edit, reviewed Apply and restart | Passed |
+| Integrated delivery | Independent complete-task review, Rust/browser/Compose checks, verified backup and healthy local images | Passed; live signed-in visual check pending |
+
+The optional recap uses the normal authenticated candidate edit and immutable
+revision lifecycle. It exports one short paragraph plus topic Done/Pending
+bullets; supporting activity, source history and original open questions remain
+collapsed in the app. Models do not author recaps in this delivery. Citations
+identify supporting reports rather than verifying an editorial interpretation.
+Owners or explicitly authorized writing agents can add/edit/remove the recap.
+
+Independent review corrected two P2 issues: source-picker ordering could make
+an untouched recap appear dirty, and existing open questions disappeared from
+the supporting view. Regressions now cover reversed citations, navigation guards
+and collapsed questions. No remaining code findings were reported over the full
+14-path task diff, including the new asset. Final checks:288 Rust tests passed,
+13 opt-in tests ignored;238 browser tests passed, plus the final two-browser
+open-question assertion; format/client formatting/Clippy passed. Release Compose
+verified original source Apply, recap-only Apply, preservation of owner content,
+unchanged source/history and recap persistence after restart. The first smoke
+attempt could not read desktop Buildx state; isolated Docker configuration passed.
+
+The actual October16 recap was authored from all49 retained event messages and
+follow-ups. Independent review checked all seven prose units against seven
+distinct cited source events, narrowed the mobile-rejection claim to the tested
+manual-check path, and found no remaining factual issue. The draft explicitly
+keeps automatic-summary quality/KB work, PR9713 human/provider acceptance,
+broader browser checks and unconfirmed PR9828 remote CI separate from completed
+implementation and passed PR9713 CI. It is editorial prose, not a new automatic
+summary-quality evaluation or independent verification of the original reports.
+
+Normal compare-and-swap saved revision3
+`revision_c069bc50b9ef4797a2cf7e415f55e9ec` from revision2
+`revision_3603c98f015b41b085f53e30ab7d5d4d`. The rendered managed preview shrank
+from15710 to1305 characters (about92%); the short Markdown is180 whitespace
+words. Content excluding the recap, all nine workstreams,206 history cards,
+the evidence snapshot and manual notes are unchanged. The existing Markdown file
+hash is unchanged: no production Apply occurred. Private source, proposal,
+independent assessment and save evidence are outside the checkout under
+`/tmp/log-inbox-human-recap-evaluation-20261019/`.
+
+Both local services run matching built images and pass health/owner API checks.
+Before/after checks preserve October13–16 and19 notes/revisions and runtime
+bindings. Today's evidence grew from one to two concurrent arrivals; all backed-up
+IDs remain available. Offline primary backup passes quick_check with39 tables;
+rollback executables and receipts are in ignored
+`tmp/deployments/human-recap-20261019/`. An isolated browser reached the sign-in
+page; automatic approval review rejected creating a temporary plaintext credential
+copy, so that copy was not made. Authenticated API and Chromium/Firefox tests
+verified the delivered state; the live signed-in visual check remains unverified.
+Automatic recap writing and Product KB ingestion remain deferred.
+
 
 **Concise source summaries — authorized 2026-10-16 (implementation/capability validation).**
 The owner requests shorter summaries with the remaining outcomes and pending

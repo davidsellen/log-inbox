@@ -239,6 +239,15 @@ Requires `review:write` and CSRF. Body contains the exact current dismissed revi
 
 Requires `review:write` and CSRF. Body contains the exact `expected_revision_id` and a complete `DailyRevisionContent` object. The storage boundary validates schema version, manual-entry ownership, unique workstreams, canonical-link shape, complete snapshot coverage, and evidence on every factual item. A successful edit creates a new immutable `structured_edit` revision; compare-and-swap prevents a stale editor from replacing a newer candidate. Arbitrary Markdown is not accepted by this route.
 
+Structured candidates may add optional `recap` with shape
+`{summary:{text,evidence_event_ids},topics:[{title,done?:{text,evidence_event_ids},pending?:{text,evidence_event_ids}}]}`.
+This is explicitly authored editorial prose, not a generated exact source quote.
+The existing workstreams/history must remain unchanged while it is present.
+Summary/topic/status bounds, snapshot citations and exclusion behavior follow the
+[Daily domain contract](daily-domain.md). Removing the property removes the recap;
+legacy requests without it retain their existing serialization. It does not
+authorize Markdown Apply, model generation or Knowledge promotion.
+
 Schema-version-1 workstreams may include `reported_history` entries containing
 `original_field` and a source-owned `fact`. Legacy absence means empty. Clients must
 retain the current history unchanged when saving titles or highlights; removing,

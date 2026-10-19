@@ -431,12 +431,39 @@ pub struct ManualDailyEntry {
 #[serde(deny_unknown_fields)]
 pub struct DailyRevisionContent {
     pub schema_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recap: Option<DailyRecap>,
     #[serde(default)]
     pub workstreams: Vec<DailyWorkstream>,
     #[serde(default)]
     pub manual_entry_ids: Vec<String>,
     #[serde(default)]
     pub open_questions: Vec<String>,
+}
+
+/// Explicit editorial prose; citations identify sources, not independent verification.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DailyRecap {
+    pub summary: DailyRecapFact,
+    pub topics: Vec<DailyRecapTopic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DailyRecapFact {
+    pub text: String,
+    pub evidence_event_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DailyRecapTopic {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done: Option<DailyRecapFact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<DailyRecapFact>,
 }
 
 impl DailyRevisionContent {

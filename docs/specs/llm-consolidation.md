@@ -217,6 +217,15 @@ Copy, Markdown preview and Apply export concise highlights, not the raw history;
 the original reports remain inspectable in Log Inbox. Evidence review exclusions
 apply equally to highlights and the history view.
 
+An explicit owner/authorized-agent `recap` edit can replace the exported
+highlights with a short editorial paragraph and Done/Pending topics. This is a
+separate interpretation with snapshot citations, not exact model-selected quotes;
+the model generation contract does not produce it. Existing source highlights
+and history remain unchanged and inspectable in collapsed supporting activity.
+Whole dependent recap paragraphs/bullets disappear on source exclusion. See the
+[Daily recap contract](daily-domain.md#workstream-and-proposal-revision) for bounds
+and review requirements; no automatic factual verification or KB approval is implied.
+
 Earlier follow-ups and blockers are historical reports, not automatically current
 actions. A latest explicit report may supply a scoped next-step highlight; older
 instructions remain selectable as explicitly earlier reports and are retained in source history. A newer timestamp never removes an independent unresolved gate from the offered choices.

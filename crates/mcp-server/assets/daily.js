@@ -14,6 +14,11 @@ import { createGenerationModels } from "./daily-generation.js";
 import { createSettings } from "./daily-settings.js";
 import { createHistory } from "./daily-history.js";
 import { createDashboard } from "./daily-dashboard.js";
+import {
+  renderRecapEditor,
+  readRecapEditor,
+  renderRecapView,
+} from "./daily-recap.js";
 // Daily owns the selected day, draft edits, generation, and polling.
 const state = {
   csrf: null,
@@ -657,6 +662,17 @@ function renderCandidateEditor(content) {
     root.append(p);
     return;
   }
+  renderRecapEditor(
+    root,
+    content,
+    state.data.automated_evidence?.events || [],
+    Boolean(state.csrf),
+    () => {
+      $("save-candidate").hidden = false;
+      syncSupportingEditor();
+      updateContextAdjustmentControls();
+    },
+  );
   content.workstreams.forEach((workstream, index) => {
     const section = document.createElement("section");
     section.className = "workstream";
@@ -693,6 +709,15 @@ function renderCandidateEditor(content) {
     }
     root.append(section);
   });
+  syncSupportingEditor();
+}
+
+function syncSupportingEditor() {
+  const locked = Boolean(readRecapEditor()) || !state.csrf;
+  for (const input of document.querySelectorAll(
+    "#candidate .title-input, #candidate textarea[data-workstream]",
+  ))
+    input.disabled = locked;
 }
 
 // Activity browsing and optional include/omit decisions.
@@ -1380,16 +1405,21 @@ async function saveCandidate() {
     .forEach((input, index) => {
       content.workstreams[index].title = input.value;
     });
-  document.querySelectorAll("#candidate textarea").forEach((input) => {
-    const fact =
-      content.workstreams[Number(input.dataset.workstream)][
-        input.dataset.field
-      ][Number(input.dataset.fact)];
-    if (fact.text.replace(/\r\n?/g, "\n") !== input.value) {
-      fact.text = input.value;
-      delete fact.source_clauses;
-    }
-  });
+  document
+    .querySelectorAll("#candidate textarea[data-workstream]")
+    .forEach((input) => {
+      const fact =
+        content.workstreams[Number(input.dataset.workstream)][
+          input.dataset.field
+        ][Number(input.dataset.fact)];
+      if (fact.text.replace(/\r\n?/g, "\n") !== input.value) {
+        fact.text = input.value;
+        delete fact.source_clauses;
+      }
+    });
+  const recap = readRecapEditor();
+  if (recap) content.recap = recap;
+  else delete content.recap;
   try {
     await api(`/api/v2/daily/${state.date}/candidate`, {
       method: "PUT",
@@ -1599,6 +1629,25 @@ function renderCandidate(content) {
       )
       .map((item) => item.event_id),
   );
+  let supportingRoot = root;
+  if (content.recap) {
+    renderRecapView(
+      root,
+      content.recap,
+      excluded,
+      state.data.automated_evidence?.events || [],
+    );
+    supportingRoot = el("details", "supporting-activity");
+    supportingRoot.append(
+      el("summary", "", "Supporting activity and source reports"),
+      el(
+        "p",
+        "subtle",
+        "These detailed reports support the recap. Only the short recap is copied or saved to your note.",
+      ),
+    );
+    root.append(supportingRoot);
+  }
   if (content.schema_version === 2) {
     for (const workstream of content.workstreams) {
       const entries = (workstream.activity || [])
@@ -1686,15 +1735,15 @@ function renderCandidate(content) {
           },
         ),
       );
-    root.append(section);
+    supportingRoot.append(section);
   }
   if (content.open_questions?.length) {
-    root.append(el("h3", "", "Open questions"));
+    supportingRoot.append(el("h3", "", "Open questions"));
     const list = document.createElement("ul");
     list.dataset.historyGroup = "";
     for (const question of content.open_questions)
       list.append(el("li", "", question));
-    root.append(list);
+    supportingRoot.append(list);
   }
 }
 
@@ -2014,7 +2063,7 @@ function unsavedDayChanges() {
     ...document.querySelectorAll("#candidate .title-input"),
   ].some((input, index) => input.value !== workstreams[index]?.title);
   const changedFact = [
-    ...document.querySelectorAll("#candidate textarea"),
+    ...document.querySelectorAll("#candidate textarea[data-workstream]"),
   ].some(
     (input) =>
       input.value !==
@@ -2025,6 +2074,8 @@ function unsavedDayChanges() {
   return (
     changedTitle ||
     changedFact ||
+    JSON.stringify(readRecapEditor()) !==
+      JSON.stringify(state.data?.current_revision?.content?.recap || null) ||
     contextDraftChanged() ||
     evidenceDecisionSelects().some(
       (input) =>

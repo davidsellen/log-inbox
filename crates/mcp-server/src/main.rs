@@ -4429,6 +4429,7 @@ async fn generate_daily_candidate_inner(
             ));
         }
         let content = serde_json::to_value(DailyRevisionContent {
+            recap: None,
             schema_version: 1,
             workstreams: Vec::new(),
             manual_entry_ids,
@@ -5374,6 +5375,7 @@ async fn dashboard_page() -> Response {
 async fn dashboard_asset(AxumPath(name): AxumPath<String>) -> Response {
     let (content_type, body) = match name.as_str() {
         "daily.js" => ("text/javascript", include_str!("../assets/daily.js")),
+        "daily-recap.js" => ("text/javascript", include_str!("../assets/daily-recap.js")),
         "daily-helpers.js" => (
             "text/javascript",
             include_str!("../assets/daily-helpers.js"),
@@ -5549,6 +5551,7 @@ mod knowledge_destination_tests {
             ("daily.js", "text/javascript"),
             ("daily-navigation.js", "text/javascript"),
             ("daily-helpers.js", "text/javascript"),
+            ("daily-recap.js", "text/javascript"),
             ("daily-references.js", "text/javascript"),
             ("daily-settings.js", "text/javascript"),
             ("daily.css", "text/css"),
@@ -5644,6 +5647,7 @@ mod knowledge_destination_tests {
     fn open_context_comparison_projection_keeps_randomized_assignment_blind() {
         let state = test_state();
         let content = DailyRevisionContent {
+            recap: None,
             schema_version: 1,
             workstreams: Vec::new(),
             manual_entry_ids: Vec::new(),

@@ -149,6 +149,25 @@ printf '%s' "$day" | jq -e --arg event "$event_id" '
   ($stream.reported_history | all(.fact.evidence_event_ids == [$event] and (.fact.source_clauses | length == 1)))
 ' >/dev/null
 test "$(grep -c 'log-inbox:daily:.*:begin' "$target")" -eq 1
+# A reviewed editorial recap replaces exported technical highlights while the
+# exact source reports and previous revision remain recoverable in app storage.
+curl -fsS --max-time 10 "$daily_url/assets/daily-recap.js" -H "$daily_headers" >/dev/null
+recap_edit=$(printf '%s' "$day" | jq --arg event "$event_id" '{expected_revision_id:.current_revision.id,content:(.current_revision.content + {recap:{summary:{text:"The local Daily workflow is working. External provider acceptance remains unverified.",evidence_event_ids:[$event]},topics:[{title:"Daily preparation",done:{text:"Local preparation and reviewed Apply verified.",evidence_event_ids:[$event]},pending:{text:"External provider acceptance remains unverified.",evidence_event_ids:[$event]}}]}})}')
+curl -fsS --max-time 10 -X PUT "$daily_url/api/v2/daily/$local_date/candidate" \
+  -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+  -b "$cookie_jar" --data-binary "$recap_edit" >/dev/null
+recap_day=$(curl -fsS --max-time 10 "$daily_url/api/v2/daily/$local_date" -H "$daily_headers" -b "$cookie_jar")
+test "$(printf '%s' "$recap_day" | jq -c '.current_revision.content.workstreams')" = "$(printf '%s' "$day" | jq -c '.current_revision.content.workstreams')"
+printf '%s' "$recap_day" | jq -e '.current_revision.origin == "structured_edit" and (.preview_markdown | contains("**Done:**")) and (.preview_markdown | contains("**Pending:**")) and (.preview_markdown | contains("**Outcome:**") | not)' >/dev/null
+apply_preview=$(curl -fsS --max-time 10 "$daily_url/api/v2/daily/$local_date/apply-preview" -H "$daily_headers" -b "$cookie_jar")
+apply=$(printf '%s' "$apply_preview" | jq '{expected_revision_id:.revision_id,expected_revision_content_hash:.revision_content_hash,destination_path:.destination_path,expected_old_block_hash:.expected_old_block_hash,intended_new_block_hash:.intended_new_block_hash,expected_target_exists:.expected_target_exists,expected_original_content_hash:.expected_original_content_hash,expected_updated_content_hash:.updated_content_hash}')
+curl -fsS --max-time 10 "$daily_url/api/v2/daily/$local_date/apply" \
+  -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+  -b "$cookie_jar" --data-binary "$apply" | jq -e '.operation.state == "finalized"' >/dev/null
+grep -F 'The local Daily workflow is working.' "$target" >/dev/null
+grep -F '**Pending:** External provider acceptance remains unverified.' "$target" >/dev/null
+grep -F 'Owner content before the managed block.' "$target" >/dev/null
+if grep -F '**Outcome:**' "$target" >/dev/null; then exit 1; fi
 applied_hash=$(sha256sum "$target" | awk '{print $1}')
 reported_history=$(printf '%s' "$day" | jq -c '[.current_revision.content.workstreams[].reported_history]')
 
@@ -171,6 +190,7 @@ done
 test "$(sha256sum "$target" | awk '{print $1}')" = "$applied_hash"
 restarted_day=$(curl -fsS --max-time 10 "$daily_url/api/v2/daily/$local_date" -H "$daily_headers" -b "$cookie_jar")
 printf '%s' "$restarted_day" | jq -e '.apply_status.state == "finalized" and .day.review_status == "applied"' >/dev/null
+printf '%s' "$restarted_day" | jq -e '.current_revision.content.recap.summary.text == "The local Daily workflow is working. External provider acceptance remains unverified."' >/dev/null
 test "$(printf '%s' "$restarted_day" | jq -c '[.current_revision.content.workstreams[].reported_history]')" = "$reported_history"
 
 printf 'Compose Daily smoke passed for %s\n' "$local_date"

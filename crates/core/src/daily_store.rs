@@ -1452,6 +1452,17 @@ impl Store {
                 .as_deref()
                 .map(serde_json::from_str::<Value>)
                 .transpose()?;
+            let edited: DailyRevisionContent = serde_json::from_value(content.clone())?;
+            if edited.recap.is_some() {
+                let previous: DailyRevisionContent = previous
+                    .as_ref()
+                    .context("Daily recap requires an existing structured candidate")
+                    .and_then(|value| serde_json::from_value(value.clone()).map_err(Into::into))?;
+                anyhow::ensure!(
+                    edited.workstreams == previous.workstreams,
+                    "Daily recap edits must retain the existing workstreams and source history"
+                );
+            }
             anyhow::ensure!(
                 history(content)?
                     == previous
@@ -2417,6 +2428,51 @@ impl Store {
             matches!(content.schema_version, 1 | 2),
             "unsupported daily revision schema"
         );
+        if let Some(recap) = &content.recap {
+            anyhow::ensure!(
+                content.schema_version == 1 && origin == "structured_edit",
+                "Daily recaps require an explicit structured edit of a structured candidate"
+            );
+            let snapshot = snapshot.context("Daily recaps require a source evidence snapshot")?;
+            let available = snapshot.event_ids.iter().collect::<HashSet<_>>();
+            let text_length = |text: &str, maximum: usize| -> Result<usize> {
+                let length = text.chars().count();
+                anyhow::ensure!(
+                    !text.trim().is_empty()
+                        && length <= maximum
+                        && !text.chars().any(char::is_control),
+                    "Daily recap text must be a bounded nonempty single paragraph"
+                );
+                Ok(length)
+            };
+            let validate_fact = |fact: &crate::models::DailyRecapFact, maximum| -> Result<usize> {
+                let length = text_length(&fact.text, maximum)?;
+                let ids = fact.evidence_event_ids.iter().collect::<HashSet<_>>();
+                anyhow::ensure!(
+                    !ids.is_empty()
+                        && ids.len() == fact.evidence_event_ids.len()
+                        && ids.iter().all(|id| available.contains(id)),
+                    "Daily recap citations must be unique source IDs from this snapshot"
+                );
+                Ok(length)
+            };
+            anyhow::ensure!(
+                (1..=5).contains(&recap.topics.len()),
+                "Daily recap requires one to five topics"
+            );
+            let mut total = validate_fact(&recap.summary, 1000)?;
+            for topic in &recap.topics {
+                total += text_length(&topic.title, 80)?;
+                anyhow::ensure!(
+                    topic.done.is_some() || topic.pending.is_some(),
+                    "Daily recap topic requires Done or Pending text"
+                );
+                for fact in [&topic.done, &topic.pending].into_iter().flatten() {
+                    total += validate_fact(fact, 320)?;
+                }
+            }
+            anyhow::ensure!(total <= 4000, "Daily recap exceeds its total text limit");
+        }
         if content.is_activity_record() {
             anyhow::ensure!(
                 origin == "structured_edit" && context_snapshot.is_none(),
@@ -3369,6 +3425,178 @@ mod tests {
     }
 
     #[test]
+    fn editorial_recaps_validate_sources_and_preserve_the_source_revision() {
+        use crate::models::{DailyRecap, DailyRecapFact, DailyRecapTopic};
+        let fixture = context_comparison_fixture();
+        let original: DailyRevisionContent =
+            serde_json::from_value(fixture.source.content.clone()).unwrap();
+        let legacy = serde_json::to_value(&original).unwrap();
+        assert!(legacy.get("recap").is_none());
+        assert_eq!(
+            digest(serde_json::to_string(&legacy).unwrap().as_bytes()),
+            fixture.source.content_hash
+        );
+        let fact = DailyRecapFact {
+            text: "Implemented the draft; live acceptance remains pending.".into(),
+            evidence_event_ids: fixture.snapshot.event_ids.clone(),
+        };
+        let mut content = original.clone();
+        content.recap = Some(DailyRecap {
+            summary: fact.clone(),
+            topics: vec![DailyRecapTopic {
+                title: "Daily review".into(),
+                done: Some(fact.clone()),
+                pending: Some(fact),
+            }],
+        });
+        let validate = |value: &DailyRevisionContent, origin| {
+            fixture.store.validate_daily_revision_content(
+                &fixture.profile.id,
+                fixture.date,
+                origin,
+                value,
+                Some(&fixture.snapshot),
+                Some(&fixture.context_snapshot),
+            )
+        };
+        validate(&content, "structured_edit").unwrap();
+        for origin in ["generated", "regenerated", "manual"] {
+            assert!(validate(&content, origin).is_err());
+        }
+        let mut bad = content.clone();
+        bad.schema_version = 2;
+        assert!(validate(&bad, "structured_edit").is_err());
+        for ids in [
+            vec![],
+            vec!["forged".into()],
+            vec![fixture.snapshot.event_ids[0].clone(); 2],
+        ] {
+            let mut bad = content.clone();
+            bad.recap.as_mut().unwrap().summary.evidence_event_ids = ids;
+            assert!(validate(&bad, "structured_edit").is_err());
+        }
+        for text in ["".into(), "one\ntwo".into(), "x".repeat(1001)] {
+            let mut bad = content.clone();
+            bad.recap.as_mut().unwrap().summary.text = text;
+            assert!(validate(&bad, "structured_edit").is_err());
+        }
+        let mut bad = content.clone();
+        bad.recap.as_mut().unwrap().topics[0].done = None;
+        bad.recap.as_mut().unwrap().topics[0].pending = None;
+        assert!(validate(&bad, "structured_edit").is_err());
+        let mut bad = content.clone();
+        bad.recap.as_mut().unwrap().topics.clear();
+        assert!(validate(&bad, "structured_edit").is_err());
+        let mut bad = content.clone();
+        let topic = bad.recap.as_ref().unwrap().topics[0].clone();
+        bad.recap.as_mut().unwrap().topics = vec![topic; 6];
+        assert!(validate(&bad, "structured_edit").is_err());
+        let mut bad = content.clone();
+        let recap = bad.recap.as_mut().unwrap();
+        recap.summary.text = "s".repeat(1000);
+        let mut topic = recap.topics[0].clone();
+        topic.title = "t".repeat(80);
+        topic.done.as_mut().unwrap().text = "d".repeat(320);
+        topic.pending.as_mut().unwrap().text = "p".repeat(320);
+        recap.topics = vec![topic; 5];
+        assert!(
+            validate(&bad, "structured_edit")
+                .unwrap_err()
+                .to_string()
+                .contains("total text limit")
+        );
+        let mut forged = serde_json::to_value(&content).unwrap();
+        forged["recap"]["summary"]["source_clauses"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<DailyRevisionContent>(forged).is_err());
+        let mut bad = content.clone();
+        bad.workstreams[0].title = "Changed source".into();
+        assert!(
+            fixture
+                .store
+                .create_proposal_revision_with_context(
+                    &fixture.profile.id,
+                    fixture.date,
+                    Some(&fixture.snapshot.id),
+                    &fixture.context_snapshot.id,
+                    "structured_edit",
+                    &serde_json::to_value(&bad).unwrap()
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("retain the existing workstreams")
+        );
+        let saved = fixture
+            .store
+            .create_proposal_revision_if_current_with_context(
+                &fixture.profile.id,
+                fixture.date,
+                Some(&fixture.snapshot.id),
+                &fixture.context_snapshot.id,
+                "structured_edit",
+                &serde_json::to_value(&content).unwrap(),
+                &fixture.source.id,
+            )
+            .unwrap();
+        assert!(
+            fixture
+                .store
+                .create_proposal_revision_if_current_with_context(
+                    &fixture.profile.id,
+                    fixture.date,
+                    Some(&fixture.snapshot.id),
+                    &fixture.context_snapshot.id,
+                    "structured_edit",
+                    &serde_json::to_value(&content).unwrap(),
+                    &fixture.source.id
+                )
+                .is_err()
+        );
+        let reopened = Store::open(fixture.store.database_path().to_owned()).unwrap();
+        assert_eq!(
+            reopened
+                .current_proposal_revision(&fixture.profile.id, fixture.date)
+                .unwrap()
+                .unwrap()
+                .content,
+            saved.content
+        );
+        assert_eq!(
+            reopened
+                .proposal_revision(&fixture.source.id)
+                .unwrap()
+                .unwrap()
+                .content,
+            fixture.source.content
+        );
+        let roundtrip: DailyRevisionContent = serde_json::from_value(saved.content).unwrap();
+        assert_eq!(roundtrip.workstreams, original.workstreams);
+        let note = reopened
+            .create_manual_daily_entry(
+                &fixture.profile.id,
+                fixture.date,
+                "Additional owner note",
+                &[],
+            )
+            .unwrap();
+        let mut amended = roundtrip.clone();
+        amended.manual_entry_ids.push(note.id);
+        let amendment = reopened
+            .create_proposal_revision_if_current_with_context(
+                &fixture.profile.id,
+                fixture.date,
+                Some(&fixture.snapshot.id),
+                &fixture.context_snapshot.id,
+                "structured_edit",
+                &serde_json::to_value(&amended).unwrap(),
+                &saved.id,
+            )
+            .unwrap();
+        let amendment: DailyRevisionContent = serde_json::from_value(amendment.content).unwrap();
+        assert_eq!(amendment.recap, roundtrip.recap);
+        assert_eq!(amendment.workstreams, original.workstreams);
+    }
+
+    #[test]
     fn structured_edits_preserve_read_only_history() {
         let fixture = context_comparison_fixture();
         let mut content = fixture.without_context_content.clone();
@@ -3520,6 +3748,7 @@ mod tests {
         canonical_links: Vec<String>,
     ) -> DailyRevisionContent {
         DailyRevisionContent {
+            recap: None,
             schema_version: 1,
             workstreams: vec![DailyWorkstream {
                 id: "workstream:test".to_owned(),
