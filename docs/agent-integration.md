@@ -136,3 +136,46 @@ Register the global Streamable HTTP server with `codex mcp add log-inbox --url h
 ```
 
 The MCP client supplies `Authorization: Bearer <LOG_INBOX_API_KEY>` outside the workspace shell sandbox. Existing Codex sessions must restart after registration to discover the tool.
+
+## Submitting accepted work to Product KB
+
+Use `metadata.knowledge_submission` on the existing ingest envelope. Submission is
+an unreviewed producer claim. The owner captures the original redacted event in
+**Settings → Reference notes → Product KB submissions**, reviews its exact hash,
+then separately previews and confirms an update to an existing canonical note.
+No Daily draft or model is needed. Completion, reported human acceptance and Daily
+Apply never grant KB approval. See the [capture contract](specs/knowledge-capture.md)
+for the versioned payload, corrections and recovery.
+
+```json
+{
+  "source": "codex/workstation",
+  "message": "Owner accepted the plan; implementation has not started.",
+  "metadata": {
+    "task_id": "reviewed-plan-42",
+    "event_type": "complete",
+    "status": "succeeded",
+    "knowledge_submission": {
+      "schema_version": 1,
+      "submission_key": "plan-42-revision-1",
+      "plan_id": "plan-42",
+      "plan_revision": "1",
+      "product": "Log Inbox",
+      "modules": ["knowledge"],
+      "title": "Reviewed Knowledge capture plan",
+      "summary": "Capture original accepted work for separate owner review.",
+      "claims": [{"kind": "accepted", "text": "Plan accepted; implementation pending."}],
+      "constraints": ["Markdown changes require a separate exact preview and confirmation."],
+      "questions": ["Pilot usefulness remains to be assessed."]
+    }
+  }
+}
+```
+
+Use a stable submission key for exact retries. A correction uses a new key and
+`supersedes` naming the previous candidate ID, while keeping the same producer,
+product and plan ID. It requires fresh owner review; reusing a key with different
+content conflicts. Confirm the product from product navigation before reporting
+it. Do not submit a guessed product, generated Daily prose, secrets, source files,
+full diffs, or personal details. Artifact paths/digests are references; the service
+does not fetch them or treat a supplied digest as independent verification.

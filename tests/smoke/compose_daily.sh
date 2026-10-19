@@ -12,7 +12,7 @@ require_command() {
   }
 }
 
-for command_name in chown curl docker jq mktemp sha256sum stat; do
+for command_name in chown curl docker head jq mktemp sha256sum stat; do
   require_command "$command_name"
 done
 
@@ -23,7 +23,7 @@ export LOG_INBOX_SMOKE_GID="${LOG_INBOX_SMOKE_GID:-$(stat -c %g "$repo_root")}"
 export LOG_INBOX_SMOKE_DATA_DIR="$smoke_root/data"
 export LOG_INBOX_SMOKE_WORKSPACE_DIR="$smoke_root/workspace"
 compose="docker compose -p $project -f docker-compose.smoke.yml"
-mkdir -p "$LOG_INBOX_SMOKE_DATA_DIR" "$LOG_INBOX_SMOKE_WORKSPACE_DIR/Journal"
+mkdir -p "$LOG_INBOX_SMOKE_DATA_DIR" "$LOG_INBOX_SMOKE_WORKSPACE_DIR/Journal" "$LOG_INBOX_SMOKE_WORKSPACE_DIR/Products"
 
 cleanup() {
   status=$?
@@ -40,6 +40,10 @@ trap cleanup EXIT INT TERM
 local_date=$(date -u +%F)
 target="$LOG_INBOX_SMOKE_WORKSPACE_DIR/Journal/$local_date.md"
 printf '%s\n' '---' 'title: Existing owner note' '---' '' 'Owner content before the managed block.' >"$target"
+kb_target="$LOG_INBOX_SMOKE_WORKSPACE_DIR/Products/Smoke.md"
+printf '%s\n' '---' 'title: Synthetic product reference' '---' '' 'Owner product prose must survive.' '' '<!-- log-inbox:daily:smoke-existing:begin -->' 'Existing Daily block must survive byte for byte.' '<!-- log-inbox:daily:smoke-existing:end -->' '' >"$kb_target"
+kb_original_bytes=$(stat -c %s "$kb_target")
+kb_original_hash=$(sha256sum "$kb_target" | awk '{print $1}')
 chown -R "$LOG_INBOX_SMOKE_UID:$LOG_INBOX_SMOKE_GID" "$smoke_root"
 
 $compose up --build --detach --wait
@@ -171,6 +175,65 @@ if grep -F '**Outcome:**' "$target" >/dev/null; then exit 1; fi
 applied_hash=$(sha256sum "$target" | awk '{print $1}')
 reported_history=$(printf '%s' "$day" | jq -c '[.current_revision.content.workstreams[].reported_history]')
 
+# KB capture/promotion is a separate owner-reviewed flow. No Daily generation is
+# requested for this later synthetic producer event or its canonical write.
+collection=$(jq -n '{label:"Smoke product",purpose:"Disposable canonical write verification",roots:["Products"],exclusions:[],enabled:true}')
+collection_preview=$(curl -fsS --max-time 10 "$daily_url/api/v2/knowledge/collections/preview" \
+  -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+  -b "$cookie_jar" --data-binary "$collection")
+collection_save=$(printf '%s' "$collection_preview" | jq '{collection,preview_digest,expected_updated_at:null}')
+curl -fsS --max-time 10 "$daily_url/api/v2/knowledge/collections" \
+  -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+  -b "$cookie_jar" --data-binary "$collection_save" | jq -e '.changes_saved == true' >/dev/null
+kb_event_body=$(jq -n '{source:"smoke/knowledge",level:"info",message:"Synthetic accepted plan for disposable Compose smoke",metadata:{knowledge_submission:{schema_version:1,submission_key:"compose-kb-1",plan_id:"compose-product-plan",plan_revision:"r1",product:"Log Inbox",modules:["knowledge"],title:"Synthetic canonical capture",summary:"Capture a reviewed synthetic plan without inferring implementation.",claims:[{kind:"accepted",text:"Synthetic owner accepted this plan."}],constraints:["Synthetic fixture only; no deployment claim."]}}}')
+kb_event=$(curl -fsS --max-time 10 "$collector_url/v1/logs" \
+  -H 'Authorization: Bearer smoke-ingest-key' -H 'Content-Type: application/json' \
+  --data-binary "$kb_event_body")
+kb_event_id=$(printf '%s' "$kb_event" | jq -er 'select(.status == "stored") | .id')
+kb_capture=$(jq -n --arg id "$kb_event_id" '{source_event_id:$id}')
+kb_candidate=$(curl -fsS --max-time 10 "$daily_url/api/v2/knowledge/candidates" \
+  -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+  -b "$cookie_jar" --data-binary "$kb_capture")
+kb_candidate_id=$(printf '%s' "$kb_candidate" | jq -er '.candidate.id')
+kb_candidate_hash=$(printf '%s' "$kb_candidate" | jq -er '.candidate.candidate_hash')
+printf '%s' "$kb_candidate" | jq -e --arg event "$kb_event_id" '.candidate.source_event_id == $event and .candidate.review == null and .candidate.evidence_available == true and (.candidate.submission.claims | length == 1) and .candidate.submission.claims[0].kind == "accepted"' >/dev/null
+kb_review=$(jq -n --arg hash "$kb_candidate_hash" '{expected_candidate_hash:$hash,disposition:"accept",reason:"Owner review of exact synthetic Compose fixture"}')
+curl -fsS --max-time 10 "$daily_url/api/v2/knowledge/candidates/$kb_candidate_id/review" \
+  -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+  -b "$cookie_jar" --data-binary "$kb_review" | jq -e '.review.disposition == "accept" and .review.actor == "owner"' >/dev/null
+kb_preview_body=$(jq -n --arg hash "$kb_candidate_hash" '{candidate_hash:$hash,destination_path:"Products/Smoke.md"}')
+kb_preview=$(curl -fsS --max-time 10 "$daily_url/api/v2/knowledge/candidates/$kb_candidate_id/promotion/preview" \
+  -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+  -b "$cookie_jar" --data-binary "$kb_preview_body")
+# An external owner edit after preview must remain intact and block stale confirm.
+printf '%s\n' 'Owner edit after canonical preview.' >>"$kb_target"
+kb_stale_hash=$(sha256sum "$kb_target" | awk '{print $1}')
+kb_stale_id=$(printf '%s' "$kb_preview" | jq -er '.operation_id')
+kb_confirm=$(printf '%s' "$kb_preview" | jq '{preview_hash}')
+kb_stale_status=$(curl -sS --max-time 10 -o "$smoke_root/kb-stale.json" -w '%{http_code}' "$daily_url/api/v2/knowledge/promotions/$kb_stale_id/confirm" \
+  -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+  -b "$cookie_jar" --data-binary "$kb_confirm")
+test "$kb_stale_status" = 409
+test "$(sha256sum "$kb_target" | awk '{print $1}')" = "$kb_stale_hash"
+curl -fsS --max-time 10 -X DELETE "$daily_url/api/v2/knowledge/promotions/$kb_stale_id" \
+  -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -b "$cookie_jar" \
+  | jq -e '.state == "cancelled"' >/dev/null
+kb_preview=$(curl -fsS --max-time 10 "$daily_url/api/v2/knowledge/candidates/$kb_candidate_id/promotion/preview" \
+  -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+  -b "$cookie_jar" --data-binary "$kb_preview_body")
+kb_operation_id=$(printf '%s' "$kb_preview" | jq -er '.operation_id')
+kb_confirm=$(printf '%s' "$kb_preview" | jq '{preview_hash}')
+curl -fsS --max-time 10 "$daily_url/api/v2/knowledge/promotions/$kb_operation_id/confirm" \
+  -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+  -b "$cookie_jar" --data-binary "$kb_confirm" | jq -e '.state == "finalized"' >/dev/null
+test "$(head -c "$kb_original_bytes" "$kb_target" | sha256sum | awk '{print $1}')" = "$kb_original_hash"
+grep -F 'Owner edit after canonical preview.' "$kb_target" >/dev/null
+grep -F 'Synthetic canonical capture' "$kb_target" >/dev/null
+test "$(grep -c 'log-inbox:knowledge:.*:begin' "$kb_target")" -eq 1
+test "$(sha256sum "$target" | awk '{print $1}')" = "$applied_hash"
+kb_applied_hash=$(sha256sum "$kb_target" | awk '{print $1}')
+printf 'Compose KB capture, exact owner review, stale-target rejection and canonical preservation passed\n'
+
 $compose restart daily >/dev/null
 daily_port=$($compose port daily 8788 | awk -F: 'END {print $NF}')
 daily_url="http://127.0.0.1:$daily_port"
@@ -192,6 +255,20 @@ restarted_day=$(curl -fsS --max-time 10 "$daily_url/api/v2/daily/$local_date" -H
 printf '%s' "$restarted_day" | jq -e '.apply_status.state == "finalized" and .day.review_status == "applied"' >/dev/null
 printf '%s' "$restarted_day" | jq -e '.current_revision.content.recap.summary.text == "The local Daily workflow is working. External provider acceptance remains unverified."' >/dev/null
 test "$(printf '%s' "$restarted_day" | jq -c '[.current_revision.content.workstreams[].reported_history]')" = "$reported_history"
+
+# Restart preserves both immutable approval and the finalized KB journal. Repeating
+# the exact confirmation is idempotent and does not create a second block or day.
+curl -fsS --max-time 10 "$daily_url/api/v2/knowledge/candidates/$kb_candidate_id" \
+  -H "$daily_headers" -b "$cookie_jar" | jq -e --arg hash "$kb_candidate_hash" '.candidate.candidate_hash == $hash and .candidate.review.disposition == "accept"' >/dev/null
+curl -fsS --max-time 10 "$daily_url/api/v2/knowledge/promotions/$kb_operation_id" \
+  -H "$daily_headers" -b "$cookie_jar" | jq -e '.state == "finalized"' >/dev/null
+curl -fsS --max-time 10 "$daily_url/api/v2/knowledge/promotions/$kb_operation_id/confirm" \
+  -H "$daily_headers" -H "$origin_header" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+  -b "$cookie_jar" --data-binary "$kb_confirm" | jq -e '.state == "finalized"' >/dev/null
+test "$(sha256sum "$kb_target" | awk '{print $1}')" = "$kb_applied_hash"
+test "$(grep -c 'log-inbox:knowledge:.*:begin' "$kb_target")" -eq 1
+printf '%s' "$restarted_day" | jq -e --arg attempt "$generation_id" --arg revision "$(printf '%s' "$recap_day" | jq -er '.current_revision.id')" '.generation_attempt.id == $attempt and .current_revision.id == $revision' >/dev/null
+printf 'Compose KB restart and repeated-confirm smoke passed without another Daily generation\n'
 
 printf 'Compose Daily smoke passed for %s\n' "$local_date"
 curl -fsS --max-time 10 "$daily_url/api/v2/settings/dashboard" -H "$daily_headers" -b "$cookie_jar" \

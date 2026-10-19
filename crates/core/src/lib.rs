@@ -8,6 +8,8 @@ pub use daily_store::validate_daily_evidence_content;
 pub mod generation_settings;
 mod generation_store;
 pub mod history;
+pub mod knowledge_capture;
+pub mod knowledge_promotion;
 pub mod models;
 pub mod redaction;
 pub mod settings;

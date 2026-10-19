@@ -36,6 +36,37 @@ pub fn plan_managed_block(
     markdown: &str,
     new_note_title: &str,
 ) -> Result<ManagedBlockPlan, String> {
+    plan_block(
+        ManagedBlockKind::Daily,
+        current,
+        block_id,
+        markdown,
+        new_note_title,
+    )
+}
+
+#[derive(Clone, Copy)]
+pub enum ManagedBlockKind {
+    Daily,
+    Knowledge,
+}
+
+impl ManagedBlockKind {
+    fn namespace(self) -> &'static str {
+        match self {
+            Self::Daily => "daily",
+            Self::Knowledge => "knowledge",
+        }
+    }
+}
+
+pub fn plan_block(
+    kind: ManagedBlockKind,
+    current: Option<&[u8]>,
+    block_id: &str,
+    markdown: &str,
+    new_note_title: &str,
+) -> Result<ManagedBlockPlan, String> {
     if block_id.is_empty()
         || !block_id
             .bytes()
@@ -52,8 +83,9 @@ pub fn plan_managed_block(
     let text =
         std::str::from_utf8(current).map_err(|_| "Markdown note must be valid UTF-8".to_owned())?;
     let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let begin = format!("<!-- log-inbox:daily:{block_id}:begin -->");
-    let end = format!("<!-- log-inbox:daily:{block_id}:end -->");
+    let namespace = kind.namespace();
+    let begin = format!("<!-- log-inbox:{namespace}:{block_id}:begin -->");
+    let end = format!("<!-- log-inbox:{namespace}:{block_id}:end -->");
     let markers = marker_ranges(text, &begin, &end)?;
     let body = normalize_line_endings(markdown.trim(), eol);
     let next_block = format!("{begin}{eol}{body}{eol}{end}");
@@ -228,10 +260,19 @@ pub fn digest(bytes: &[u8]) -> String {
 }
 
 pub fn managed_block_hash(current: &[u8], block_id: &str) -> Result<Option<String>, String> {
+    block_hash(ManagedBlockKind::Daily, current, block_id)
+}
+
+pub fn block_hash(
+    kind: ManagedBlockKind,
+    current: &[u8],
+    block_id: &str,
+) -> Result<Option<String>, String> {
     let text =
         std::str::from_utf8(current).map_err(|_| "Markdown note must be valid UTF-8".to_owned())?;
-    let begin = format!("<!-- log-inbox:daily:{block_id}:begin -->");
-    let end = format!("<!-- log-inbox:daily:{block_id}:end -->");
+    let namespace = kind.namespace();
+    let begin = format!("<!-- log-inbox:{namespace}:{block_id}:begin -->");
+    let end = format!("<!-- log-inbox:{namespace}:{block_id}:end -->");
     marker_ranges(text, &begin, &end).map(|range| {
         range.map(|(start, finish)| {
             digest(

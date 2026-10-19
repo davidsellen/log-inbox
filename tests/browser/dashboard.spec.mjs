@@ -18,6 +18,7 @@ const dailyAssets = Object.fromEntries(await Promise.all([
   "daily-helpers.js",
   "daily-recap.js",
   "daily-references.js",
+  "daily-kb.js",
   "daily-settings.js",
   "daily-generation.js",
   "daily-history.js",
@@ -163,6 +164,9 @@ async function mockDaily(page, { dailyStatus = 200, origin = "generated", freshn
       if (knowledgeStatus !== 200) return route.fulfill({ status: knowledgeStatus, contentType: "application/json", body: JSON.stringify({ error: "Knowledge fixture unavailable" }) });
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ workspace_id: "workspace_fixture", collections, count: collections.length, limit: 8 }) });
     }
+    if (url.pathname === "/api/v2/knowledge/submissions") return route.fulfill({ json: { events: [], considered_count: 0, limit: 500, truncated: false } });
+    if (url.pathname === "/api/v2/knowledge/candidates") return route.fulfill({ json: { candidates: [], truncated: false } });
+    if (url.pathname === "/api/v2/knowledge/promotions") return route.fulfill({ json: { operations: [] } });
     if (url.pathname === "/api/v2/knowledge/review" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(knowledgeState) });
     if (url.pathname === "/api/v2/knowledge/notes" && request.method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ notes: noteOptions, limit: 20 }) });
     if (url.pathname === "/api/v2/knowledge/mappings" && request.method() === "POST") {
@@ -2639,4 +2643,124 @@ test("Editorial recap keeps reviewed references visible only for visible citatio
   data.current_snapshot_evidence.push({ event_id: "evt_1", disposition: "omit" }, { event_id: "evt_3", disposition: "superseded_by" });
   await page.reload();
   await expect(related).toHaveCount(0);
+});
+
+test("Product KB captures original evidence and reviews the exact revision before canonical confirmation", async ({ page }) => {
+  const requests = await mockDaily(page);
+  const candidate = {
+    id: "kb_1", workspace_id: "workspace_fixture", producer_source: "codex/test",
+    source_event_id: "submission_1", source_event_digest: "source-digest", candidate_hash: "candidate-hash",
+    evidence_available: true, superseded: false, review: null,
+    submission: { title: "Accepted <img src=x onerror=alert(1)> plan", summary: "Planning completed; implementation remains pending.", product: "Alpha", modules: ["Capture"], plan_id: "plan_1", plan_revision: "r1", claims: [{ kind: "accepted", text: "Owner accepted the capture plan", reported_acceptance: { actor: "owner", source: "conversation", at: "2026-10-19T12:00:00Z" } }], decisions: ["Separate capture from Daily"], constraints: ["Owner review required"], questions: [] }
+  };
+  let captured = false;
+  const mutations = [];
+  const preview = { operation_id: "promotion_1", preview_hash: "preview-hash", destination_path: "Products/Alpha.md", previous_block: "Previous <b>KB</b>", next_block: "New <script>KB</script>", state: "prepared" };
+  await page.route("**/api/v2/knowledge/**", async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    const body = request.method() === "POST" ? request.postDataJSON() : null;
+    if (body) mutations.push({ path, body, csrf: request.headers()["x-csrf-token"] });
+    if (path === "/api/v2/knowledge/submissions") return route.fulfill({ json: { events: [{ id: "submission_1", source: "codex/test", message: "Task planning completed", metadata: { knowledge_submission: candidate.submission } }], considered_count: 500, limit: 500, truncated: true } });
+    if (path === "/api/v2/knowledge/candidates" && body) { captured = true; return route.fulfill({ json: { candidate } }); }
+    if (path === "/api/v2/knowledge/candidates") return route.fulfill({ json: { candidates: captured ? [candidate] : [], truncated: false } });
+    if (path === "/api/v2/knowledge/candidates/kb_1/review") { candidate.review = { ...body, actor: "owner" }; return route.fulfill({ json: { review: candidate.review } }); }
+    if (path.endsWith("/promotion/preview")) return route.fulfill({ json: preview });
+    if (path.endsWith("/confirm")) return route.fulfill({ json: { state: "finalized" } });
+    if (path === "/api/v2/knowledge/promotions") return route.fulfill({ json: { operations: [] } });
+    if (path === "/api/v2/knowledge/candidates/kb_1") return route.fulfill({ json: { candidate } });
+    return route.fallback();
+  });
+  await openDaily(page);
+  await page.locator("#settings").click();
+  await page.locator("#reference-settings").click();
+  const kb = page.locator("#product-kb-submissions");
+  await expect(kb).toBeVisible();
+  await expect(kb).toContainText("Older submissions are not included");
+  await kb.getByRole("button", { name: "Capture submission", exact: true }).click();
+  await expect(kb).toContainText("Awaiting owner review");
+  await expect(kb.getByRole("button", { name: "Preview KB update" })).toHaveCount(0);
+  await expect(kb.locator("img, script")).toHaveCount(0);
+  await kb.getByLabel("Review reason").fill("Compared exact original plan");
+  await kb.getByRole("button", { name: "Accept exact revision" }).click();
+  await kb.getByLabel("Canonical note path").fill("Products/Alpha.md");
+  await kb.getByRole("button", { name: "Preview KB update" }).click();
+  await expect(kb.locator("pre").filter({ hasText: "Previous <b>KB</b>" })).toBeVisible();
+  await expect(kb.locator("pre").filter({ hasText: "New <script>KB</script>" })).toBeVisible();
+  expect(mutations.filter(item => item.path.endsWith("/confirm"))).toHaveLength(0);
+  await kb.getByRole("button", { name: "Confirm KB update" }).click();
+  await expect(kb).toContainText("Canonical KB update confirmed");
+  expect(mutations.find(item => item.path.endsWith("/review")).body).toEqual({ expected_candidate_hash: "candidate-hash", disposition: "accept", reason: "Compared exact original plan" });
+  expect(mutations.find(item => item.path.endsWith("/confirm")).body).toEqual({ preview_hash: "preview-hash" });
+  expect(mutations.every(item => item.csrf === "csrf_fixture")).toBe(true);
+  expect(requests.some(item => item.path.endsWith("/generate") || item.path.endsWith("/apply"))).toBe(false);
+});
+
+test("Product KB recovers a pending canonical operation and retries the same confirmation", async ({ page }) => {
+  await mockDaily(page);
+  const preview = { operation_id: "durable_1", preview_hash: "durable-preview", destination_path: "Products/Alpha.md", previous_block: "Old block", next_block: "Reviewed block", state: "prepared" };
+  let confirms = 0;
+  const confirmed = [];
+  await page.route("**/api/v2/knowledge/promotions**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/confirm")) {
+      confirms++;
+      confirmed.push({ path, body: route.request().postDataJSON() });
+      return route.fulfill({ status: confirms === 1 ? 503 : 200, json: confirms === 1 ? { error: "Write interrupted; retry this operation" } : { state: "finalized" } });
+    }
+    return route.fulfill({ json: path.endsWith("durable_1") ? preview : { operations: [preview] } });
+  });
+  await openDaily(page);
+  await page.locator("#settings").click();
+  await page.locator("#reference-settings").click();
+  const kb = page.locator("#product-kb-submissions");
+  await kb.getByRole("button", { name: /Products\/Alpha.md · prepared · durable_1/ }).click();
+  await expect(kb.locator("pre").filter({ hasText: "Reviewed block" })).toBeVisible();
+  await kb.getByRole("button", { name: "Confirm KB update" }).click();
+  await expect(kb).toContainText("Write interrupted; retry this operation");
+  await kb.getByRole("button", { name: "Confirm KB update" }).click();
+  await expect(kb).toContainText("Canonical KB update confirmed");
+  expect(confirmed).toHaveLength(2);
+  expect(confirmed[0]).toEqual(confirmed[1]);
+});
+
+test("Product KB discards unfinished previews and confirms only prepared or writing operations", async ({ page }) => {
+  await mockDaily(page);
+  const states = ["prepared", "writing", "conflict", "cancelled", "finalized"];
+  let operations = states.map(state => ({ operation_id: `operation_${state}`, preview_hash: `hash_${state}`, destination_path: "Products/Alpha.md", previous_block: "Exact old block", next_block: "Exact new block", state }));
+  const deleted = [];
+  const confirmed = [];
+  await page.route("**/api/v2/knowledge/promotions**", async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    const operation = operations.find(item => path.endsWith(item.operation_id));
+    if (request.method() === "DELETE") {
+      deleted.push({ path, csrf: request.headers()["x-csrf-token"] });
+      operations = operations.filter(item => item.operation_id !== operation.operation_id);
+      return route.fulfill({ json: { ...operation, state: "cancelled" } });
+    }
+    if (path.endsWith("/confirm")) confirmed.push(path);
+    return route.fulfill({ json: operation || { operations } });
+  });
+  await openDaily(page);
+  await page.locator("#settings").click();
+  await page.locator("#reference-settings").click();
+  const kb = page.locator("#product-kb-submissions");
+  for (const state of states) {
+    await kb.getByRole("button", { name: `Products/Alpha.md · ${state} · operation_${state}`, exact: true }).click();
+    await expect(kb.locator("pre").filter({ hasText: "Exact new block" })).toBeVisible();
+    const confirm = kb.getByRole("button", { name: "Confirm KB update", exact: true });
+    if (["prepared", "writing"].includes(state)) await expect(confirm).toBeEnabled();
+    else await expect(confirm).toBeDisabled();
+    const discard = kb.getByRole("button", { name: "Discard KB preview", exact: true });
+    if (["cancelled", "finalized"].includes(state)) await expect(discard).toHaveCount(0);
+    else {
+      await discard.click();
+      await expect(kb).toContainText("KB preview discarded.");
+      await expect(confirm).toHaveCount(0);
+    }
+  }
+  expect(deleted.map(item => item.path)).toEqual(["prepared", "writing", "conflict"].map(state => `/api/v2/knowledge/promotions/operation_${state}`));
+  expect(deleted.every(item => item.csrf === "csrf_fixture")).toBe(true);
+  expect(confirmed).toEqual([]);
 });

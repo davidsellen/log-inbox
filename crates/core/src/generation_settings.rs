@@ -104,24 +104,32 @@ mod tests {
             "preserved-value".to_owned(),
         )]);
         store.set_preferences(&preferences).unwrap();
-        // Remove exactly the v27 additions to reproduce the actual populated v26 schema.
+        // Remove the additive v27-v29 objects to reproduce the populated v26 schema.
         store
             .connect()
             .unwrap()
             .execute_batch(
-                "DROP TRIGGER generation_revision_provenance_delete;
+                "DROP TRIGGER knowledge_promotion_immutable;
+            DROP TABLE knowledge_promotion_operations;
+            DROP TRIGGER knowledge_candidates_immutable_update;
+            DROP TRIGGER knowledge_candidates_immutable_delete;
+            DROP TRIGGER knowledge_dispositions_immutable_update;
+            DROP TRIGGER knowledge_dispositions_immutable_delete;
+            DROP TABLE knowledge_dispositions;
+            DROP TABLE knowledge_candidates;
+            DROP TRIGGER generation_revision_provenance_delete;
             DROP TRIGGER generation_attempt_provenance_delete;
             DROP TRIGGER generation_comparison_provenance_delete;
             DROP TABLE generation_provenance;
             DROP TABLE generation_settings;
-            DELETE FROM schema_migrations WHERE version=27;",
+            DELETE FROM schema_migrations WHERE version>=27;",
             )
             .unwrap();
         assert_eq!(store.schema_version().unwrap(), 26);
         drop(store);
         for _ in 0..2 {
             let upgraded = Store::open(path.clone()).unwrap();
-            assert_eq!(upgraded.schema_version().unwrap(), 27);
+            assert_eq!(upgraded.schema_version().unwrap(), 29);
             assert_eq!(
                 serde_json::to_value(upgraded.active_workspace_profile().unwrap().unwrap())
                     .unwrap(),

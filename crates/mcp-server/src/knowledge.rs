@@ -481,6 +481,45 @@ pub fn find_note_option(
         }))
 }
 
+/// Keep an explicitly confirmed update inside the same retrieval budgets as its source.
+pub(crate) fn validate_note_update_budget(
+    workspace: &InspectedWorkspace,
+    collections: &[KnowledgeCollection],
+    path: &str,
+    updated_bytes: usize,
+) -> Result<(), String> {
+    if updated_bytes as u64 > MAX_NOTE_BYTES {
+        return Err("The KB update would exceed the Reference note size limit".into());
+    }
+    let mut seen = BTreeSet::new();
+    let mut total = 0_u64;
+    for collection in collections.iter().filter(|collection| collection.enabled) {
+        let selection = workspace
+            .preview_markdown_sources(&collection.roots, &collection.exclusions, MAX_CATALOG_NOTES)
+            .map_err(|e| e.to_string())?;
+        for source in selection.sources {
+            if !seen.insert(source.path.clone()) || source.byte_len > MAX_NOTE_BYTES {
+                continue;
+            }
+            let len = if source.path == path {
+                updated_bytes as u64
+            } else {
+                source.byte_len
+            };
+            total = total
+                .checked_add(len)
+                .ok_or("Reference catalog size overflow")?;
+            if total > MAX_CATALOG_BYTES {
+                return Err("The KB update would exceed the Reference catalog size limit".into());
+            }
+        }
+    }
+    if !seen.contains(path) {
+        return Err("The KB target is no longer in the Reference catalog".into());
+    }
+    Ok(())
+}
+
 pub struct KnowledgeFingerprints {
     pub configuration_digest: String,
     pub catalog_digest: String,

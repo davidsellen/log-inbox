@@ -1,4 +1,5 @@
 import { $, el, action, identityLabel, noteTitle } from "./daily-helpers.js";
+import { createKnowledgeCapture } from "./daily-kb.js";
 // Reference setup owns its collections, links, search timers, and form drafts.
 // Daily supplies only the actions needed to return to or update its draft.
 export function createReferenceNotes({
@@ -10,6 +11,7 @@ export function createReferenceNotes({
   generate,
   activeAttempt,
 }) {
+  const capture = createKnowledgeCapture({ app, api });
   const state = {
     knowledge: null,
     knowledgeReview: null,
@@ -53,11 +55,13 @@ export function createReferenceNotes({
       review.status === "rejected" ? review.reason : null,
     );
     compactKnowledge();
+    $("knowledge-content").append(capture.root);
     const setup = $("knowledge-content").querySelectorAll(
       ":scope > .knowledge-details",
     )[1];
     if (setup && setupOpen) setup.open = true;
     state.knowledgeLoading = false;
+    await capture.load();
   }
 
   function compactKnowledge() {

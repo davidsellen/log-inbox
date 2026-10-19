@@ -40,6 +40,8 @@ mod evaluation;
 mod generation;
 mod history;
 pub mod knowledge;
+mod knowledge_capture;
+mod knowledge_promotion;
 mod llm;
 mod migration;
 mod providers;
@@ -429,6 +431,8 @@ async fn main() -> anyhow::Result<()> {
 fn build_router(state: AppState) -> Router {
     Router::new()
         .merge(providers::routes())
+        .merge(knowledge_capture::routes())
+        .merge(knowledge_promotion::routes())
         .route("/", get(dashboard_page))
         .route("/assets/{name}", get(dashboard_asset))
         .route("/favicon.ico", get(favicon))
@@ -2646,6 +2650,10 @@ async fn refocus_daily_apply(
         })));
     }
     if existing_operation.is_none() {
+        state
+            .store
+            .ensure_no_pending_knowledge_write(&profile.id, &input.destination_path)
+            .map_err(|error| ApiError::conflict(error.to_string()))?;
         ensure_context_applyable(&state, local_date)?;
     }
 
@@ -2848,6 +2856,10 @@ fn execute_daily_apply(
     material: &DailyApplyMaterial,
     mut operation: ApplyOperation,
 ) -> Result<ApplyOperation, ApiError> {
+    state
+        .store
+        .ensure_no_pending_knowledge_write(&operation.workspace_id, &operation.destination_path)
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
     if matches!(
         operation.state.as_str(),
         "failed" | "reconciliation_required"
@@ -3103,6 +3115,9 @@ fn recover_daily_apply(
     workspace: &InspectedWorkspace,
     mut operation: ApplyOperation,
 ) -> anyhow::Result<()> {
+    state
+        .store
+        .ensure_no_pending_knowledge_write(&operation.workspace_id, &operation.destination_path)?;
     let day = state
         .store
         .daily_day(&operation.workspace_id, operation.local_date)?
@@ -5380,6 +5395,7 @@ async fn dashboard_asset(AxumPath(name): AxumPath<String>) -> Response {
             "text/javascript",
             include_str!("../assets/daily-helpers.js"),
         ),
+        "daily-kb.js" => ("text/javascript", include_str!("../assets/daily-kb.js")),
         "daily-references.js" => (
             "text/javascript",
             include_str!("../assets/daily-references.js"),

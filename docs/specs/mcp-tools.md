@@ -40,3 +40,7 @@ M5 may add structured, bounded generation and inspection tools for explicitly te
 - the same journaled writer, conflict handling, and recovery protocol used by dashboard Apply.
 
 A token or tool invocation alone is not evidence of human review. No compatibility alias will restore the removed `stage_markdown_summary` or `apply_markdown_proposal` behavior.
+
+## Accepted-work submissions over existing ingestion
+
+`log_activity` can carry `metadata.knowledge_submission`; it remains an ingestion-only event. The dashboard separately captures, reviews and confirms any canonical update using the [accepted-work contract](knowledge-capture.md). No new MCP read/review/write tool or producer authority is added. This is the implemented dashboard write boundary; the future MCP write boundary above remains unimplemented.

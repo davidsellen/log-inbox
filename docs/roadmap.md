@@ -1,6 +1,6 @@
 # Daily Engineering Knowledge Roadmap
 
-Status: reviewed Daily workflow implemented; generated-summary usefulness and Product KB ingestion remain gated. Updated 2026-10-15. Initial baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
+Status: reviewed Daily workflow and direct accepted-work KB capture implemented locally; generated-summary usefulness and agent recall remain unproven. Updated 2026-10-19. Initial baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
 
 This roadmap defines the target direction, delivered foundation, and remaining delivery order. The [README](../README.md) and runtime specs describe the active Daily release; milestone checkboxes record implemented and pending work.
 
@@ -14,7 +14,7 @@ Keep Log Inbox a single-owner, self-hosted HTTP collector, dashboard, scheduler,
 - **Reference context is optional shared context:** human-maintained Markdown product/module notes can ground Daily drafts and, later, approved agent reads. It is not a prerequisite for a useful draft and is not an autonomous memory store.
 - **Settings configures the service:** workspace, dates, automation, model connection, retention, security, and integration.
 
-Next queued delivery: [bounded selection and reviewed Product KB ingestion](#next-product-kb-ingestion-delivery). The plan is recorded below; KB ingestion is not implemented.
+Current local delivery: [accepted-work KB capture](#accepted-work-kb-capture--2026-10-19), with explicit owner review and canonical confirmation. The earlier [bounded-selection/KB plan](#next-product-kb-ingestion-delivery) remains historical; generated-summary quality and a measured agent-recall pilot are still pending.
 
 ### Current delivery: make Daily understandable
 
@@ -1544,3 +1544,110 @@ These sources support design constraints, not claims that the roadmap is impleme
 - OWASP [CSRF](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html), [sessions](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html), [SSRF](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html), and [prompt injection](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html) — layered request, model and egress defenses.
 - MCP [Streamable HTTP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http) and [authorization](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization), revision 2026-07-28 — explicit protocol/security compatibility choices.
 - Basic Memory [lifecycle capture](https://docs.basicmemory.com/integrations/harness-capture) and [Cloud review suggestions](https://docs.basicmemory.com/whats-new/comments-and-suggestions), plus [Foam MCP](https://docs.foam.md/tools/cli/mcp/) — adjacent documented capabilities. Differentiate through the useful daily engineering review workflow, not Markdown/MCP alone.
+
+## Accepted-work KB capture — 2026-10-19
+
+Canonical task record for the owner's request to plan and fix feeding accepted work
+into Product KB. Starting HEAD/base `bb5a111aa60357940f1ba214e2328a3f667d9291`;
+branch `codex/accepted-work-kb-capture` (runtime-required prefix). Endpoint: local
+implementation and validation; no deployment or PR publication requested.
+
+Decision: implement direct original-source capture independently of Daily prose and
+model usefulness. The owner selected Product KB ingestion as the next work. Earlier
+Daily usefulness failures remain recorded; this scoped flow replaces the runtime
+coupling for accepted-work capture/review/promotion, without treating that gate as
+passed or enabling agent recall. Detailed domain, payload, API and recovery contract:
+[Accepted-work Knowledge capture](specs/knowledge-capture.md).
+
+Plan and acceptance:
+
+1. Receive a bounded structured submission through existing redacted ingestion;
+   retain independent plan/acceptance/implementation/verification/merge/deployment claims.
+2. Materialize immutable workspace-scoped candidates and exact owner dispositions.
+   Exact retries deduplicate, conflicts/forks fail, corrections supersede explicitly,
+   missing evidence cannot inherit approval. No Daily generation or Markdown write.
+3. Preview and confirm one existing eligible canonical note through distinct KB
+   blocks and the shared atomic writer. Freeze authority and exact bytes in an
+   additive KB journal; retain Daily and human content and provide restart recovery.
+4. Expose native Reference notes capture/review/preview/confirm/discard controls;
+   validate storage, authorization, stale edits, expiry, recovery and browser flow.
+5. Independent complete task-diff review, required repository checks and disposable
+   runtime validation. Coordinator owns this task record and integration.
+
+Initial implementation stage: plan, implementation, complete independent review, integrated Rust/browser validation and exact-final-source disposable Compose smoke passed. Commit, deployment and publication were separately authorized afterward; their records follow.
+Factory routing: bounded Sol/medium core and app workers; independent Sol/high
+reviewer; current chat coordinates. Ponytail lite applied for this implementation
+stage: reuse ingest, existing scopes/native DOM and atomic writer; no new dependency,
+service, model generation or recall interface.
+
+| Contract/scenario | Evidence | State |
+| --- | --- | --- |
+| Original-source capture without Daily; independent claims | Core/API fixtures including plan-only completed task | Passed |
+| Exact/concurrent retries, conflicting keys, explicit supersession, workspace scope | Core regression tests and immutable SQL constraints | Passed |
+| Expired/mutated source blocks fresh authority | Core digest/expiry tests | Passed |
+| Upgrade from populated v26/v27 and reopen; prior data retained | Core upgrade fixtures at schema29 | Passed |
+| Owner scope, bearer-only rejection, Host/Origin/CSRF, immutable review | Capture API integration regression | Passed |
+| Native review and exact confirmation/discard controls | Focused Chromium/Firefox and reference regressions | Passed |
+| Preserve human/Daily blocks, stale target/collection, crash before/after rename | Promotion integration and first live Compose/restart smoke | Passed |
+| Complete task diff and documentation consistency | Independent Sol/high full review against starting HEAD, tracked/untracked paths; focused followups retained | Passed; no remaining findings |
+| Required formatting, Clippy, workspace tests and browser tests | 307 Rust passed/13 ignored; 250 Chromium/Firefox passed; Rust/client format and Clippy passed | Passed |
+| Exact final source runtime | Release Compose HTTP capture/review/preview/confirm/stale409/restart/idempotence/no extra Daily generation; 13 runtime/source hashes identical before/after | Passed |
+
+Known scope: inline candidate editing uses a new corrected producer revision; KB
+audit records have no new automatic pruning policy. Source-backed canonical text
+may remain stale until a reviewed superseding update is explicitly confirmed. Useful
+agent recall remains a separate measured pilot. No owner vault note is changed by
+this development task; test writes use disposable workspaces.
+
+Review fixes: expose safe preview discard/cancellation, serialize one plan across canonical destinations, align review scopes, preserve all unfinished Daily write ownership and check it before a new journal is inserted, and reject updates exceeding per-note/aggregate Reference budgets. Regressions cover these paths. Full review uses checkout/branch above, HEAD/base/merge-base `bb5a111aa60357940f1ba214e2328a3f667d9291`; followups reviewed affected code/tests/docs after each fix. Actual disk-full/fsync fault injection for KB and arbitrary concurrent external-editor races remain unverified; the inherited atomic writer, synthesized staged/renamed recovery and live restart are tested.
+
+Final validation: `cargo test --workspace -- --test-threads=4` passed 307 tests with 13 ignored; `cargo clippy --workspace --all-targets -- -D warnings`, Rust formatting, client formatting, both browser engines (250 tests), shell syntax and documentation-link/diff checks passed. Initial sandbox runs could not start local provider mocks/browsers; permitted runs completed. One original 5-second generation test timed out under concurrent Docker/browser load; the final reduced-parallelism full suite passed without changing that test or its deadline. Final live smoke used only disposable synthetic data and matched the reviewed runtime files before and after its release build/run.
+
+
+### Local deployment — 2026-10-19
+
+The owner subsequently requested a commit and deployment to the existing local
+installation. Feature commit `f6408269a36bf45e36ff29ebbdc72fabd2bcae0b` on
+`codex/accepted-work-kb-capture` contains the reviewed/tested runtime. Built and
+started only the existing collector and Daily services using the same Compose
+project, provider override, environment, ports and mounts; the model service was
+left running. Both services report healthy at the existing loopback addresses.
+
+Before upgrade, stopped both app writers and copied their app data, then created
+and integrity-checked a consistent SQLite backup. Previous images are retained as
+local rollback tags. Recovery material and the deployment receipt are private,
+ignored files under `tmp/deployments/kb-capture-f640826`; do not restore the old
+schema snapshot over newly received evidence without reconciliation.
+
+Live verification: schema 27 → 29; all 1000 backed-up event IDs retained; nine existing
+protected configuration/Daily/review tables have identical row hashes; all 32
+tracked Daily/canonical-note hashes unchanged. Running image IDs match the new
+builds; environment, provider/workspace mounts and port bindings are unchanged.
+Authenticated submission/candidate/promotion GET endpoints returned 200, and the
+served KB client matches the committed asset. The live browser reaches normal
+owner sign-in; authenticated page interaction is left for the owner. The previous
+250 browser tests and exact-source release Compose workflow remain the UI and
+write/restart evidence. No owner candidate is accepted and no canonical note is
+written as part of deployment.
+
+Try the flow at `http://127.0.0.1:8788/?view=knowledge`: sign in and open Product KB
+submissions. The deployment's structured terminal report supplies real source
+material for capture and review, with implementation, verification and local
+deployment retained as separate reported claims. KB acceptance and canonical
+confirmation remain the owner's actions. No remote publication was requested.
+
+
+### KB flow PR publication — 2026-10-19
+
+After trying capture, review, preview and the completed canonical update, the owner
+requested [PR #4](https://github.com/davidsellen/log-inbox/pull/4). The PR targets
+`main`; its 26-path scope retains the reviewed KB implementation and local
+deployment documentation. The target at publication is `30e636b`, with merge-base
+`bb5a111`; their trees are identical, so the previous complete implementation
+review remains applicable. Publication review found no remaining actionable issues.
+The PR tracks current CI and readiness; local validation and deployment evidence
+remain recorded above. No merge is authorized by this publication request.
+
+UX follow-up: the owner finds the flow acceptable for this delivery and wants the
+experience improved. Refine that scope in follow-up work; this PR does not add a
+redesign or treat the first UI as the final experience.

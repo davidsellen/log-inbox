@@ -1,6 +1,6 @@
 # Markdown Workspace Policy
 
-The workspace contains user-owned Markdown. Log Inbox owns only the explicitly marked block for one reviewed Daily record.
+The workspace contains user-owned Markdown. Log Inbox owns only explicitly reviewed managed blocks: Daily records and separately confirmed Product KB updates.
 
 ## Allowed writes
 
@@ -20,3 +20,7 @@ The workspace contains user-owned Markdown. Log Inbox owns only the explicitly m
 Canonical product/engineering context is optional and must come from explicit workspace-scoped mappings or reviewed Knowledge collections. Repository branding alone never establishes a product identity.
 
 Atomic replacement and optimistic hashes reduce races but cannot guarantee conflict-free writes against an unrelated editor changing the file at the same instant. Conflicts stay visible and require reconciliation.
+
+## Explicitly reviewed Product KB blocks
+
+The [accepted-work capture contract](knowledge-capture.md#canonical-update) additionally permits a distinct `log-inbox:knowledge:<id>` block in an owner-selected existing eligible Reference note. A separately accepted candidate and exact KB preview/confirmation under `vault:write` are required. The shared atomic writer and workspace capability preserve human content and Daily blocks; the KB journal freezes recovery bytes separately from Daily. KB operations cannot create notes/folders, move a promoted plan silently, or inherit Daily approval.
