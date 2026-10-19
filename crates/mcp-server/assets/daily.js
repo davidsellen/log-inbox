@@ -14,6 +14,11 @@ import { createGenerationModels } from "./daily-generation.js";
 import { createSettings } from "./daily-settings.js";
 import { createHistory } from "./daily-history.js";
 import { createDashboard } from "./daily-dashboard.js";
+import {
+  renderRecapEditor,
+  readRecapEditor,
+  renderRecapView,
+} from "./daily-recap.js";
 // Daily owns the selected day, draft edits, generation, and polling.
 const state = {
   csrf: null,
@@ -232,9 +237,7 @@ async function loadDay() {
 function renderDaily() {
   const data = state.data;
   renderAttentionDays();
-  const applied =
-    data.apply_status?.state === "finalized" ||
-    data.day?.review_status === "applied";
+  const applied = data.day?.review_status === "applied";
   $("day-title").textContent = new Date(
     `${data.local_date}T12:00:00`,
   ).toLocaleDateString(undefined, {
@@ -280,14 +283,13 @@ function renderDaily() {
   const apply = data.apply_status;
   const pending = apply && apply.state !== "finalized";
   const invalidContext = state.contextDetails?.status === "invalid";
-  $("write-status").textContent =
-    apply?.state === "finalized"
-      ? "Applied to Markdown"
-      : pending
-        ? "Apply needs attention"
-        : dismissed
-          ? "Dismissed — nothing will be written"
-          : "Nothing is written yet";
+  $("write-status").textContent = applied
+    ? "Applied to Markdown"
+    : pending
+      ? "Apply needs attention"
+      : dismissed
+        ? "Dismissed — nothing will be written"
+        : "Nothing is written yet";
   $("apply-attention").hidden = !pending;
   if (pending) {
     $("apply-attention-message").textContent =
@@ -302,7 +304,10 @@ function renderDaily() {
     $("retry-apply").hidden = !apply.can_retry;
     $("retry-apply").disabled = !state.csrf || state.saving;
   }
-  $("review-apply").hidden = !data.current_revision || dismissed || applied;
+  $("review-apply").hidden = !data.current_revision || dismissed;
+  $("review-apply").textContent = applied
+    ? "Review & reapply"
+    : "Review & save";
   $("review-apply").disabled =
     !state.csrf || state.saving || pending || invalidContext;
 }
@@ -657,6 +662,17 @@ function renderCandidateEditor(content) {
     root.append(p);
     return;
   }
+  renderRecapEditor(
+    root,
+    content,
+    state.data.automated_evidence?.events || [],
+    Boolean(state.csrf),
+    () => {
+      $("save-candidate").hidden = false;
+      syncSupportingEditor();
+      updateContextAdjustmentControls();
+    },
+  );
   content.workstreams.forEach((workstream, index) => {
     const section = document.createElement("section");
     section.className = "workstream";
@@ -693,6 +709,15 @@ function renderCandidateEditor(content) {
     }
     root.append(section);
   });
+  syncSupportingEditor();
+}
+
+function syncSupportingEditor() {
+  const locked = Boolean(readRecapEditor()) || !state.csrf;
+  for (const input of document.querySelectorAll(
+    "#candidate .title-input, #candidate textarea[data-workstream]",
+  ))
+    input.disabled = locked;
 }
 
 // Activity browsing and optional include/omit decisions.
@@ -1380,16 +1405,21 @@ async function saveCandidate() {
     .forEach((input, index) => {
       content.workstreams[index].title = input.value;
     });
-  document.querySelectorAll("#candidate textarea").forEach((input) => {
-    const fact =
-      content.workstreams[Number(input.dataset.workstream)][
-        input.dataset.field
-      ][Number(input.dataset.fact)];
-    if (fact.text.replace(/\r\n?/g, "\n") !== input.value) {
-      fact.text = input.value;
-      delete fact.source_clauses;
-    }
-  });
+  document
+    .querySelectorAll("#candidate textarea[data-workstream]")
+    .forEach((input) => {
+      const fact =
+        content.workstreams[Number(input.dataset.workstream)][
+          input.dataset.field
+        ][Number(input.dataset.fact)];
+      if (fact.text.replace(/\r\n?/g, "\n") !== input.value) {
+        fact.text = input.value;
+        delete fact.source_clauses;
+      }
+    });
+  const recap = readRecapEditor();
+  if (recap) content.recap = recap;
+  else delete content.recap;
   try {
     await api(`/api/v2/daily/${state.date}/candidate`, {
       method: "PUT",
@@ -1599,6 +1629,26 @@ function renderCandidate(content) {
       )
       .map((item) => item.event_id),
   );
+  let supportingRoot = root;
+  if (content.recap) {
+    renderRecapView(
+      root,
+      content.recap,
+      excluded,
+      state.data.automated_evidence?.events || [],
+      content.workstreams,
+    );
+    supportingRoot = el("details", "supporting-activity");
+    supportingRoot.append(
+      el("summary", "", "Supporting activity and source reports"),
+      el(
+        "p",
+        "subtle",
+        "These detailed reports support the recap. Only the short recap is copied or saved to your note.",
+      ),
+    );
+    root.append(supportingRoot);
+  }
   if (content.schema_version === 2) {
     for (const workstream of content.workstreams) {
       const entries = (workstream.activity || [])
@@ -1686,23 +1736,21 @@ function renderCandidate(content) {
           },
         ),
       );
-    root.append(section);
+    supportingRoot.append(section);
   }
   if (content.open_questions?.length) {
-    root.append(el("h3", "", "Open questions"));
+    supportingRoot.append(el("h3", "", "Open questions"));
     const list = document.createElement("ul");
     list.dataset.historyGroup = "";
     for (const question of content.open_questions)
       list.append(el("li", "", question));
-    root.append(list);
+    supportingRoot.append(list);
   }
 }
 
 function renderGeneration() {
   generationModels.renderDaily();
-  const applied =
-    state.data?.apply_status?.state === "finalized" ||
-    state.data?.day?.review_status === "applied";
+  const applied = state.data?.day?.review_status === "applied";
   if (applied) {
     $("generation-status").hidden = true;
     $("reference-recovery").hidden = true;
@@ -2009,12 +2057,22 @@ function setDayLoadState(loading, error = "") {
 
 // Navigation's discard guard stays beside the form fields it understands.
 function unsavedDayChanges() {
+  // Compare schema values in a fixed order; server JSON object keys may differ.
+  const recapKeys = [
+    "summary",
+    "topics",
+    "title",
+    "done",
+    "pending",
+    "text",
+    "evidence_event_ids",
+  ];
   const workstreams = state.data?.current_revision?.content?.workstreams || [];
   const changedTitle = [
     ...document.querySelectorAll("#candidate .title-input"),
   ].some((input, index) => input.value !== workstreams[index]?.title);
   const changedFact = [
-    ...document.querySelectorAll("#candidate textarea"),
+    ...document.querySelectorAll("#candidate textarea[data-workstream]"),
   ].some(
     (input) =>
       input.value !==
@@ -2025,6 +2083,11 @@ function unsavedDayChanges() {
   return (
     changedTitle ||
     changedFact ||
+    JSON.stringify(readRecapEditor(), recapKeys) !==
+      JSON.stringify(
+        state.data?.current_revision?.content?.recap || null,
+        recapKeys,
+      ) ||
     contextDraftChanged() ||
     evidenceDecisionSelects().some(
       (input) =>

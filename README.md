@@ -84,7 +84,7 @@ Messages up to 1 MiB and metadata up to 512 KiB are accepted after secret redact
 1. Choose the calendar date you want to review. The server resolves its exact interval using the saved timezone; changing the selector loads only that day.
 2. Add work that did not come from an agent under **My notes**. Those words remain separate and are never rewritten by the model.
 3. Prepare the day candidate. Source-based preparation needs no model: it groups reported activity by source identities, selects recent cited reports, and retains the full source history for review. Optional Semantic preparation uses a tested model for grouping and selection; review its accuracy before relying on it.
-4. Correct the structured fields and include or omit evidence as needed. Each save creates an immutable revision in SQLite and still does not touch Markdown.
+4. Correct the structured fields and include or omit evidence as needed. Under **Edit draft**, add an optional **Short recap**: a plain-language paragraph and up to five topics with **Done** and **Pending** text, each linked to supporting reports. With a recap, Copy and Apply use that short version; the original reports stay collapsed in Daily. Recap writing is currently explicit editing by you or an authorized writing agent. Each save creates an immutable revision in SQLite and still does not touch Markdown.
 5. Select **Review Apply** to see the current and approved managed blocks plus the exact frozen destination.
 6. Select **Confirm Apply** to write. Existing frontmatter and all content outside the Log Inbox block are preserved. Interrupted or conflicting writes remain visible and retryable.
 

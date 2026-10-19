@@ -765,8 +765,587 @@ fn preflight_real_day_source_cards() -> Result<()> {
     Ok(())
 }
 
-/// Export exact production requests for a separately frozen semantic capability
-/// sample. This does not contact a provider or inspect the Markdown workspace.
+/// Validate a private human oracle against the unchanged production choice
+/// parser and save contract. No inference, workspace reads, database or writer.
+#[test]
+#[ignore = "requires private frozen evidence and exact catalog selections; no inference"]
+fn validate_source_selection_oracle() -> Result<()> {
+    use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
+    let input_bytes = read_bounded(Path::new(&std::env::var("LOG_INBOX_EVALUATION_INPUT")?))?;
+    let input: EvaluationInput = serde_json::from_slice(&input_bytes)?;
+    let frozen = read_json(Path::new(&std::env::var(
+        "LOG_INBOX_EVALUATION_FROZEN_MANIFEST",
+    )?))?;
+    validate_frozen_cases(&frozen, &input)?;
+    ensure!(
+        frozen["identity"]["fixture_sha256"] == digest(&input_bytes),
+        "frozen fixture changed"
+    );
+    let selections_path = std::env::var("LOG_INBOX_SELECTION_ORACLE")?;
+    let selections_path = Path::new(&selections_path);
+    ensure!(
+        fs::symlink_metadata(selections_path)?.file_type().is_file()
+            && fs::metadata(selections_path)?.permissions().mode() & 0o077 == 0,
+        "private regular selection file required"
+    );
+    let oracle = read_json(selections_path)?;
+    let dates = oracle["dates"]
+        .as_array()
+        .context("oracle dates required")?;
+    ensure!(
+        dates.len() == input.cases.len(),
+        "exact original dates required"
+    );
+    let output = capability_output(&input)?;
+    let card_refs = std::env::var("LOG_INBOX_SELECTION_ORACLE_CARD_REFS").as_deref() == Ok("1");
+    let flat_refs = std::env::var("LOG_INBOX_SELECTION_ORACLE_FLAT_REFS").as_deref() == Ok("1");
+    let manifest = json!({"fixture_sha256":digest(&input_bytes),
+        "frozen_manifest_sha256":value_digest(&frozen)?,
+        "oracle_sha256":value_digest(&oracle)?,
+        "contract_digest":llm::daily_generation_contract_digest(),
+        "model_used":false,"card_refs":card_refs,"flat_refs":flat_refs,"pipeline":"exact-source-choice-oracle"});
+    write_new_json(&output.join("oracle-manifest.json"), &manifest)?;
+    let mut passed = 0;
+    for (case_index, (case, selected)) in input.cases.iter().zip(dates).enumerate() {
+        ensure!(selected["date"] == case.date, "oracle date/order mismatch");
+        let mut groups = BTreeMap::new();
+        for group in selected["groups"]
+            .as_array()
+            .context("oracle groups required")?
+        {
+            let id = group["group_id"]
+                .as_str()
+                .context("oracle group ID required")?;
+            let selection = if flat_refs {
+                let fields: BTreeMap<String, Vec<Vec<usize>>> =
+                    serde_json::from_value(group["selection_fact_refs"].clone())?;
+                json!({"selected":fields.into_values().flatten().flatten().collect::<Vec<_>>()})
+            } else {
+                group[if card_refs {
+                    "selection_fact_refs"
+                } else {
+                    "selection"
+                }]
+                .clone()
+            };
+            ensure!(
+                groups.insert(id.to_owned(), selection).is_none(),
+                "duplicate oracle group"
+            );
+        }
+        let ledger = llm::prepare_source_based_ledger(&case.events).map_err(anyhow::Error::msg)?;
+        for with_knowledge in [false, true] {
+            let mut context = if with_knowledge {
+                frozen["cases"][case_index]["knowledge"]["vault_context"].clone()
+            } else {
+                without_knowledge()
+            };
+            let mut payload = if with_knowledge {
+                frozen["cases"][case_index]["knowledge"]["snapshot_payload"].clone()
+            } else {
+                json!({})
+            };
+            if with_knowledge {
+                knowledge::normalize_source_based_resolution(
+                    &mut context,
+                    &mut payload,
+                    &case.events,
+                )
+                .map_err(anyhow::Error::msg)?;
+            }
+            let mut args = llm::SuggestMarkdownSummaryArgs {
+                mode: "daily-consolidation".into(),
+                task: None,
+                vault_context: context,
+            };
+            llm::normalize_source_based_context(&mut args, &case.events)
+                .map_err(anyhow::Error::msg)?;
+            let validate = if flat_refs {
+                llm::validate_source_based_flat_selection
+            } else if card_refs {
+                llm::validate_source_based_card_selection
+            } else {
+                llm::validate_source_based_selection
+            };
+            let draft = validate(args.clone(), &case.events, &ledger, &groups)
+                .map_err(anyhow::Error::msg)?;
+            let content = llm::daily_revision_content(draft.clone(), Vec::new(), &args);
+            validate_candidate_for_save(
+                &content,
+                &case.events,
+                with_knowledge.then_some(&payload),
+            )?;
+            let arm = if with_knowledge {
+                "withKnowledge"
+            } else {
+                "withoutKnowledge"
+            };
+            write_new_json(
+                &output.join(format!("{}-{arm}-oracle.json", case.date)),
+                &json!({
+                    "date":case.date,"with_knowledge":with_knowledge,"status":"succeeded",
+                    "parser_accepted":true,"persistable":true,"model_used":false,
+                    "manifest_sha256":value_digest(&manifest)?,"source_ledger_sha256":value_digest(&serde_json::to_value(&ledger)?)?,
+                    "structured_draft":draft,"daily_revision_content":content,
+                    "preview_markdown":llm::render_daily_revision_preview(&content,&[],&[])
+                }),
+            )?;
+            passed += 1;
+            println!(
+                "source selection oracle date={} arm={arm} persistable=true",
+                case.date
+            );
+        }
+    }
+    ensure!(
+        passed == input.cases.len() * 2,
+        "all original context arms required"
+    );
+    Ok(())
+}
+
+fn generic_probe_events(events: &[StoredLogEvent]) -> Vec<StoredLogEvent> {
+    [
+        (
+            "Completed investigation.",
+            json!({"tests":"29 checks passed"}),
+        ),
+        (
+            "Implemented duplicate callback suppression while preserving the first response.",
+            json!({}),
+        ),
+        (
+            "Expired signing key is a probable cause; fresh login remains unverified.",
+            json!({"follow_up":"Fresh login and live acceptance remain pending."}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (message, metadata))| {
+        let mut event = events[index].clone();
+        event.id = format!("generic-probe-{index}");
+        event.message = message.into();
+        event.metadata = serde_json::from_value(metadata).unwrap();
+        event.metadata.insert("repo".into(), json!("generic-probe"));
+        event
+            .metadata
+            .insert("task_id".into(), json!("selection-capability"));
+        event
+    })
+    .collect()
+}
+
+/// Freeze and run one explicit local selection-only capability trial.
+#[tokio::test]
+#[ignore = "explicit single local-model selection-only capability trial"]
+async fn probe_source_card_selection() -> Result<()> {
+    use std::collections::BTreeMap;
+    let config = llm::LlmConfig::from_env().context("explicit local model required")?;
+    let input_bytes = read_bounded(Path::new(&std::env::var("LOG_INBOX_EVALUATION_INPUT")?))?;
+    let mut input: EvaluationInput = serde_json::from_slice(&input_bytes)?;
+    let frozen = read_json(Path::new(&std::env::var(
+        "LOG_INBOX_EVALUATION_FROZEN_MANIFEST",
+    )?))?;
+    validate_frozen_cases(&frozen, &input)?;
+    ensure!(
+        frozen["identity"]["fixture_sha256"] == digest(&input_bytes),
+        "frozen fixture changed"
+    );
+    let generic = std::env::var("LOG_INBOX_SELECTION_PROBE_STAGE").as_deref() != Ok("real");
+    let mut diagnostic_proof = Value::Null;
+    if generic {
+        let case = &mut input.cases[0];
+        case.events = generic_probe_events(&case.events);
+        input.cases.truncate(1);
+    } else if let Ok(manifest_path) = std::env::var("LOG_INBOX_SELECTION_PROBE_DIAGNOSTIC_MANIFEST")
+    {
+        let manifest = read_json(Path::new(&manifest_path))?;
+        let response = read_json(Path::new(&std::env::var(
+            "LOG_INBOX_SELECTION_PROBE_DIAGNOSTIC_RESPONSE",
+        )?))?;
+        let decision = read_json(Path::new(&std::env::var(
+            "LOG_INBOX_SELECTION_PROBE_DIAGNOSTIC_DECISION",
+        )?))?;
+        diagnostic_proof = validate_diagnostic_generic_proof(
+            &config,
+            &input.cases[0].events,
+            &digest(&input_bytes),
+            &manifest,
+            &response,
+            &decision,
+        )?;
+    } else {
+        let proof = read_json(Path::new(&std::env::var(
+            "LOG_INBOX_SELECTION_PROBE_GENERIC_PROOF",
+        )?))?;
+        ensure!(
+            proof["generic"] == true
+                && proof["status"] == "succeeded"
+                && proof["protocol"] == "flat-source-card-selection-v2"
+                && proof["model"] == config.model
+                && proof["generic_gate"] == "substantive-qualified-no-noise-v1"
+                && proof["selection_policy_sha256"] == llm::source_card_probe_policy_digest(),
+            "successful generic proof required"
+        );
+    }
+    let output = capability_output(&input)?;
+    ensure!(
+        llm::knowledge_text_stays_local(&config) && config.api_key.is_none(),
+        "private local no-key endpoint required"
+    );
+    let endpoint = reqwest::Url::parse(&config.base_url)?;
+    ensure!(
+        endpoint.username().is_empty()
+            && endpoint.password().is_none()
+            && endpoint.query().is_none()
+            && endpoint.fragment().is_none(),
+        "plain local endpoint required"
+    );
+    let args = llm::SuggestMarkdownSummaryArgs {
+        mode: "daily-consolidation".into(),
+        task: None,
+        vault_context: without_knowledge(),
+    };
+    let mut prepared = Vec::new();
+    for case in &input.cases {
+        let ledger = llm::prepare_source_based_ledger(&case.events).map_err(anyhow::Error::msg)?;
+        let requests = llm::source_card_probe_requests(&config, &args, &case.events, &ledger)
+            .map_err(anyhow::Error::msg)?;
+        prepared.push((ledger, requests));
+    }
+    write_new_json(
+        &output.join("probe-manifest.json"),
+        &json!({"diagnostic_only":!diagnostic_proof.is_null(),"generic_diagnostic_proof":diagnostic_proof,"generic":generic,"generic_gate":"substantive-qualified-no-noise-v1","model":config.model,"protocol":"flat-source-card-selection-v2","selection_policy_sha256":llm::source_card_probe_policy_digest(),"timeout_seconds":config.timeout_seconds(),"request_profile":config.profile,
+        "model_change_from":frozen["identity"]["model"],"fixture_sha256":digest(&input_bytes),
+        "frozen_manifest_sha256":value_digest(&frozen)?,"contract_digest":llm::daily_generation_contract_digest(),
+        "budget":{"facts_per_group":8,"highlight_text_characters_per_group":1600,"cards_per_bundle":3,"characters_per_bundle":320,"bundles_per_field":4},
+        "paired_plan_shared":true,"knowledge_fact_prompt":false,
+        "requests":prepared.iter().map(|(_,request)|request).collect::<Vec<_>>() }),
+    )?;
+    let mut failed_dates = 0;
+    for ((case_index, case), (ledger, requests)) in input.cases.iter().enumerate().zip(prepared) {
+        let day_started = Instant::now();
+        let mut selections = BTreeMap::new();
+        let result: Result<()> = async {
+        for (index, request) in requests
+            .as_array()
+            .context("requests required")?
+            .iter()
+            .enumerate()
+        {
+            let started = Instant::now();
+            let model_used = request["model_used"] != false;
+            let response = if model_used {
+                llm::execute_source_card_probe_request(&config, &request["request"]).await
+            } else {
+                Ok(request["selection"].to_string())
+            };
+            write_new_json(
+                &output.join(format!("{}-group-{index}-response.json", case.date)),
+                &json!({"response":response.as_ref().ok(),"error":response.as_ref().err(),"elapsed_ms":started.elapsed().as_millis(),"model_used":model_used}),
+            )?;
+            let selection = serde_json::from_str(&response.map_err(anyhow::Error::msg)?)?;
+            selections.insert(
+                request["group_id"].as_str().context("group ID")?.to_owned(),
+                selection,
+            );
+        }
+        let draft = llm::validate_source_based_flat_selection(
+            args.clone(),
+            &case.events,
+            &ledger,
+            &selections,
+        )
+        .map_err(anyhow::Error::msg)?;
+        llm::validate_source_card_probe_budget(&draft).map_err(anyhow::Error::msg)?;
+        if generic {
+            let highlights = draft
+                .workstreams
+                .iter()
+                .flat_map(|work| {
+                    [
+                        &work.outcome,
+                        &work.decision,
+                        &work.trade_off,
+                        &work.validation,
+                        &work.blocker,
+                        &work.follow_up,
+                    ]
+                    .into_iter()
+                    .flatten()
+                })
+                .map(|fact| fact.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            validate_generic_probe_highlights(&highlights)?;
+        }
+        for with_knowledge in if generic {
+            vec![false]
+        } else {
+            if case_index == 0 {vec![false,true]} else {vec![true,false]}
+        } {
+            let mut arm_args = args.clone();
+            let mut payload = json!({});
+            if with_knowledge {
+                let index = input
+                    .cases
+                    .iter()
+                    .position(|item| item.date == case.date)
+                    .unwrap();
+                arm_args.vault_context =
+                    frozen["cases"][index]["knowledge"]["vault_context"].clone();
+                payload = frozen["cases"][index]["knowledge"]["snapshot_payload"].clone();
+                knowledge::normalize_source_based_resolution(
+                    &mut arm_args.vault_context,
+                    &mut payload,
+                    &case.events,
+                )
+                .map_err(anyhow::Error::msg)?;
+            }
+            llm::normalize_source_based_context(&mut arm_args, &case.events)
+                .map_err(anyhow::Error::msg)?;
+            let content = llm::daily_revision_content(draft.clone(), Vec::new(), &arm_args);
+            validate_candidate_for_save(
+                &content,
+                &case.events,
+                with_knowledge.then_some(&payload),
+            )?;
+            write_new_json(
+                &output.join(format!(
+                    "{}-{}-probe.json",
+                    case.date,
+                    if with_knowledge {
+                        "withKnowledge"
+                    } else {
+                        "withoutKnowledge"
+                    }
+                )),
+                &json!({"diagnostic_only":!diagnostic_proof.is_null(),"strict_generic_gate":if diagnostic_proof.is_null(){"passed"}else{"failed"},"elapsed_since_day_start_ms":day_started.elapsed().as_millis(),"status":"succeeded","generic":generic,"generic_gate":"substantive-qualified-no-noise-v1","protocol":"flat-source-card-selection-v2","selection_policy_sha256":llm::source_card_probe_policy_digest(),"model":config.model,"date":case.date,"with_knowledge":with_knowledge,"selections":selections,"structured_draft":draft,"daily_revision_content":content,"preview_markdown":llm::render_daily_revision_preview(&content,&[],&[])}),
+            )?;
+        }
+        Ok(())
+        }.await;
+        if result.is_err() {
+            failed_dates += 1;
+        }
+        write_new_json(
+            &output.join(format!("{}-day-result.json", case.date)),
+            &json!({
+                "date":case.date,"status":if result.is_ok(){"succeeded"}else{"failed"},
+                "error":result.as_ref().err().map(ToString::to_string),"elapsed_ms":day_started.elapsed().as_millis(),
+            "diagnostic_only":!diagnostic_proof.is_null(),"strict_generic_gate":if !diagnostic_proof.is_null() || (generic && result.is_err()){"failed"}else{"passed"},
+                "selections":selections,"model":config.model
+            }),
+        )?;
+    }
+    ensure!(
+        failed_dates == 0,
+        "{failed_dates} evaluation dates failed; immutable diagnostics retained"
+    );
+    Ok(())
+}
+
+fn validate_generic_probe_positives(highlights: &str) -> Result<()> {
+    ensure!(
+        [
+            "Implemented duplicate callback suppression",
+            "probable cause",
+            "unverified",
+            "pending"
+        ]
+        .iter()
+        .all(|required| highlights.contains(required)),
+        "generic substantive behavior/probable/unverified/pending selection gate failed"
+    );
+    Ok(())
+}
+
+fn validate_generic_probe_highlights(highlights: &str) -> Result<()> {
+    validate_generic_probe_positives(highlights)?;
+    ensure!(
+        !highlights.contains("Completed investigation") && !highlights.contains("29 checks passed"),
+        "generic substantive behavior/probable/unverified/pending/no-noise selection gate failed"
+    );
+    Ok(())
+}
+
+fn validate_diagnostic_generic_proof(
+    config: &llm::LlmConfig,
+    original_events: &[StoredLogEvent],
+    fixture_sha256: &str,
+    manifest: &Value,
+    response: &Value,
+    decision: &Value,
+) -> Result<Value> {
+    ensure!(
+        manifest["generic"] == true
+            && manifest["model"] == config.model
+            && manifest["protocol"] == "flat-source-card-selection-v2"
+            && manifest["generic_gate"] == "substantive-qualified-no-noise-v1"
+            && manifest["selection_policy_sha256"] == llm::source_card_probe_policy_digest()
+            && manifest["fixture_sha256"] == fixture_sha256,
+        "diagnostic proof model/protocol/policy/fixture mismatch"
+    );
+    ensure!(
+        response["error"].is_null() && response["model_used"] == true,
+        "actual generic model response required"
+    );
+    let selection: Value = serde_json::from_str(
+        response["response"]
+            .as_str()
+            .context("generic response missing")?,
+    )?;
+    ensure!(
+        decision["decision"]
+            == "Permit one original-frozen real-day diagnostic after larger-model boilerplate-only generic failure."
+            && decision["observed_generic_result"]["model"] == config.model
+            && decision["observed_generic_result"]["selected"] == selection["selected"]
+            && decision["observed_generic_result"]["elapsed_ms"] == response["elapsed_ms"],
+        "diagnostic decision does not match observed generic response"
+    );
+    let events = generic_probe_events(original_events);
+    let args = llm::SuggestMarkdownSummaryArgs {
+        mode: "daily-consolidation".into(),
+        task: None,
+        vault_context: without_knowledge(),
+    };
+    let ledger = llm::prepare_source_based_ledger(&events).map_err(anyhow::Error::msg)?;
+    let expected = llm::source_card_probe_requests(config, &args, &events, &ledger)
+        .map_err(anyhow::Error::msg)?;
+    ensure!(
+        manifest["requests"]
+            .as_array()
+            .is_some_and(|cases| cases.len() == 1)
+            && manifest["requests"][0]
+                .as_array()
+                .is_some_and(|groups| groups.len() == 1)
+            && expected.as_array().is_some_and(|groups| groups.len() == 1)
+            && manifest["requests"][0][0]["request"] == expected[0]["request"],
+        "diagnostic generic request differs from unchanged policy/sample"
+    );
+    let id = expected[0]["group_id"]
+        .as_str()
+        .context("generic group missing")?
+        .to_owned();
+    let draft = llm::validate_source_based_flat_selection(
+        args.clone(),
+        &events,
+        &ledger,
+        &std::collections::BTreeMap::from([(id, selection.clone())]),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let content = llm::daily_revision_content(draft, Vec::new(), &args);
+    validate_candidate_for_save(&content, &events, None)?;
+    let highlights = content
+        .workstreams
+        .iter()
+        .flat_map(|work| {
+            [
+                &work.outcome,
+                &work.decision,
+                &work.trade_off,
+                &work.validation,
+                &work.blocker,
+                &work.follow_up,
+            ]
+            .into_iter()
+            .flatten()
+        })
+        .map(|fact| fact.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    validate_generic_probe_positives(&highlights)?;
+    ensure!(
+        validate_generic_probe_highlights(&highlights).is_err(),
+        "diagnostic exception requires strict noise failure"
+    );
+    Ok(
+        json!({"diagnostic_only":true,"strict_generic_gate":"failed","substantive_positives":"passed",
+        "manifest_sha256":value_digest(manifest)?,"response_sha256":value_digest(response)?,"decision_sha256":value_digest(decision)?,
+        "selected":selection["selected"],"model":config.model,"selection_policy_sha256":llm::source_card_probe_policy_digest()}),
+    )
+}
+
+#[test]
+fn generic_probe_gate_requires_qualifications_and_rejects_admin_and_count_noise() -> Result<()> {
+    let accepted = "Implemented duplicate callback suppression. Expired signing key is a probable cause; fresh login remains unverified. Fresh login and live acceptance remain pending.";
+    validate_generic_probe_highlights(accepted)?;
+    for required in [
+        "Implemented duplicate callback suppression",
+        "probable cause",
+        "unverified",
+        "pending",
+    ] {
+        ensure!(validate_generic_probe_highlights(&accepted.replace(required, "")).is_err());
+    }
+    for noise in ["Completed investigation.", "29 checks passed"] {
+        validate_generic_probe_positives(&format!("{accepted} {noise}"))?;
+        ensure!(validate_generic_probe_highlights(&format!("{accepted} {noise}")).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires private frozen failed generic response; validates only, no inference"]
+fn audit_failed_generic_diagnostic_proof() -> Result<()> {
+    let config = llm::LlmConfig::from_env().context("explicit model required")?;
+    let input_bytes = read_bounded(Path::new(&std::env::var("LOG_INBOX_EVALUATION_INPUT")?))?;
+    let input: EvaluationInput = serde_json::from_slice(&input_bytes)?;
+    let frozen = read_json(Path::new(&std::env::var(
+        "LOG_INBOX_EVALUATION_FROZEN_MANIFEST",
+    )?))?;
+    validate_frozen_cases(&frozen, &input)?;
+    ensure!(
+        frozen["identity"]["fixture_sha256"] == digest(&input_bytes),
+        "frozen fixture changed"
+    );
+    let manifest = read_json(Path::new(&std::env::var(
+        "LOG_INBOX_SELECTION_PROBE_DIAGNOSTIC_MANIFEST",
+    )?))?;
+    let response = read_json(Path::new(&std::env::var(
+        "LOG_INBOX_SELECTION_PROBE_DIAGNOSTIC_RESPONSE",
+    )?))?;
+    let decision = read_json(Path::new(&std::env::var(
+        "LOG_INBOX_SELECTION_PROBE_DIAGNOSTIC_DECISION",
+    )?))?;
+    let check = |manifest: &Value, response: &Value, decision: &Value| {
+        validate_diagnostic_generic_proof(
+            &config,
+            &input.cases[0].events,
+            &digest(&input_bytes),
+            manifest,
+            response,
+            decision,
+        )
+    };
+    let proof = check(&manifest, &response, &decision)?;
+    ensure!(proof["strict_generic_gate"] == "failed" && proof["substantive_positives"] == "passed");
+    for key in [
+        "model",
+        "protocol",
+        "selection_policy_sha256",
+        "fixture_sha256",
+    ] {
+        let mut changed = manifest.clone();
+        changed[key] = json!("tampered");
+        ensure!(check(&changed, &response, &decision).is_err());
+    }
+    let mut altered_request = manifest.clone();
+    altered_request["requests"][0][0]["request"]["messages"][1]["content"] =
+        json!("different policy");
+    ensure!(check(&altered_request, &response, &decision).is_err());
+    let mut missing = response.clone();
+    missing["response"] = json!("{\"selected\":[0,2,4]}");
+    let mut amended_decision = decision.clone();
+    amended_decision["observed_generic_result"]["selected"] = json!([0, 2, 4]);
+    ensure!(check(&manifest, &missing, &amended_decision).is_err());
+    write_new_json(
+        &capability_output(&input)?.join("diagnostic-proof.json"),
+        &proof,
+    )?;
+    Ok(())
+}
+
 #[cfg(unix)]
 fn capability_output(input: &EvaluationInput) -> Result<std::path::PathBuf> {
     use std::os::unix::fs::PermissionsExt;

@@ -304,6 +304,444 @@ the associated pull request and lifecycle report.
 
 ### Next Product KB ingestion delivery
 
+**PR delivery — authorized 2026-10-19.** Published the five local delivery
+commits through [PR #3](https://github.com/davidsellen/log-inbox/pull/3), targeting
+`main` at `34bbcc6`. Full integrated independent review at `bdca681` found an
+untouched recap could trigger the navigation discard guard because server and
+browser JSON object keys have different insertion orders. The fix compares recap
+values in schema-key order while preserving citation/topic array order and nulls.
+The regression reproduces the false guard before the fix and checks untouched
+navigation plus genuine unsaved edits afterward; ten focused Chromium/Firefox
+cases and client formatting/syntax checks passed. Retain existing local deployment evidence separately
+from this client follow-up; GitHub CI and follow-up review determine PR readiness.
+Merge is outside this request. Automatic concise generation and Product KB
+ingestion remain deferred under the existing usefulness gates.
+
+**Recap Knowledge links — authorized 2026-10-19 (fixed, deployed and applied).**
+The owner reports missing Forms and Log Inbox links after the short recap was
+applied. Starting clean `b01b86c` on the same local branch. The recap renderer
+returns before rendering existing reviewed canonical links. A separate live
+diagnosis found the saved Forms mapping matches product `Forms`, while newer
+reports use `Sweet Forms`; the existing Forms note is available and reviewed.
+Factory Sol/medium owns the bounded renderer/UI/browser regressions; root owns
+this record, alias correction, local preservation/deployment and requested note
+repair. Independent review follows; no Knowledge-note content is changed.
+
+1. Restore a compact Related line from reviewed links on source workstreams
+   owning visible cited recap facts. Deduplicate; exclude uncited/omitted reports
+   and malformed links, without inferring new associations or factual claims.
+2. Add the explicit Sweet Forms product alias to the existing Forms note using
+   the normal Knowledge mapping API. Refresh references through normal source
+   preparation and reattach the unchanged authored recap with its same citations.
+3. Test link rendering/exclusions in Markdown and both browsers; review and run
+   required checks. Preserve source history, prose and note surroundings.
+4. Back up, deploy locally and use normal reviewed Apply to restore the links in
+   the October16 note. Automatic recap writing and Product KB ingestion stay deferred.
+
+Complete independent review of all six task paths against `b01b86c` found no
+findings (diff SHA256 `5cf9ce455e8456afcf7ebfa432b1d1120bf779dc56c9a6e2d2aef3b2180f5aca`).
+Validation:289 Rust tests passed/13 ignored,244 Chromium/Firefox tests passed,
+format/client formatting/Clippy and release Compose Apply/restart passed. Tests
+cover deduplication, invalid/uncited links, pending-only references, whole-prose
+exclusions and literal text rendering. Earlier worker Chromium launches lacked
+sandbox permissions; the permitted complete run passed.
+
+The existing reviewed Forms target was reused for the explicit `Sweet Forms`
+product alias. Normal source preparation refreshed its frozen references, then
+the exact prior authored recap was reattached as revision5
+`revision_68b9fc389e7f498eb5cd365cce014701`. All49 event IDs, manual notes,
+recap text/citations and source fields/history are unchanged except canonical
+links. The resulting1394-character preview contains one compact Related line
+with Log Inbox and Sweet Forms, each once. No product paths are hardcoded in
+the application, and no Knowledge-note contents were modified.
+
+Both local built images are healthy; existing drafts, note metadata, environment
+and mounts were preserved before the requested repair. A consistent39-table
+backup passes quick_check; rollback executables, the original note, alias and
+refresh records are in ignored `tmp/deployments/recap-links-20261019/`.
+Normal fresh-preview Apply finalized the repaired note as
+`apply_aa40e2141ada491b5f8aa6ee2d9ed00349089b4d3781d68a96ef1b9ed498be4c`.
+Exact whole-file and block checks verify both links, unchanged recap prose,
+one managed block and preservation of surrounding note bytes/line ending.
+
+**Daily reapply — authorized 2026-10-19 (fixed, deployed and reapplied).**
+The owner applied the previous note and cannot apply the newer recap. Starting
+clean `7248879` on the same local branch. Live diagnosis: October16 revision3 is
+`in_review`, but a previous finalized Apply makes the browser label it applied
+and hide Review & save. The day review status describes the current revision;
+the latest operation remains relevant for recovery, not proof a newer draft was
+written. Factory Sol/medium owns the bounded UI/browser fix; root owns this
+record, API verification and preserving local deployment. Independent review follows.
+
+1. Correct current-revision status and expose normal Review & save for new
+   drafts plus Review & reapply for an already-applied current draft.
+2. Preserve pending-operation recovery, dismissal, authentication, fresh preview,
+   exact approval hashes, conflict checks and explicit Apply semantics.
+3. Cover stale finalized history and reviewed repeat Apply in both browsers;
+   verify existing backend Apply contracts and local preservation.
+4. Deploy locally, obtain a fresh preview and reapply the current October16 recap
+   as requested, preserving note content outside the managed block and backups.
+
+| Scenario | Evidence | State |
+| --- | --- | --- |
+| Old Apply/new draft | Live revision3 remained in_review despite old finalized history; corrected status/action verified in both browsers | Passed |
+| Applied current draft | Review & reapply opens normal preview; no write before confirmation; fresh backend reapproval leaves one unchanged block | Passed |
+| Apply safety | Pending/dismissed/auth guards; backend stale-file rejection and owner-content protection | Passed |
+| Local delivery | Full independent review, regression checks, verified backup, healthy local build and requested recap Apply | Passed |
+
+Only UI applied-state projection changed; backend production approval, writer,
+recovery and idempotency contracts are unchanged. Complete independent review of
+all five task paths against `7248879` found no findings (diff SHA256
+`aa5248f26330f1f236f98d5d47b7fa5f69143ad935eb394dae2b1e46c945df46`).
+Validation:288 Rust tests passed/13 ignored,242 Chromium/Firefox tests passed,
+format/client formatting/Clippy passed, and release Compose passed source Apply,
+new recap Apply and restart. Initial worker Chromium launches were blocked by
+sandbox permissions; the permitted complete run passed. A new backend scenario
+checks a fresh preview and approval of an already-applied revision, then retains
+the existing stale-source/file conflict assertions.
+
+Local deployment preserves existing drafts, note metadata, environment and mounts;
+both services run matching built images and pass health checks. A consistent
+39-table database backup passes quick_check; old executables, original October16
+note and receipts remain in ignored `tmp/deployments/daily-reapply-20261019/`.
+The explicitly requested recap revision3 was applied through a fresh normal
+approval, finalized as
+`apply_6ed9c4ad9d82f48ab4081152e134ddb5447883df86c5887fcb121ad0e5edeb0d`.
+Its revision/manual notes are unchanged; exactly one current managed block is in
+the Markdown file, and bytes outside it plus its existing closing newline are
+preserved. A post-write fresh preview succeeds and contains the current block.
+The local verification initially omitted that closing newline when constructing
+its expected bytes; correcting the check to the existing writer contract matched
+both the exact approved whole-file hash and unchanged surrounding content.
+No direct filesystem edit bypassed Apply. The deployed script exposes the normal
+review/reapply actions; future owner writes still require confirmation.
+
+**Human Daily recap — authorized 2026-10-19 (implemented and locally deployed).**
+The owner requests a short human paragraph and a few topics showing Done versus
+Pending. Reuse the clean local branch `codex/source-highlight-coverage`, starting
+at `9573c44`; root owns this record, UI, integration and local deployment.
+Factory Sol/high planning recommends a separate editorial recap, authored by the
+owner or an authorized writing agent, using existing immutable candidate edits.
+Sol/medium owns bounded backend implementation; independent Sol/high review
+follows. Ponytail lite limits the delivery to one paragraph and one Done/Pending
+bullet per topic, with at most five topics. Automatic synthesis is not claimed.
+
+1. Add optional evidence-linked recap prose without changing source facts or
+   history. Validate snapshot citations, bounds and explicit structured-edit origin.
+2. Show and export the short recap; collapse the detailed reports in the app.
+   Existing drafts without recaps retain their current presentation. Source
+   exclusions hide entire dependent prose, never partial paraphrases.
+3. Support normal edit/save/cancel and revision conflict protection. Author an
+   actual October16 draft from retained evidence, including unresolved gates;
+   preserve the prior revision and note, and do not Apply it automatically.
+4. Independently review, run required checks, back up app data and deploy locally.
+   Product KB ingestion and automatic narrative generation remain separate work.
+
+| Scenario | Evidence | State |
+| --- | --- | --- |
+| Concise editorial recap | Independently checked October16 paragraph and three Done/Pending topics; new draft saved | Passed editorial example; not automatic synthesis |
+| Citation/revision safety | Snapshot ownership, whole-prose exclusions, legacy hashes, immutable revisions and stale-save rejection; all49 sources, nine groups and206 history cards preserved | Passed |
+| Editing/export | Chromium/Firefox save/cancel/reload/navigation/Copy; real release recap edit, reviewed Apply and restart | Passed |
+| Integrated delivery | Independent complete-task review, Rust/browser/Compose checks, verified backup and healthy local images | Passed; live signed-in visual check pending |
+
+The optional recap uses the normal authenticated candidate edit and immutable
+revision lifecycle. It exports one short paragraph plus topic Done/Pending
+bullets; supporting activity, source history and original open questions remain
+collapsed in the app. Models do not author recaps in this delivery. Citations
+identify supporting reports rather than verifying an editorial interpretation.
+Owners or explicitly authorized writing agents can add/edit/remove the recap.
+
+Independent review corrected two P2 issues: source-picker ordering could make
+an untouched recap appear dirty, and existing open questions disappeared from
+the supporting view. Regressions now cover reversed citations, navigation guards
+and collapsed questions. No remaining code findings were reported over the full
+14-path task diff, including the new asset. Final checks:288 Rust tests passed,
+13 opt-in tests ignored;238 browser tests passed, plus the final two-browser
+open-question assertion; format/client formatting/Clippy passed. Release Compose
+verified original source Apply, recap-only Apply, preservation of owner content,
+unchanged source/history and recap persistence after restart. The first smoke
+attempt could not read desktop Buildx state; isolated Docker configuration passed.
+
+The actual October16 recap was authored from all49 retained event messages and
+follow-ups. Independent review checked all seven prose units against seven
+distinct cited source events, narrowed the mobile-rejection claim to the tested
+manual-check path, and found no remaining factual issue. The draft explicitly
+keeps automatic-summary quality/KB work, PR9713 human/provider acceptance,
+broader browser checks and unconfirmed PR9828 remote CI separate from completed
+implementation and passed PR9713 CI. It is editorial prose, not a new automatic
+summary-quality evaluation or independent verification of the original reports.
+
+Normal compare-and-swap saved revision3
+`revision_c069bc50b9ef4797a2cf7e415f55e9ec` from revision2
+`revision_3603c98f015b41b085f53e30ab7d5d4d`. The rendered managed preview shrank
+from15710 to1305 characters (about92%); the short Markdown is180 whitespace
+words. Content excluding the recap, all nine workstreams,206 history cards,
+the evidence snapshot and manual notes are unchanged. The existing Markdown file
+hash is unchanged: no production Apply occurred. Private source, proposal,
+independent assessment and save evidence are outside the checkout under
+`/tmp/log-inbox-human-recap-evaluation-20261019/`.
+
+Both local services run matching built images and pass health/owner API checks.
+Before/after checks preserve October13–16 and19 notes/revisions and runtime
+bindings. Today's evidence grew from one to two concurrent arrivals; all backed-up
+IDs remain available. Offline primary backup passes quick_check with39 tables;
+rollback executables and receipts are in ignored
+`tmp/deployments/human-recap-20261019/`. An isolated browser reached the sign-in
+page; automatic approval review rejected creating a temporary plaintext credential
+copy, so that copy was not made. Authenticated API and Chromium/Firefox tests
+verified the delivered state; the live signed-in visual check remains unverified.
+Automatic recap writing and Product KB ingestion remain deferred.
+
+
+**Concise source summaries — authorized 2026-10-16 (implementation/capability validation).**
+The owner requests shorter summaries with the remaining outcomes and pending
+work visible, unchanged evidence checks, the original October13–14 paired
+Knowledge evaluation and local deployment before Product KB ingestion.
+Reuse `codex/source-highlight-coverage` at clean `06cc1b0`; the branch remains
+local. Root owns this task record, specifications, frozen evaluation and deployment.
+
+1. Prove which original rubric outcomes/qualifications fit the existing exact-card
+   and display bounds. The v21 task-head selector improved coverage to6/12 while
+   lengthening both drafts; a third positional ranking tweak is not sufficient.
+2. Use a bounded factory Astra/low architecture escalation after Sol/high
+   diagnosis, then a bounded Sol implementation of the chosen information-selection
+   contract. Keep quote ownership, qualifications, whole source history, existing
+   revision protections and optional Knowledge. Do not infer closure, hard-code
+   fixture identities or make a new model a prerequisite for source preparation.
+3. Compare the unchanged four arms against v21 coverage6/12 and6272/7810
+   Markdown characters, also retaining the original shorter4368/6075 baseline.
+   Target all twelve original rubric items with no unsupported claims and shorter
+   output; disclose any infeasibility/remaining omissions instead of weakening checks.
+4. Independently review actual code and outputs, run required checks, back up app
+   data and deploy locally. Preserve existing notes/drafts; no production Apply.
+
+| Stage/scenario | Required evidence | State |
+| --- | --- | --- |
+| Representability and architecture | Human reference12/12; exact-card automatic packing/parser/save in four arms; bounded architecture review | Passed feasibility only |
+| Concise outcomes and pending work | Producer explicit outcomes covered; strict generic noise gate failed; frozen real-day diagnostic | Historical usefulness not demonstrated |
+| Evidence and revision safety | Ownership/history/qualification, protected outcome reduction, visible zero-card failure, expiry/cache and strict parser/save regressions | Passed |
+| Integrated review/checks | Complete task review plus focused fixes; Rust286 passed/13 ignored, browser230 passed, format/Clippy/release Compose passed | Passed; actual output quality separate |
+| Local preservation/deployment | Offline39-table backup verified; both matching images healthy; owner/browser checks and four-day preservation | Passed |
+
+**Delivery result: partial implementation deployed; historical usefulness gate
+failed.** Both real-day selection plans timed out on their first nonempty model
+request at180003ms each (360.18seconds total). October14's empty source group
+used no model. Zero candidates were produced for the four planned arms; strict
+parsing/save was never reached for those failed dates. Their factual accuracy,
+rubric coverage and summary length are therefore not assessable, and this run
+cannot establish Knowledge benefit. The failed generic boilerplate gate remains
+failed. No model-backed preparation mode, prompt/model sweep, repaired output or
+historical replacement was promoted.
+
+| Frozen comparison | October13 | October14 | Knowledge result |
+| --- | --- | --- | --- |
+| Existing source default, before and after explicit-outcome change |6272 Markdown characters;27 highlights |7810 characters;32 highlights | Facts/content identical apart from navigation; no demonstrated factual/editing benefit |
+| New selection-only diagnostic |180003ms timeout; neither arm has a candidate |180003ms timeout; neither arm has a candidate | Not measurable without candidates |
+| Private human reference, not automatic output |3507 characters;15 highlights |3705 characters;14 highlights |12/12 original items representable; all four parser/save arms pass |
+
+The unchanged default still fully highlights6/12 original rubric items; explicit
+outcomes improve future producer inputs, which the historical fixture does not
+contain. Its four before/after content and preview artifacts are byte-identical.
+The reference proves that useful complete summaries fit the bounds, not that the
+automatic selector can find them. Next delivery remains selection usefulness and
+latency over exact cards, or explicit owner selection/review; accepted-plan Product
+KB ingestion remains deferred until that daily-summary gate is demonstrated.
+Final local checks:286 Rust tests passed/13 opt-in tests ignored,230 browser
+tests passed, formatting/Clippy passed, qualified-outcome release Compose smoke
+passed through reviewed Apply/restart. The separate opt-in real-model diagnostic
+failed as reported. Tests initially unable to bind fixture sockets in the sandbox
+passed with permitted loopback execution; no evidence or assertion was weakened.
+
+Pretrial hypothesis, original inputs and unchanged rubric are frozen privately in
+`/tmp/log-inbox-concise-evaluation-20261016/`. KB ingestion remains gated.
+
+Architecture/feasibility evidence: Sol diagnosis and bounded Astra/low review
+rejected another positional/keyword ranking tweak. Source-only inference may
+select exact cards independently of semantic grouping; source preparation must
+remain provider-free unless the owner explicitly selects a model-backed option.
+A private human reference exposed catalog locality: distant same-field facts fit
+four×320 but useful pairings were absent from the bounded precomputed catalog.
+The evaluation-only helper therefore packs selected existing singleton cards
+on demand (at most three cards per bundle) and submits server-owned choices to
+the unchanged parser/save checks. Quotes, fields, historical labels, citations,
+complete ledger and final bounds remain unchanged. The oracle is private test
+data, never a production ranking, prompt, lookup or repaired model response.
+
+Independent reference review initially found11/12: the candidate omitted a scoped
+passed check alongside the interrupted full-host build. A separate corrected
+reference, retaining the first artifact, passed all four parser/save arms and all
+12 original rubric items. Its activity-only Markdown is3507/3705 characters,
+15/14 bullets, with58/58 dated bullet claims supported across all four arms.
+History remains147/191 cards. Each group fits eight facts and1600 highlight-text
+characters (largest1581); four facts per field,320 characters per fact and exact
+ownership remain enforced. This proves representability, not automatic selection.
+Actual model usefulness was not demonstrated in the trials below. The first small local
+selection probe (qwen3:4b-instruct-2507-q4_K_M, already installed) returned the
+needed source cards but incorrectly assigned outcome cards to Decision/Blocker;
+the unchanged field validator rejected it. The protocol asked the model to repeat
+known field ownership and propose packing, creating avoidable responsibilities.
+One evidence-based evaluation-only protocol revision now requests a flat list of
+known card refs; Rust derives fields and bounded packing from original cards.
+Original failed artifacts remain immutable. No repaired model output or production
+mode change was promoted. Private local endpoint transport initially required permitted loopback
+execution; the permitted response failure is distinct from that infrastructure gap.
+
+Flat-reference v2 initially passed the tiny sample (selected concrete behavior and
+probable/unverified/pending cards, omitted generic headline/count). Exposing the
+existing mandatory fields and exact Earlier/Latest labels changed the 4B choice:
+it omitted the probable-cause card and failed the semantic gate. No real-day
+output or runtime mode is promoted from that failed capability result. A second
+bounded Astra decision authorized one larger local instruction-model escalation,
+`gemma3:12b` from the official Ollama library, with the corrected flat policy and
+unchanged evidence checks. Resource inspection found10GiB available RAM plus7.6GB
+of idle task-model memory subject to normal expiry, and32GiB free disk. Existing
+model/default settings were preserved. Its frozen choice/stopping policy is in
+private `larger-model-decision.json`; the subsequent diagnostic exception below
+was recorded before real-day calls. No further model trial followed those failures.
+
+The larger model's small response retained all substantive behavior and
+probable/unverified/pending qualifications, but also the generic completion
+headline: strict boilerplate omission failed. Actual response `[0,2,3,4]`,62558ms;
+no unknown facts, field reassignment, count fragment or source/budget violation.
+That failed noise result remains failed. A focused Astra decision permitted one
+read-only real-day diagnostic against the original rubric/length targets; this
+explicitly changes the stopping policy, not the original result, model, prompt,
+evidence or rubric. No further model/prompt trial follows a failed real-day
+result. Private `real-diagnostic-decision.json` records the pre-run conditions.
+An experimental opt-in strategy required shorter summaries on both dates and
+improved complete coverage without losing previous full items. Independent
+review also had to find no material pending/qualification loss or unsupported
+closure, with passing strict save/history checks and acceptable whole-day latency.
+Those promotion conditions were not met.
+Provider-free defaults and the KB gate remain unchanged.
+
+Deterministic producer improvement implemented in this delivery:
+optional `metadata.outcome` is now admitted as exact source-owned outcome data and
+prioritized before that event's generic message. No original cards/history are
+pruned; qualified message-only sources remain supported. Agent reporting, ingest
+and MCP schema guidance describe short self-contained outcomes, separate checks
+and pending work, and no inferred verification or Knowledge approval. No owner
+metadata-correction authority or saved recommendation preferences were expanded.
+Contract `daily-structured-v22-source-outcomes` retains v21 safe historical expiry
+amendments. Focused source/forgery/provider-free and full legacy partial-expiry
+checks pass. Both frozen dates contain zero such new fields; before/after facts
+and topics match apart from the contract, and all four existing source-mode drafts,
+contents and previews are exactly identical. This is a future-input improvement,
+not a repair of historical prose or a passed automatic-usefulness gate.
+
+Independent complete-task review and focused follow-up resolved one P2: protected
+metadata reduction could omit an explicit outcome alongside large ancillary
+values. Outcomes now survive that reduction, and an explicit nonempty outcome
+with no eligible card fails visibly. Mixed typed containers require at least one
+eligible descendant, not every leaf. Regression coverage and the qualified-outcome
+release Compose Apply/restart check pass. Follow-up review found no remaining
+code findings; reviewed nine-path diff SHA256
+`bca4b00e68c6d0a0581c728f7b725d5992fa6878eecf1f573dba1c85772f68ed`
+against starting HEAD/base/merge-base `06cc1b0`. The actual diagnostic failed as
+reported above; passing code review does not establish summary usefulness.
+
+The deterministic producer change is deployed locally. Both built images match
+the running services; health and owner
+authentication pass, with October13–16 notes/revisions/evidence, environment and
+mounts preserved. Verified offline primary backup: quick_check `ok`,39 tables;
+old executable binaries are retained in ignored
+`tmp/deployments/concise-source-20261016/`. Browser verification shows the existing
+review draft preserved, Source-based default, no model used and nothing written.
+No historical draft was regenerated or applied, and no model-backed mode has
+been promoted.
+
+**Source highlight coverage — authorized 2026-10-16 (implemented and locally verified).**
+Improve important outcome and pending-work visibility before Product KB ingestion.
+Starting clean `main`: `34bbcc6690f063ce9f1345cf1a8e708c7b696214`;
+branch `codex/source-highlight-coverage` uses the runtime-required prefix.
+Root owns this record, specifications, evaluation and local deployment. Factory
+Sol/high planning and independent review, with a bounded Sol/medium engine worker;
+Ponytail lite applies within scope. The requested endpoint is local verification.
+
+1. Replace newest-event slot monopolization with a deterministic task/event
+   priority queue, using original source order and preferring main reports and
+   existing scope-bearing validation parents. Pack only existing bounded catalog
+   singleton/pair/triple choices; retain singleton fallback. This diversifies
+   reported tasks/events and prefers complete source reports.
+   Preserve exact quotes, qualifications, strict evidence ownership, conservative
+   grouping, complete history, four facts per field and existing text bounds.
+   Never infer that a later completion closes an independent earlier gate.
+2. Keep the original October13–14 evidence, Knowledge and twelve-item rubric
+   frozen. Compare new four-arm results to the prior 4/12 fully highlighted
+   baseline, independently checking source support, pending states, repetition
+   and editing burden. No fixture-specific production ranking or output repair.
+3. Run focused regressions and required integrated checks, independently review
+   the actual task diff, then back up app data and deploy locally. Verify health,
+   preserved notes/revisions and the source preparation flow without Apply.
+
+| Stage/scenario | Required evidence | State |
+| --- | --- | --- |
+| Selection and bounds | Generic task/event diversity, main-message/source-order, scoped validation, exact pending clauses, deterministic packing regressions | Passed |
+| Evidence/history/legacy safety | Strict parser/save, ownership, expiry and cache regressions; four-arm save validation; full history identical to baseline | Passed |
+| Real-day usefulness | Independent original-rubric comparison:6/12 versus4/12 full;118/118 dated bullets supported | Partial; substantial editing remains |
+| Integrated review and checks | Independent complete code diff;278 Rust tests,230 browser tests, fmt/Clippy/client format, release Compose smoke | Passed |
+| Local preservation/deployment | Offline backup integrity, health/login, preserved October13–15 revisions/notes/evidence; new October16 source candidate | Passed; no Apply |
+
+Frozen trial1 completed with the original32/44 events and unchanged rubric.
+All four candidates pass production parser and save validation. Each date shares
+one source ledger across Knowledge arms; no model or production DB insert is used.
+
+| Date | Baseline fully highlighted rubric items | New fully highlighted items | New highlights / retained history per arm |
+| --- | --- | --- | --- |
+| October13 | 2/6 | 3/6 | 27 / 147 |
+| October14 | 2/6 | 3/6 | 32 / 191 |
+
+Independent assessment finds age-validation delivery/limitations and signer-return
+aggregate-PDF behavior now complete in highlights, increasing total coverage from
+4/12 to6/12. All118 dated highlighted bullet claims (166 source clauses across
+four arms) are supported in the inspected evidence; support does not imply
+currentness or completeness. All original history is preserved. Remaining six
+rubric items are partial: font delivery/live-PDF qualifications/decision details,
+PR9417 interrupted full build and policy gates, the expired-key probable diagnosis,
+and the separate unimplemented OIDC story still need source-history inspection.
+
+The drafts remain useful audit/review starting records requiring substantial
+editing. Fewer bullets do not mean more concise output: Markdown grows from4368
+to6272 characters on October13 and6075 to7810 on October14 (activity-only).
+Historical review instructions still create stale clutter; no closure is inferred.
+Knowledge changes navigation only; paired factual content/history is identical,
+with zero source excerpts and no demonstrated factual/editing benefit. Composition
+in this single trial took136–196ms per arm; this is neither full API latency nor a
+performance benchmark. The bounded selector is a modest coverage improvement,
+not a passed human-usefulness or Product KB gate.
+
+Private immutable trial inputs/rubric and pretrial hypothesis:
+`/tmp/log-inbox-highlight-evaluation-20261016/freeze.json`; actual four arms and
+independent assessment in `trial-1/`. All source-pointer quotes (147/191 per date)
+were checked against original events. No fixture/rubric changes or candidate
+repair occurred. New contract `daily-structured-v21-source-highlights` invalidates
+ordinary older-candidate reuse; v20 retains the safe historical expiry amendment
+path. There is no schema change or automatic revision rewrite.
+
+Stage ledger: factory Sol/high plan, bounded Sol/medium implementation and
+independent Sol/high actual-code/output reviews complete. Independent complete
+code review covers `llm.rs` and `main.rs` against base/merge-base `34bbcc6`,
+code-diff SHA256 `974ea9aded5b945d80fa1a5fdab910b1f9050e3fe7ee59e90d932f2b11c6a77e`:
+no findings. Reviewer loopback-fixture permission gaps were covered by the
+coordinator's permitted full workspace run:278 passed,10 explicitly ignored.
+Rust format/all-target Clippy, client format and Chromium/Firefox230 tests passed.
+Release Compose smoke passed preparation with its fake provider stopped,
+reviewed Apply, owner-content preservation, restart and navigation/history checks
+in disposable storage. Final production build passed; no remote CI was run for
+this local delivery.
+
+Local verification: [Daily October16](http://127.0.0.1:8788/?date=2026-10-16)
+shows a ready source-based draft with no model:40 uniquely owned events,9 source
+groups,150 history cards, exact v21 provenance and unchanged manual notes/Apply
+state. No existing October13–15 revision or note was regenerated. Both services
+are healthy and running the exact built images; data/workspace/master-key mounts
+and environment are unchanged. Offline primary SQLite backup passes quick_check
+with39 tables; existing archived backups and rollback binaries were retained in
+ignored `tmp/deployments/source-highlights-20261016/`. An initial backup inventory
+assertion included archived databases; explicit primary-database verification
+subsequently passed against the same offline copy. Runtime and release checks
+are recorded privately in `/tmp/log-inbox-highlight-validation-20261016/`.
+Knowledge remains optional; Product KB ingestion and agent recall stay gated.
 
 **Source-based preparation — authorized 2026-10-16 (implemented and locally verified).**
 The owner accepted the revised recovery strategy and explicitly requested the

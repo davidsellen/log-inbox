@@ -16,6 +16,7 @@ const dailyAssets = Object.fromEntries(await Promise.all([
   "daily.js",
   "daily-navigation.js",
   "daily-helpers.js",
+  "daily-recap.js",
   "daily-references.js",
   "daily-settings.js",
   "daily-generation.js",
@@ -497,16 +498,71 @@ test("Daily navigation works without a day list or its preference", async ({ pag
   expect(requests.filter(request => request.path === "/api/v2/settings/dashboard")).toHaveLength(0);
 });
 
-test("Applied days show a completed state and hide review messaging", async ({ page }) => {
-  await mockDaily(page);
+test("Applied days allow reapplying through the exact managed-block review", async ({ page }) => {
+  const requests = await mockDaily(page);
   await page.route("**/api/v2/daily/2026-09-08", route =>
     route.fulfill({ json: dailyResponse("2026-09-08", { reviewStatus: "applied", applyStatus: { state: "finalized" } }) }),
   );
   await openDaily(page);
   await expect(page.locator("#status")).toContainText("Applied to Markdown");
   await expect(page.locator("#generation-status")).toBeHidden();
-  await expect(page.locator("#review-apply")).toBeHidden();
+  await expect(page.locator("#write-status")).toHaveText("Applied to Markdown");
   await expect(page.getByText("Draft ready to review. Nothing has been written.")).toHaveCount(0);
+  await page.getByRole("button", { name: "Review & reapply", exact: true }).click();
+  await expect(page.locator("#apply-dialog")).toBeVisible();
+  await expect(page.locator("#apply-before")).toHaveText("Old");
+  await expect(page.locator("#apply-after")).toHaveText("Reviewed Daily");
+  expect(requests.some(request => request.path.endsWith("/apply-preview") && request.method === "GET")).toBe(true);
+  expect(requests.some(request => request.path.endsWith("/apply") && request.method === "POST")).toBe(false);
+  await page.getByRole("button", { name: "Save to note", exact: true }).click();
+  await expect.poll(() => requests.find(request => request.path.endsWith("/apply") && request.method === "POST")?.body).toMatchObject({
+    expected_revision_id: "revision_1",
+    expected_revision_content_hash: "a".repeat(64),
+    expected_old_block_hash: "b".repeat(64),
+    intended_new_block_hash: "c".repeat(64),
+    expected_target_exists: true,
+    expected_original_content_hash: "e".repeat(64),
+    expected_updated_content_hash: "d".repeat(64)
+  });
+});
+
+test("Reapply stays disabled without CSRF authority or while an Apply needs attention", async ({ page }) => {
+  const requests = await mockDaily(page);
+  const data = dailyResponse("2026-09-08", { reviewStatus: "applied", applyStatus: { state: "finalized" } });
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  await openDaily(page);
+  await page.route("**/api/v2/auth/session", route => route.fulfill({ json: { authenticated: true, csrf_token: null } }));
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Review & reapply", exact: true })).toBeDisabled();
+  await page.unroute("**/api/v2/auth/session");
+  data.apply_status = { id: "pending_apply", state: "reconciliation_required", can_retry: true };
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Review & reapply", exact: true })).toBeDisabled();
+  await expect(page.locator("#apply-attention")).toBeVisible();
+  expect(requests.some(request => request.path.endsWith("/apply-preview") || request.path.endsWith("/apply"))).toBe(false);
+});
+
+test("An older finalized Apply does not hide a new draft or its preparation status", async ({ page }) => {
+  const requests = await mockDaily(page, { applyStatus: { state: "finalized" } });
+  const data = dailyResponse("2026-09-08", { revisionId: "revision_2", origin: "structured_edit", applyStatus: { state: "finalized" } });
+  data.current_revision.revision_number = 2;
+  data.generation_attempt = { id: "failed_attempt", state: "failed", stage: "complete", error: "Model unavailable", started_at: "2026-09-08T09:00:00Z" };
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  await page.route("**/api/v2/daily/2026-09-08/apply-preview", route => route.fulfill({ json: {
+    revision_id: "revision_2", revision_content_hash: "a".repeat(64),
+    destination_path: data.destination_path, block_id: "day_fixture",
+    previous_block: "Old", next_block: "New recap", will_create_note: false
+  } }));
+  await openDaily(page);
+  await expect(page.locator("#status")).toContainText("Revision 2");
+  await expect(page.locator("#status")).not.toContainText("Applied to Markdown");
+  await expect(page.locator("#write-status")).toHaveText("Nothing is written yet");
+  await expect(page.locator("#generation-status")).toBeVisible();
+  await expect(page.locator("#apply-attention")).toBeHidden();
+  await page.getByRole("button", { name: "Review & save", exact: true }).click();
+  await expect(page.locator("#apply-dialog")).toBeVisible();
+  await expect(page.locator("#apply-after")).toHaveText("New recap");
+  expect(requests.some(request => request.path.endsWith("/apply") && request.method === "POST")).toBe(false);
 });
 
 test("Needs attention lists incomplete days without restoring the day rail", async ({ page }) => {
@@ -1629,6 +1685,7 @@ test("refocused Daily dismisses and reopens the exact visible candidate", async 
   await page.getByRole("button", { name: "Dismiss", exact: true }).click();
   await expect(page.getByRole("button", { name: "Reopen", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Regenerate" })).toBeDisabled();
+  await expect(page.locator("#review-apply")).toBeHidden();
   await page.getByRole("button", { name: "Reopen", exact: true }).click();
   await expect(page.getByRole("button", { name: "Dismiss", exact: true })).toBeVisible();
 
@@ -2421,4 +2478,165 @@ test("Untouched partial-expiry amendment omits failed semantic mode and model", 
   await page.locator("#generation-model-picker").selectOption({label:"Local / small"});
   await page.locator("#generate").click();
   await expect.poll(()=>bodies[1]).toEqual({replace_edited:false,preparation_mode:"semantic",connection_id:"environment",model:"small"});
+});
+
+test("Editorial recap is short, editable and keeps supporting reports", async ({ page }) => {
+  await mockDaily(page);
+  const data = dailyResponse();
+  data.current_revision.origin = "structured_edit";
+  data.current_revision.content.open_questions = ["Confirm outstanding provider acceptance."];
+  const fact = text => ({ text, evidence_event_ids: ["evt_1"] });
+  data.current_revision.content.recap = {
+    summary: fact("The Daily review is ready locally. Provider acceptance still needs checking."),
+    topics: [{ title: "Daily review", done: fact("Built and checked the review flow."), pending: fact("Check live provider acceptance.") }]
+  };
+  data.preview_markdown = "The Daily review is ready locally. Provider acceptance still needs checking.\n\n### Daily review\n\n- **Done:** Built and checked the review flow.\n- **Pending:** Check live provider acceptance.";
+  const originalWork = structuredClone(data.current_revision.content.workstreams);
+  let saved;
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  await page.route("**/api/v2/daily/2026-09-08/candidate", route => {
+    saved = route.request().postDataJSON();
+    data.current_revision.content = saved.content;
+    data.current_revision.id = "revision_2";
+    return route.fulfill({ json: { id: "revision_2" } });
+  });
+  await openDaily(page);
+  const support = page.locator(".supporting-activity");
+  await expect(support).not.toHaveAttribute("open", "");
+  await expect(page.getByText("Built a predictable Daily review.", { exact: true })).toBeHidden();
+  await expect(page.getByText("Confirm outstanding provider acceptance.", { exact: true })).toBeHidden();
+  await support.locator(":scope > summary").click();
+  await expect(page.getByText("Confirm outstanding provider acceptance.", { exact: true })).toBeVisible();
+  await support.locator(":scope > summary").click();
+  await expect(page.locator("#readable-draft")).toContainText("Check live provider acceptance.");
+  await page.evaluate(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async text => { window.copiedDraft = text; } } }));
+  await page.getByRole("button", { name: "Copy draft", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.copiedDraft)).toBe(data.preview_markdown);
+  await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+  await expect(page.getByLabel("Workstream 1 title")).toBeDisabled();
+  await page.getByLabel("Day summary", { exact: true }).fill("Reviewed the local Daily flow; live acceptance remains pending.");
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.getByRole("button", { name: "Next day", exact: true }).click();
+  await expect(page.getByLabel("Day summary", { exact: true })).toHaveValue("Reviewed the local Daily flow; live acceptance remains pending.");
+  await page.getByRole("button", { name: "Save edits", exact: true }).click();
+  await expect.poll(() => saved?.content.recap.summary.text).toBe("Reviewed the local Daily flow; live acceptance remains pending.");
+  expect(saved.expected_revision_id).toBe("revision_1");
+  expect(saved.content.workstreams).toEqual(originalWork);
+  await page.reload();
+  await expect(page.locator("#readable-draft")).toContainText("Reviewed the local Daily flow; live acceptance remains pending.");
+  await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+  await page.getByLabel("Day summary", { exact: true }).fill("Unsaved recap");
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Cancel editing", exact: true }).click();
+  await expect(page.locator("#readable-draft")).toContainText("Reviewed the local Daily flow; live acceptance remains pending.");
+});
+
+test("Owner can add and remove an evidence-linked short recap", async ({ page }) => {
+  await mockDaily(page);
+  const data = dailyResponse();
+  let saved;
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  await page.route("**/api/v2/daily/2026-09-08/candidate", route => {
+    saved = route.request().postDataJSON();
+    data.current_revision.content = saved.content;
+    data.current_revision.id = "revision_2";
+    return route.fulfill({ json: { id: "revision_2" } });
+  });
+  await openDaily(page);
+  await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+  await page.getByRole("button", { name: "Add short recap", exact: true }).click();
+  await page.getByLabel("Day summary", { exact: true }).fill("Improved the Daily review flow.");
+  await page.getByLabel("Day summary supporting reports", { exact: true }).selectOption(["evt_1"]);
+  await page.getByLabel("Topic 1 title", { exact: true }).fill("Daily review");
+  await page.getByLabel("Done for topic 1", { exact: true }).fill("Implemented the review flow.");
+  await page.getByLabel("Done for topic 1 supporting reports", { exact: true }).selectOption(["evt_1"]);
+  await page.getByRole("button", { name: "Save edits", exact: true }).click();
+  await expect.poll(() => saved?.content.recap.topics[0].done.evidence_event_ids).toEqual(["evt_1"]);
+  await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+  await page.getByRole("button", { name: "Remove recap", exact: true }).click();
+  await expect(page.getByLabel("Workstream 1 title")).toBeEnabled();
+  await page.getByRole("button", { name: "Save edits", exact: true }).click();
+  await expect.poll(() => saved?.content.recap).toBeUndefined();
+});
+
+test("Omitting one cited source hides whole editorial prose without splicing", async ({ page }) => {
+  await mockDaily(page);
+  const data = dailyResponse();
+  data.current_snapshot_evidence.push({ event_id: "evt_2", disposition: "omit" });
+  data.current_revision.content.workstreams[0].evidence_event_ids.push("evt_2");
+  data.current_revision.content.recap = {
+    summary: { text: "Mixed-source summary must disappear entirely.", evidence_event_ids: ["evt_1", "evt_2"] },
+    topics: [{ title: "Review", done: { text: "Kept supported outcome.", evidence_event_ids: ["evt_1"] }, pending: { text: "Omitted pending interpretation.", evidence_event_ids: ["evt_2"] } }]
+  };
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  await openDaily(page);
+  const draft = page.locator("#readable-draft");
+  await expect(draft).not.toContainText("Mixed-source summary must disappear entirely.");
+  await expect(draft).not.toContainText("Omitted pending interpretation.");
+  await expect(draft).toContainText("Kept supported outcome.");
+  await expect(draft).toContainText("Some recap text is hidden");
+});
+
+test("Server-ordered recap preserves citations and only guards actual edits", async ({ page }) => {
+  await mockDaily(page);
+  const data = dailyResponse();
+  data.current_revision.origin = "structured_edit";
+  data.current_revision.content.workstreams[0].evidence_event_ids.push("evt_2");
+  data.current_snapshot_evidence.push({ event_id: "evt_2", disposition: "include" });
+  // serde_json sorts object keys, including nested facts and topics.
+  data.current_revision.content.recap = {
+    summary: { evidence_event_ids: ["evt_2", "evt_1"], text: "Both reported changes are retained." },
+    topics: [{
+      done: { evidence_event_ids: ["evt_2", "evt_1"], text: "Reviewed the changes." },
+      pending: { evidence_event_ids: ["evt_1"], text: "Check live acceptance." },
+      title: "Review"
+    }]
+  };
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  let dialogs = 0;
+  page.on("dialog", dialog => { dialogs++; return dialog.dismiss(); });
+  await openDaily(page);
+  await page.getByRole("button", { name: "Next day", exact: true }).click();
+  await expect(page.getByLabel("Daily log date")).toHaveValue("2026-09-09");
+  expect(dialogs).toBe(0);
+  await page.getByRole("button", { name: "Previous day", exact: true }).click();
+  await expect(page.getByLabel("Day summary", { exact: true })).toHaveValue("Both reported changes are retained.");
+  await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+  await page.getByLabel("Day summary", { exact: true }).fill("An unsaved recap edit.");
+  await page.getByRole("button", { name: "Next day", exact: true }).click();
+  await expect(page.getByLabel("Daily log date")).toHaveValue("2026-09-08");
+  await expect(page.getByLabel("Day summary", { exact: true })).toHaveValue("An unsaved recap edit.");
+  expect(dialogs).toBe(1);
+});
+
+
+test("Editorial recap keeps reviewed references visible only for visible citations", async ({ page }) => {
+  await mockDaily(page);
+  const data = dailyResponse();
+  const work = data.current_revision.content.workstreams[0];
+  work.evidence_event_ids = ["evt_1"];
+  work.canonical_links = ["[[Daily product]]", "[[Shared]]", "[[bad\nlink]]", "not a link", "[[ ]]", "[[<img src=x onerror=alert(1)>]]"];
+  data.current_revision.content.workstreams.push(
+    { ...structuredClone(work), id: "second", evidence_event_ids: ["evt_2"], canonical_links: ["[[Other product]]", "[[Shared]]"] },
+    { ...structuredClone(work), id: "pending", evidence_event_ids: ["evt_3"], canonical_links: ["[[Pending product]]", "[[Shared]]"] },
+    { ...structuredClone(work), id: "uncited", evidence_event_ids: ["evt_4"], canonical_links: ["[[Uncited product]]"] },
+  );
+  data.current_revision.content.recap = {
+    summary: { text: "A mixed summary.", evidence_event_ids: ["evt_1", "evt_2"] },
+    topics: [{ title: "Work", done: { text: "Delivered.", evidence_event_ids: ["evt_1"] }, pending: { text: "Pending acceptance.", evidence_event_ids: ["evt_3"] } }],
+  };
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  await openDaily(page);
+  const related = page.locator("#readable-draft > .recap-related");
+  await expect(related).toBeVisible();
+  await expect(related).toHaveText("Related: [[Daily product]] · [[Shared]] · [[<img src=x onerror=alert(1)>]] · [[Other product]] · [[Pending product]]");
+  await expect(related.locator("img")).toHaveCount(0);
+  await expect(page.locator(".supporting-activity")).not.toHaveAttribute("open", "");
+  data.current_snapshot_evidence.push({ event_id: "evt_2", disposition: "omit" });
+  await page.reload();
+  await expect(related).toHaveText("Related: [[Daily product]] · [[Shared]] · [[<img src=x onerror=alert(1)>]] · [[Pending product]]");
+  await expect(page.locator("#readable-draft")).not.toContainText("A mixed summary.");
+  data.current_snapshot_evidence.push({ event_id: "evt_1", disposition: "omit" }, { event_id: "evt_3", disposition: "superseded_by" });
+  await page.reload();
+  await expect(related).toHaveCount(0);
 });

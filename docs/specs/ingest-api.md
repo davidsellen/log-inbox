@@ -67,4 +67,5 @@ Return process and storage health.
 - Producers should split large activity into ordered events sharing `task_id` or `session_id` metadata.
 - `sequence`, `event_type`, `repo` or `project`, `branch`, `product`, `modules`, `changed_paths`, `commit`, and validation fields preserve consolidation context.
 - Meaningful agent work should emit a correlated opening event and a terminal `complete`, `blocked`, or `failed` event.
+- Optional `metadata.outcome` carries a short self-contained reported result with its qualifications; it does not establish independent verification, acceptance or Knowledge-write authority. Keep checks and pending actions in their corresponding validation/blocker/follow-up fields.
 - See [Agent activity reporting](../agent-integration.md) for the recommended lifecycle and metadata contract.

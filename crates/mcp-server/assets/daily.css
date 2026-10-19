@@ -413,6 +413,40 @@ button.primary:not(:disabled):hover {
   margin-top: 9px;
   align-items: start;
 }
+
+.recap-editor {
+  margin-bottom: 1.5rem;
+}
+.recap-fact {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0.8rem 0;
+}
+.recap-fact textarea,
+.recap-fact select,
+.recap-topic-editor input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.recap-topic-editor {
+  margin: 1rem 0;
+  min-width: 0;
+}
+.recap-prose {
+  line-height: 1.6;
+}
+.recap-sources {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.recap-topic {
+  margin: 1.25rem 0;
+}
+.supporting-activity {
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
+  margin-top: 1.5rem;
+}
 .fact label {
   color: var(--muted);
   font-size: 13px;

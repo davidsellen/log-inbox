@@ -4429,6 +4429,7 @@ async fn generate_daily_candidate_inner(
             ));
         }
         let content = serde_json::to_value(DailyRevisionContent {
+            recap: None,
             schema_version: 1,
             workstreams: Vec::new(),
             manual_entry_ids,
@@ -5374,6 +5375,7 @@ async fn dashboard_page() -> Response {
 async fn dashboard_asset(AxumPath(name): AxumPath<String>) -> Response {
     let (content_type, body) = match name.as_str() {
         "daily.js" => ("text/javascript", include_str!("../assets/daily.js")),
+        "daily-recap.js" => ("text/javascript", include_str!("../assets/daily-recap.js")),
         "daily-helpers.js" => (
             "text/javascript",
             include_str!("../assets/daily-helpers.js"),
@@ -5549,6 +5551,7 @@ mod knowledge_destination_tests {
             ("daily.js", "text/javascript"),
             ("daily-navigation.js", "text/javascript"),
             ("daily-helpers.js", "text/javascript"),
+            ("daily-recap.js", "text/javascript"),
             ("daily-references.js", "text/javascript"),
             ("daily-settings.js", "text/javascript"),
             ("daily.css", "text/css"),
@@ -5644,6 +5647,7 @@ mod knowledge_destination_tests {
     fn open_context_comparison_projection_keeps_randomized_assignment_blind() {
         let state = test_state();
         let content = DailyRevisionContent {
+            recap: None,
             schema_version: 1,
             workstreams: Vec::new(),
             manual_entry_ids: Vec::new(),
@@ -8973,6 +8977,8 @@ mod knowledge_destination_tests {
             "daily-structured-v17-source-representatives",
             "daily-structured-v18-source-frontier",
             "daily-structured-v19-source-based",
+            "daily-structured-v20-source-headings",
+            "daily-structured-v21-source-highlights",
         ] {
             let (mut state, profile, date) = generation_test_state();
             state.llm_config = Some(llm::LlmConfig::for_test("http://127.0.0.1:9"));
@@ -9288,6 +9294,47 @@ mod knowledge_destination_tests {
         .await;
         assert_eq!(reapplied.status(), StatusCode::OK);
         assert_eq!(response_json(reapplied).await["idempotent"], true);
+
+        // Reviewing the already-applied current revision obtains a new approval
+        // against the current file, rather than replaying the original request.
+        let repeat_preview = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/daily/2026-09-09/apply-preview",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(repeat_preview.status(), StatusCode::OK);
+        let repeat_preview = response_json(repeat_preview).await;
+        let repeat_apply = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/daily/2026-09-09/apply",
+            json!({
+                "expected_revision_id": repeat_preview["revision_id"],
+                "expected_revision_content_hash": repeat_preview["revision_content_hash"],
+                "destination_path": repeat_preview["destination_path"],
+                "expected_old_block_hash": repeat_preview["expected_old_block_hash"],
+                "intended_new_block_hash": repeat_preview["intended_new_block_hash"],
+                "expected_target_exists": repeat_preview["expected_target_exists"],
+                "expected_original_content_hash": repeat_preview["expected_original_content_hash"],
+                "expected_updated_content_hash": repeat_preview["updated_content_hash"]
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(repeat_apply.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(repeat_apply).await["operation"]["state"],
+            "finalized"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace_root.join(destination)).unwrap(),
+            written
+        );
 
         let newer_manual = json_response(
             app.clone(),

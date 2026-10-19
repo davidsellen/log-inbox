@@ -28,7 +28,7 @@ pub struct LogActivityRequest {
     pub message: String,
     #[serde(default)]
     #[schemars(
-        description = "Structured activity facts such as task_id, session_id, sequence, event_type, status, repository, branch, modules, and validation."
+        description = "Structured activity facts such as task_id, session_id, sequence, event_type, status, repository, branch, modules, and validation. For terminal reports, outcome may contain a short self-contained result with its scope and unresolved qualifications; keep checks and pending work explicit."
     )]
     pub metadata: Option<Map<String, Value>>,
     #[serde(default)]

@@ -70,6 +70,35 @@ owner activity record or raw Markdown export; Copy and Apply use the highlights.
 
 Revision origin is `generated`, `structured_edit`, `manual`, `regenerated`, or `advanced_markdown`. Advanced Markdown is a detached override: returning to structured generation or discarding it requires confirmation, and evidence decisions remain explicit records.
 
+Schema version1 may contain an optional editorial `recap`: a `summary` fact and
+one to five topics, each with a `title` and optional `done`/`pending` facts. Each
+fact has plain `text` and unique nonempty `evidence_event_ids` from the same
+snapshot. It is an owner or authorized writing agent's interpretation; citations
+provide traceability, not independent factual verification or complete coverage.
+The application does not automatically write a recap or infer Done from a task's
+lifecycle state. Every topic requires Done or Pending; empty statuses are absent.
+
+Recaps require an explicit `structured_edit` of an existing structured candidate.
+They cannot appear in generated, manual-only or activity-record revisions. While
+a recap is present, the original workstreams and source history are immutable;
+remove the recap before editing those fields. Manual-note amendments preserve it.
+Absent recaps are omitted from serialization, preserving legacy content hashes.
+The paragraph is limited to1000 characters, titles80, each topic status320 and
+all recap text4000 characters. Control characters and unknown fields are rejected.
+
+Readable Daily, Copy and Apply use the recap paragraph and topic Done/Pending
+bullets, plus selected My notes. Original highlights, open questions and complete
+source history remain available as collapsed supporting activity in the app.
+Omitting, superseding or marking any cited source duplicate hides the entire
+dependent paragraph/bullet; editorial paraphrases are never spliced or silently
+replaced with raw reports. Owner review and Confirm Apply remain explicit.
+
+Recap Markdown and readable Daily retain a compact **Related** line. It contains
+only existing reviewed canonical links on workstreams owning evidence cited by
+visible recap statements. Links are deduplicated; uncited workstreams, statements
+hidden by exclusions and malformed wikilinks cannot add navigation. Links remain
+optional reference navigation, never additional factual evidence or KB approval.
+
 An owner-requested activity record uses content schema version 2 and origin `structured_edit`. Its workstreams contain neutral `activity` entries, each with text and exactly one distinct evidence ID. It cannot contain inferred factual fields, canonical links, or open questions. Schema version 1 remains the structured preparation format (source-based or semantic) and cannot contain activity entries. Editing preserves the schema version; changing an activity record to a structured draft requires explicit regeneration approval. All snapshot evidence must remain represented, with omission handled separately. Markdown and Copy retain the “Activity record · not AI-summarized” label.
 
 A Knowledge context comparison is a separate immutable experiment bound to one unedited source revision, its complete evidence snapshot, frozen Knowledge snapshot, and non-secret model/contract fingerprints. It stores two validated shadow contents in randomized order and reveals their identity only after a single owner decision. Choosing an arm atomically creates a normal `regenerated` proposal revision; the source and unchosen arm remain recoverable audit evidence. An open comparison never changes the day or Markdown.
@@ -87,6 +116,13 @@ A late-evidence deferral is a separate reversible resolution of one event ID and
 ### Apply operation
 
 An Apply operation records the exact approved proposal revision and hash, destination, expected managed-block revision, intended new block hash, and recovery material before touching Markdown.
+
+The day's `review_status` describes its current revision. A latest finalized
+operation may belong to an older revision and must not make a newer draft appear
+applied or hide its review action. An applied current revision still exposes
+**Review & reapply**, using the ordinary fresh preview and confirmation flow.
+Pending operations continue to block a new Apply until recovery is resolved.
+Reapplication retains existing revision/file hash guards and managed-block scope.
 
 States are `prepared`, `writing`, `written`, `finalized`, `failed`, and `reconciliation_required`. Retries use the same operation ID. On restart, the service compares the journal with the file and either finalizes an already completed write or requires reconciliation; it never appends a duplicate block.
 
