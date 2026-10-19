@@ -1574,7 +1574,7 @@ Plan and acceptance:
 5. Independent complete task-diff review, required repository checks and disposable
    runtime validation. Coordinator owns this task record and integration.
 
-Stage ledger: plan, implementation, complete independent review, integrated Rust/browser validation and exact-final-source disposable Compose smoke passed. No commit, publication or owner-installation deployment performed.
+Initial implementation stage: plan, implementation, complete independent review, integrated Rust/browser validation and exact-final-source disposable Compose smoke passed. Commit, deployment and publication were separately authorized afterward; their records follow.
 Factory routing: bounded Sol/medium core and app workers; independent Sol/high
 reviewer; current chat coordinates. Ponytail lite applied for this implementation
 stage: reuse ingest, existing scopes/native DOM and atomic writer; no new dependency,
@@ -1635,3 +1635,19 @@ submissions. The deployment's structured terminal report supplies real source
 material for capture and review, with implementation, verification and local
 deployment retained as separate reported claims. KB acceptance and canonical
 confirmation remain the owner's actions. No remote publication was requested.
+
+
+### KB flow PR publication — 2026-10-19
+
+After trying capture, review, preview and the completed canonical update, the owner
+requested [PR #4](https://github.com/davidsellen/log-inbox/pull/4). The PR targets
+`main`; its 26-path scope retains the reviewed KB implementation and local
+deployment documentation. The target at publication is `30e636b`, with merge-base
+`bb5a111`; their trees are identical, so the previous complete implementation
+review remains applicable. Publication review found no remaining actionable issues.
+The PR tracks current CI and readiness; local validation and deployment evidence
+remain recorded above. No merge is authorized by this publication request.
+
+UX follow-up: the owner finds the flow acceptable for this delivery and wants the
+experience improved. Refine that scope in follow-up work; this PR does not add a
+redesign or treat the first UI as the final experience.
