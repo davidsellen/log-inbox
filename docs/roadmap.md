@@ -304,6 +304,53 @@ the associated pull request and lifecycle report.
 
 ### Next Product KB ingestion delivery
 
+**Recap Knowledge links — authorized 2026-10-19 (fixed, deployed and applied).**
+The owner reports missing Forms and Log Inbox links after the short recap was
+applied. Starting clean `b01b86c` on the same local branch. The recap renderer
+returns before rendering existing reviewed canonical links. A separate live
+diagnosis found the saved Forms mapping matches product `Forms`, while newer
+reports use `Sweet Forms`; the existing Forms note is available and reviewed.
+Factory Sol/medium owns the bounded renderer/UI/browser regressions; root owns
+this record, alias correction, local preservation/deployment and requested note
+repair. Independent review follows; no Knowledge-note content is changed.
+
+1. Restore a compact Related line from reviewed links on source workstreams
+   owning visible cited recap facts. Deduplicate; exclude uncited/omitted reports
+   and malformed links, without inferring new associations or factual claims.
+2. Add the explicit Sweet Forms product alias to the existing Forms note using
+   the normal Knowledge mapping API. Refresh references through normal source
+   preparation and reattach the unchanged authored recap with its same citations.
+3. Test link rendering/exclusions in Markdown and both browsers; review and run
+   required checks. Preserve source history, prose and note surroundings.
+4. Back up, deploy locally and use normal reviewed Apply to restore the links in
+   the October16 note. Automatic recap writing and Product KB ingestion stay deferred.
+
+Complete independent review of all six task paths against `b01b86c` found no
+findings (diff SHA256 `5cf9ce455e8456afcf7ebfa432b1d1120bf779dc56c9a6e2d2aef3b2180f5aca`).
+Validation:289 Rust tests passed/13 ignored,244 Chromium/Firefox tests passed,
+format/client formatting/Clippy and release Compose Apply/restart passed. Tests
+cover deduplication, invalid/uncited links, pending-only references, whole-prose
+exclusions and literal text rendering. Earlier worker Chromium launches lacked
+sandbox permissions; the permitted complete run passed.
+
+The existing reviewed Forms target was reused for the explicit `Sweet Forms`
+product alias. Normal source preparation refreshed its frozen references, then
+the exact prior authored recap was reattached as revision5
+`revision_68b9fc389e7f498eb5cd365cce014701`. All49 event IDs, manual notes,
+recap text/citations and source fields/history are unchanged except canonical
+links. The resulting1394-character preview contains one compact Related line
+with Log Inbox and Sweet Forms, each once. No product paths are hardcoded in
+the application, and no Knowledge-note contents were modified.
+
+Both local built images are healthy; existing drafts, note metadata, environment
+and mounts were preserved before the requested repair. A consistent39-table
+backup passes quick_check; rollback executables, the original note, alias and
+refresh records are in ignored `tmp/deployments/recap-links-20261019/`.
+Normal fresh-preview Apply finalized the repaired note as
+`apply_aa40e2141ada491b5f8aa6ee2d9ed00349089b4d3781d68a96ef1b9ed498be4c`.
+Exact whole-file and block checks verify both links, unchanged recap prose,
+one managed block and preservation of surrounding note bytes/line ending.
+
 **Daily reapply — authorized 2026-10-19 (fixed, deployed and reapplied).**
 The owner applied the previous note and cannot apply the newer recap. Starting
 clean `7248879` on the same local branch. Live diagnosis: October16 revision3 is

@@ -1636,6 +1636,7 @@ function renderCandidate(content) {
       content.recap,
       excluded,
       state.data.automated_evidence?.events || [],
+      content.workstreams,
     );
     supportingRoot = el("details", "supporting-activity");
     supportingRoot.append(

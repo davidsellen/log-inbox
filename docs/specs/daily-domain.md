@@ -93,6 +93,12 @@ Omitting, superseding or marking any cited source duplicate hides the entire
 dependent paragraph/bullet; editorial paraphrases are never spliced or silently
 replaced with raw reports. Owner review and Confirm Apply remain explicit.
 
+Recap Markdown and readable Daily retain a compact **Related** line. It contains
+only existing reviewed canonical links on workstreams owning evidence cited by
+visible recap statements. Links are deduplicated; uncited workstreams, statements
+hidden by exclusions and malformed wikilinks cannot add navigation. Links remain
+optional reference navigation, never additional factual evidence or KB approval.
+
 An owner-requested activity record uses content schema version 2 and origin `structured_edit`. Its workstreams contain neutral `activity` entries, each with text and exactly one distinct evidence ID. It cannot contain inferred factual fields, canonical links, or open questions. Schema version 1 remains the structured preparation format (source-based or semantic) and cannot contain activity entries. Editing preserves the schema version; changing an activity record to a structured draft requires explicit regeneration approval. All snapshot evidence must remain represented, with omission handled separately. Markdown and Copy retain the “Activity record · not AI-summarized” label.
 
 A Knowledge context comparison is a separate immutable experiment bound to one unedited source revision, its complete evidence snapshot, frozen Knowledge snapshot, and non-secret model/contract fingerprints. It stores two validated shadow contents in randomized order and reveals their identity only after a single owner decision. Choosing an arm atomically creates a normal `regenerated` proposal revision; the source and unchosen arm remain recoverable audit evidence. An open comparison never changes the day or Markdown.

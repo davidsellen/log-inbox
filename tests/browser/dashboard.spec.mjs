@@ -2595,3 +2595,35 @@ test("Untouched recap preserves citation order and does not block navigation", a
   await expect(page.getByLabel("Daily log date")).toHaveValue("2026-09-09");
   expect(dialogs).toBe(0);
 });
+
+
+test("Editorial recap keeps reviewed references visible only for visible citations", async ({ page }) => {
+  await mockDaily(page);
+  const data = dailyResponse();
+  const work = data.current_revision.content.workstreams[0];
+  work.evidence_event_ids = ["evt_1"];
+  work.canonical_links = ["[[Daily product]]", "[[Shared]]", "[[bad\nlink]]", "not a link", "[[ ]]", "[[<img src=x onerror=alert(1)>]]"];
+  data.current_revision.content.workstreams.push(
+    { ...structuredClone(work), id: "second", evidence_event_ids: ["evt_2"], canonical_links: ["[[Other product]]", "[[Shared]]"] },
+    { ...structuredClone(work), id: "pending", evidence_event_ids: ["evt_3"], canonical_links: ["[[Pending product]]", "[[Shared]]"] },
+    { ...structuredClone(work), id: "uncited", evidence_event_ids: ["evt_4"], canonical_links: ["[[Uncited product]]"] },
+  );
+  data.current_revision.content.recap = {
+    summary: { text: "A mixed summary.", evidence_event_ids: ["evt_1", "evt_2"] },
+    topics: [{ title: "Work", done: { text: "Delivered.", evidence_event_ids: ["evt_1"] }, pending: { text: "Pending acceptance.", evidence_event_ids: ["evt_3"] } }],
+  };
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  await openDaily(page);
+  const related = page.locator("#readable-draft > .recap-related");
+  await expect(related).toBeVisible();
+  await expect(related).toHaveText("Related: [[Daily product]] · [[Shared]] · [[<img src=x onerror=alert(1)>]] · [[Other product]] · [[Pending product]]");
+  await expect(related.locator("img")).toHaveCount(0);
+  await expect(page.locator(".supporting-activity")).not.toHaveAttribute("open", "");
+  data.current_snapshot_evidence.push({ event_id: "evt_2", disposition: "omit" });
+  await page.reload();
+  await expect(related).toHaveText("Related: [[Daily product]] · [[Shared]] · [[<img src=x onerror=alert(1)>]] · [[Pending product]]");
+  await expect(page.locator("#readable-draft")).not.toContainText("A mixed summary.");
+  data.current_snapshot_evidence.push({ event_id: "evt_1", disposition: "omit" }, { event_id: "evt_3", disposition: "superseded_by" });
+  await page.reload();
+  await expect(related).toHaveCount(0);
+});

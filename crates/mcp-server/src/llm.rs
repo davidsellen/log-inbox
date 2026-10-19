@@ -5075,6 +5075,33 @@ pub fn render_daily_revision_preview(
                 ));
             }
         }
+        let visible_ids = std::iter::once(&recap.summary)
+            .chain(
+                recap
+                    .topics
+                    .iter()
+                    .flat_map(|topic| topic.done.iter().chain(topic.pending.iter())),
+            )
+            .filter(|fact| visible(fact))
+            .flat_map(|fact| fact.evidence_event_ids.iter())
+            .collect::<HashSet<_>>();
+        let mut seen_links = HashSet::new();
+        let links = content
+            .workstreams
+            .iter()
+            .filter(|workstream| {
+                workstream
+                    .evidence_event_ids
+                    .iter()
+                    .any(|id| visible_ids.contains(id))
+            })
+            .flat_map(|workstream| workstream.canonical_links.iter())
+            .filter(|link| valid_wikilink(link) && seen_links.insert(*link))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !links.is_empty() {
+            sections.push(format!("Related: {}", links.join(" · ")));
+        }
         if !selected_manual.is_empty() {
             sections.push(format!("### My notes\n\n{}", selected_manual.join("\n")));
         }
@@ -9168,6 +9195,48 @@ mod tests {
         assert_eq!(
             render_daily_revision_preview(&content, &[], &[excluded]),
             "### Review\n\n- **Done:** Draft delivered."
+        );
+    }
+
+    #[test]
+    fn editorial_recap_retains_only_valid_links_for_visible_citations() {
+        let content: DailyRevisionContent = serde_json::from_value(json!({
+            "schema_version":1,"manual_entry_ids":[],"workstreams":[
+                {"id":"a","title":"First","evidence_event_ids":["a"],"canonical_links":["[[First]]","[[Shared]]","[[bad\nlink]]","[[ ]]","not a link"]},
+                {"id":"b","title":"Second","evidence_event_ids":["b"],"canonical_links":["[[Second]]","[[Shared]]"]},
+                {"id":"c","title":"Third","evidence_event_ids":["c"],"canonical_links":["[[Third]]","[[Shared]]"]},
+                {"id":"d","title":"Uncited","evidence_event_ids":["d"],"canonical_links":["[[Uncited]]"]}
+            ],"recap":{"summary":{"text":"Shared day summary.","evidence_event_ids":["a","b"]},"topics":[
+                {"title":"Work","done":{"text":"Delivered.","evidence_event_ids":["a"]},"pending":{"text":"Acceptance pending.","evidence_event_ids":["c"]}}
+            ]}
+        })).unwrap();
+        let preview = render_daily_revision_preview(&content, &[], &[]);
+        assert!(preview.ends_with("Related: [[First]] · [[Shared]] · [[Second]] · [[Third]]"));
+        assert_eq!(preview.matches("[[Shared]]").count(), 1);
+        assert!(!preview.contains("Uncited"));
+        assert!(!preview.contains("bad"));
+        let exclude = |id: &str| SnapshotEvidence {
+            event_id: id.into(),
+            available: true,
+            position: 0,
+            event_digest: "digest".into(),
+            disposition: Some("omit".into()),
+            related_event_id: None,
+            decision_actor: None,
+            decision_reason: None,
+            decided_at: None,
+        };
+        let preview = render_daily_revision_preview(&content, &[], &[exclude("b")]);
+        assert!(!preview.contains("Shared day summary"));
+        assert!(!preview.contains("[[Second]]"));
+        assert!(preview.ends_with("Related: [[First]] · [[Shared]] · [[Third]]"));
+        assert_eq!(
+            render_daily_revision_preview(
+                &content,
+                &[],
+                &[exclude("a"), exclude("b"), exclude("c")]
+            ),
+            ""
         );
     }
 

@@ -170,7 +170,7 @@ export function renderRecapEditor(root, content, events, editable, changed) {
     if (!editable) control.disabled = true;
 }
 
-export function renderRecapView(root, recap, excluded, events) {
+export function renderRecapView(root, recap, excluded, events, workstreams) {
   const byId = new Map(events.map((event) => [event.id, event]));
   let hidden = false;
   function appendFact(parent, fact, label) {
@@ -209,6 +209,36 @@ export function renderRecapView(root, recap, excluded, events) {
     const pending = appendFact(section, topic.pending, "Pending");
     if (done || pending) root.append(section);
   }
+  const visibleIds = new Set(
+    [
+      recap.summary,
+      ...recap.topics.flatMap((topic) => [topic.done, topic.pending]),
+    ]
+      .filter((fact) => recapFactText(fact, excluded) !== null)
+      .flatMap((fact) => fact.evidence_event_ids),
+  );
+  const links = [
+    ...new Set(
+      workstreams
+        .filter((work) =>
+          work.evidence_event_ids.some((id) => visibleIds.has(id)),
+        )
+        .flatMap((work) => work.canonical_links || [])
+        .filter((link) => {
+          if (!link.startsWith("[[") || !link.endsWith("]]")) return false;
+          const name = link.slice(2, -2);
+          return (
+            name.trim() &&
+            !/[\r\n\[\]]/.test(name) &&
+            new TextEncoder().encode(name).length <= 512
+          );
+        }),
+    ),
+  ];
+  if (links.length)
+    root.append(
+      el("p", "subtle recap-related", `Related: ${links.join(" · ")}`),
+    );
   root.append(
     el("p", "subtle", "Editable recap · review before saving to your note."),
   );
