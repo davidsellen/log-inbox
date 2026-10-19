@@ -9295,6 +9295,47 @@ mod knowledge_destination_tests {
         assert_eq!(reapplied.status(), StatusCode::OK);
         assert_eq!(response_json(reapplied).await["idempotent"], true);
 
+        // Reviewing the already-applied current revision obtains a new approval
+        // against the current file, rather than replaying the original request.
+        let repeat_preview = json_response(
+            app.clone(),
+            "GET",
+            "/api/v2/daily/2026-09-09/apply-preview",
+            json!({}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(repeat_preview.status(), StatusCode::OK);
+        let repeat_preview = response_json(repeat_preview).await;
+        let repeat_apply = json_response(
+            app.clone(),
+            "POST",
+            "/api/v2/daily/2026-09-09/apply",
+            json!({
+                "expected_revision_id": repeat_preview["revision_id"],
+                "expected_revision_content_hash": repeat_preview["revision_content_hash"],
+                "destination_path": repeat_preview["destination_path"],
+                "expected_old_block_hash": repeat_preview["expected_old_block_hash"],
+                "intended_new_block_hash": repeat_preview["intended_new_block_hash"],
+                "expected_target_exists": repeat_preview["expected_target_exists"],
+                "expected_original_content_hash": repeat_preview["expected_original_content_hash"],
+                "expected_updated_content_hash": repeat_preview["updated_content_hash"]
+            }),
+            Some(&cookie),
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(repeat_apply.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(repeat_apply).await["operation"]["state"],
+            "finalized"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace_root.join(destination)).unwrap(),
+            written
+        );
+
         let newer_manual = json_response(
             app.clone(),
             "POST",

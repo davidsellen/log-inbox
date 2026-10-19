@@ -111,6 +111,13 @@ A late-evidence deferral is a separate reversible resolution of one event ID and
 
 An Apply operation records the exact approved proposal revision and hash, destination, expected managed-block revision, intended new block hash, and recovery material before touching Markdown.
 
+The day's `review_status` describes its current revision. A latest finalized
+operation may belong to an older revision and must not make a newer draft appear
+applied or hide its review action. An applied current revision still exposes
+**Review & reapply**, using the ordinary fresh preview and confirmation flow.
+Pending operations continue to block a new Apply until recovery is resolved.
+Reapplication retains existing revision/file hash guards and managed-block scope.
+
 States are `prepared`, `writing`, `written`, `finalized`, `failed`, and `reconciliation_required`. Retries use the same operation ID. On restart, the service compares the journal with the file and either finalizes an already completed write or requires reconciliation; it never appends a duplicate block.
 
 ## Date and Scheduling Semantics

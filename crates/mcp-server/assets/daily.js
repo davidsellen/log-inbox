@@ -237,9 +237,7 @@ async function loadDay() {
 function renderDaily() {
   const data = state.data;
   renderAttentionDays();
-  const applied =
-    data.apply_status?.state === "finalized" ||
-    data.day?.review_status === "applied";
+  const applied = data.day?.review_status === "applied";
   $("day-title").textContent = new Date(
     `${data.local_date}T12:00:00`,
   ).toLocaleDateString(undefined, {
@@ -285,14 +283,13 @@ function renderDaily() {
   const apply = data.apply_status;
   const pending = apply && apply.state !== "finalized";
   const invalidContext = state.contextDetails?.status === "invalid";
-  $("write-status").textContent =
-    apply?.state === "finalized"
-      ? "Applied to Markdown"
-      : pending
-        ? "Apply needs attention"
-        : dismissed
-          ? "Dismissed — nothing will be written"
-          : "Nothing is written yet";
+  $("write-status").textContent = applied
+    ? "Applied to Markdown"
+    : pending
+      ? "Apply needs attention"
+      : dismissed
+        ? "Dismissed — nothing will be written"
+        : "Nothing is written yet";
   $("apply-attention").hidden = !pending;
   if (pending) {
     $("apply-attention-message").textContent =
@@ -307,7 +304,10 @@ function renderDaily() {
     $("retry-apply").hidden = !apply.can_retry;
     $("retry-apply").disabled = !state.csrf || state.saving;
   }
-  $("review-apply").hidden = !data.current_revision || dismissed || applied;
+  $("review-apply").hidden = !data.current_revision || dismissed;
+  $("review-apply").textContent = applied
+    ? "Review & reapply"
+    : "Review & save";
   $("review-apply").disabled =
     !state.csrf || state.saving || pending || invalidContext;
 }
@@ -1749,9 +1749,7 @@ function renderCandidate(content) {
 
 function renderGeneration() {
   generationModels.renderDaily();
-  const applied =
-    state.data?.apply_status?.state === "finalized" ||
-    state.data?.day?.review_status === "applied";
+  const applied = state.data?.day?.review_status === "applied";
   if (applied) {
     $("generation-status").hidden = true;
     $("reference-recovery").hidden = true;

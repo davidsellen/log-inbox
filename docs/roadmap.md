@@ -304,6 +304,58 @@ the associated pull request and lifecycle report.
 
 ### Next Product KB ingestion delivery
 
+**Daily reapply — authorized 2026-10-19 (fixed, deployed and reapplied).**
+The owner applied the previous note and cannot apply the newer recap. Starting
+clean `7248879` on the same local branch. Live diagnosis: October16 revision3 is
+`in_review`, but a previous finalized Apply makes the browser label it applied
+and hide Review & save. The day review status describes the current revision;
+the latest operation remains relevant for recovery, not proof a newer draft was
+written. Factory Sol/medium owns the bounded UI/browser fix; root owns this
+record, API verification and preserving local deployment. Independent review follows.
+
+1. Correct current-revision status and expose normal Review & save for new
+   drafts plus Review & reapply for an already-applied current draft.
+2. Preserve pending-operation recovery, dismissal, authentication, fresh preview,
+   exact approval hashes, conflict checks and explicit Apply semantics.
+3. Cover stale finalized history and reviewed repeat Apply in both browsers;
+   verify existing backend Apply contracts and local preservation.
+4. Deploy locally, obtain a fresh preview and reapply the current October16 recap
+   as requested, preserving note content outside the managed block and backups.
+
+| Scenario | Evidence | State |
+| --- | --- | --- |
+| Old Apply/new draft | Live revision3 remained in_review despite old finalized history; corrected status/action verified in both browsers | Passed |
+| Applied current draft | Review & reapply opens normal preview; no write before confirmation; fresh backend reapproval leaves one unchanged block | Passed |
+| Apply safety | Pending/dismissed/auth guards; backend stale-file rejection and owner-content protection | Passed |
+| Local delivery | Full independent review, regression checks, verified backup, healthy local build and requested recap Apply | Passed |
+
+Only UI applied-state projection changed; backend production approval, writer,
+recovery and idempotency contracts are unchanged. Complete independent review of
+all five task paths against `7248879` found no findings (diff SHA256
+`aa5248f26330f1f236f98d5d47b7fa5f69143ad935eb394dae2b1e46c945df46`).
+Validation:288 Rust tests passed/13 ignored,242 Chromium/Firefox tests passed,
+format/client formatting/Clippy passed, and release Compose passed source Apply,
+new recap Apply and restart. Initial worker Chromium launches were blocked by
+sandbox permissions; the permitted complete run passed. A new backend scenario
+checks a fresh preview and approval of an already-applied revision, then retains
+the existing stale-source/file conflict assertions.
+
+Local deployment preserves existing drafts, note metadata, environment and mounts;
+both services run matching built images and pass health checks. A consistent
+39-table database backup passes quick_check; old executables, original October16
+note and receipts remain in ignored `tmp/deployments/daily-reapply-20261019/`.
+The explicitly requested recap revision3 was applied through a fresh normal
+approval, finalized as
+`apply_6ed9c4ad9d82f48ab4081152e134ddb5447883df86c5887fcb121ad0e5edeb0d`.
+Its revision/manual notes are unchanged; exactly one current managed block is in
+the Markdown file, and bytes outside it plus its existing closing newline are
+preserved. A post-write fresh preview succeeds and contains the current block.
+The local verification initially omitted that closing newline when constructing
+its expected bytes; correcting the check to the existing writer contract matched
+both the exact approved whole-file hash and unchanged surrounding content.
+No direct filesystem edit bypassed Apply. The deployed script exposes the normal
+review/reapply actions; future owner writes still require confirmation.
+
 **Human Daily recap — authorized 2026-10-19 (implemented and locally deployed).**
 The owner requests a short human paragraph and a few topics showing Done versus
 Pending. Reuse the clean local branch `codex/source-highlight-coverage`, starting

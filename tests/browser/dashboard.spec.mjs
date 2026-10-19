@@ -498,16 +498,71 @@ test("Daily navigation works without a day list or its preference", async ({ pag
   expect(requests.filter(request => request.path === "/api/v2/settings/dashboard")).toHaveLength(0);
 });
 
-test("Applied days show a completed state and hide review messaging", async ({ page }) => {
-  await mockDaily(page);
+test("Applied days allow reapplying through the exact managed-block review", async ({ page }) => {
+  const requests = await mockDaily(page);
   await page.route("**/api/v2/daily/2026-09-08", route =>
     route.fulfill({ json: dailyResponse("2026-09-08", { reviewStatus: "applied", applyStatus: { state: "finalized" } }) }),
   );
   await openDaily(page);
   await expect(page.locator("#status")).toContainText("Applied to Markdown");
   await expect(page.locator("#generation-status")).toBeHidden();
-  await expect(page.locator("#review-apply")).toBeHidden();
+  await expect(page.locator("#write-status")).toHaveText("Applied to Markdown");
   await expect(page.getByText("Draft ready to review. Nothing has been written.")).toHaveCount(0);
+  await page.getByRole("button", { name: "Review & reapply", exact: true }).click();
+  await expect(page.locator("#apply-dialog")).toBeVisible();
+  await expect(page.locator("#apply-before")).toHaveText("Old");
+  await expect(page.locator("#apply-after")).toHaveText("Reviewed Daily");
+  expect(requests.some(request => request.path.endsWith("/apply-preview") && request.method === "GET")).toBe(true);
+  expect(requests.some(request => request.path.endsWith("/apply") && request.method === "POST")).toBe(false);
+  await page.getByRole("button", { name: "Save to note", exact: true }).click();
+  await expect.poll(() => requests.find(request => request.path.endsWith("/apply") && request.method === "POST")?.body).toMatchObject({
+    expected_revision_id: "revision_1",
+    expected_revision_content_hash: "a".repeat(64),
+    expected_old_block_hash: "b".repeat(64),
+    intended_new_block_hash: "c".repeat(64),
+    expected_target_exists: true,
+    expected_original_content_hash: "e".repeat(64),
+    expected_updated_content_hash: "d".repeat(64)
+  });
+});
+
+test("Reapply stays disabled without CSRF authority or while an Apply needs attention", async ({ page }) => {
+  const requests = await mockDaily(page);
+  const data = dailyResponse("2026-09-08", { reviewStatus: "applied", applyStatus: { state: "finalized" } });
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  await openDaily(page);
+  await page.route("**/api/v2/auth/session", route => route.fulfill({ json: { authenticated: true, csrf_token: null } }));
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Review & reapply", exact: true })).toBeDisabled();
+  await page.unroute("**/api/v2/auth/session");
+  data.apply_status = { id: "pending_apply", state: "reconciliation_required", can_retry: true };
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Review & reapply", exact: true })).toBeDisabled();
+  await expect(page.locator("#apply-attention")).toBeVisible();
+  expect(requests.some(request => request.path.endsWith("/apply-preview") || request.path.endsWith("/apply"))).toBe(false);
+});
+
+test("An older finalized Apply does not hide a new draft or its preparation status", async ({ page }) => {
+  const requests = await mockDaily(page, { applyStatus: { state: "finalized" } });
+  const data = dailyResponse("2026-09-08", { revisionId: "revision_2", origin: "structured_edit", applyStatus: { state: "finalized" } });
+  data.current_revision.revision_number = 2;
+  data.generation_attempt = { id: "failed_attempt", state: "failed", stage: "complete", error: "Model unavailable", started_at: "2026-09-08T09:00:00Z" };
+  await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({ json: data }));
+  await page.route("**/api/v2/daily/2026-09-08/apply-preview", route => route.fulfill({ json: {
+    revision_id: "revision_2", revision_content_hash: "a".repeat(64),
+    destination_path: data.destination_path, block_id: "day_fixture",
+    previous_block: "Old", next_block: "New recap", will_create_note: false
+  } }));
+  await openDaily(page);
+  await expect(page.locator("#status")).toContainText("Revision 2");
+  await expect(page.locator("#status")).not.toContainText("Applied to Markdown");
+  await expect(page.locator("#write-status")).toHaveText("Nothing is written yet");
+  await expect(page.locator("#generation-status")).toBeVisible();
+  await expect(page.locator("#apply-attention")).toBeHidden();
+  await page.getByRole("button", { name: "Review & save", exact: true }).click();
+  await expect(page.locator("#apply-dialog")).toBeVisible();
+  await expect(page.locator("#apply-after")).toHaveText("New recap");
+  expect(requests.some(request => request.path.endsWith("/apply") && request.method === "POST")).toBe(false);
 });
 
 test("Needs attention lists incomplete days without restoring the day rail", async ({ page }) => {
@@ -1630,6 +1685,7 @@ test("refocused Daily dismisses and reopens the exact visible candidate", async 
   await page.getByRole("button", { name: "Dismiss", exact: true }).click();
   await expect(page.getByRole("button", { name: "Reopen", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Regenerate" })).toBeDisabled();
+  await expect(page.locator("#review-apply")).toBeHidden();
   await page.getByRole("button", { name: "Reopen", exact: true }).click();
   await expect(page.getByRole("button", { name: "Dismiss", exact: true })).toBeVisible();
 
