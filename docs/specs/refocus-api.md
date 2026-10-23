@@ -241,7 +241,8 @@ Requires `review:write` and CSRF. Body contains the exact `expected_revision_id`
 
 Structured candidates may add optional `recap` with shape
 `{summary:{text,evidence_event_ids},topics:[{title,done?:{text,evidence_event_ids},pending?:{text,evidence_event_ids}}]}`.
-This is explicitly authored editorial prose, not a generated exact source quote.
+This is editorial prose, authored by Semantic generation or explicit editing,
+rather than an exact source quote.
 The existing workstreams/history must remain unchanged while it is present.
 Summary/topic/status bounds, snapshot citations and exclusion behavior follow the
 [Daily domain contract](daily-domain.md). Removing the property removes the recap;

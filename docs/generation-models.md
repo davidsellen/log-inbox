@@ -1,6 +1,15 @@
 # Choosing generation models
 
-Daily defaults to **Source-based** preparation: no model is used, and source grouping and current state need your review. Select **Semantic** to request model grouping and highlight selection. In that mode, **Change model** selects a saved, tested provider/model for one attempt without changing the saved model default. A temporary model choice stays with that day while navigating or visiting Settings and is consumed on success. Failed semantic attempts retain their mode/model for retry; explicitly selecting Source-based starts a source attempt instead. The mode displayed beside preparation controls always describes the next request.
+Daily selects **Human summary (Semantic)** when a saved default model is available
+and any required external consent is saved. It requests grouping, source highlight
+selection and a final cited recap for daily review or meetings. Without an eligible
+default, Daily selects **Source reports (no model)**, which retains original report
+wording without a recap. The server API default and scheduled preparation remain
+source-based. **Change model** selects a saved, tested provider/model for one
+Semantic attempt without changing the saved default. A temporary choice stays with
+that day while navigating or visiting Settings and is consumed on success. Failed
+attempts retain their mode/model for retry; explicit mode choices take precedence.
+The displayed mode always describes the next request.
 
 The **Current draft** caption describes the displayed draft and its mode, independently of the next selection. Older drafts without provenance say that their generation model is unavailable. Source-based drafts, manual-only drafts and activity records do not use a model. Changing models never silently overwrites structured edits: confirm replacement first. Failures retain the last usable draft, which can still be read, copied, edited, and saved.
 

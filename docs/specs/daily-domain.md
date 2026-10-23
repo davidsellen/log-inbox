@@ -75,11 +75,14 @@ one to five topics, each with a `title` and optional `done`/`pending` facts. Eac
 fact has plain `text` and unique nonempty `evidence_event_ids` from the same
 snapshot. It is an owner or authorized writing agent's interpretation; citations
 provide traceability, not independent factual verification or complete coverage.
-The application does not automatically write a recap or infer Done from a task's
-lifecycle state. Every topic requires Done or Pending; empty statuses are absent.
+Explicit Semantic preparation automatically writes a model-authored recap from
+original source reports. Source-based preparation remains model-free and does not
+write one. Done must not be inferred from a task's lifecycle state. Every topic
+requires Done or Pending; empty statuses are absent.
 
-Recaps require an explicit `structured_edit` of an existing structured candidate.
-They cannot appear in generated, manual-only or activity-record revisions. While
+Recaps may appear in `generated` and `regenerated` structured candidates from
+Semantic preparation, or in an explicit `structured_edit` of an existing structured
+candidate. They cannot appear in manual-only or activity-record revisions. While
 a recap is present, the original workstreams and source history are immutable;
 remove the recap before editing those fields. Manual-note amendments preserve it.
 Absent recaps are omitted from serialization, preserving legacy content hashes.

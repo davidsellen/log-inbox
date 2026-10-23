@@ -23,7 +23,15 @@ export function createGenerationModels({ app, api, openSettings }) {
       )
     )
       return attempt?.model_selection?.preparation_mode || "semantic";
-    return "source_based";
+    const saved = data?.default;
+    const provider = saved && connection(saved.connection_id);
+    return saved &&
+      provider?.models?.some(
+        (model) => model.id === saved.model && model.tested,
+      ) &&
+      (!provider.external || provider.consent)
+      ? "semantic"
+      : "source_based";
   }
   const pendingChoices = new Map();
   const key = (selection) =>
@@ -174,7 +182,7 @@ export function createGenerationModels({ app, api, openSettings }) {
     fillModels($("generation-model-picker"), key(selection));
     $("generation-model-notice").textContent =
       mode === "source_based"
-        ? "Chronological source highlights need your review of grouping and current state. Reviewed reference links add navigation."
+        ? "Source reports only. Choose Human summary for a short paragraph and Done/Pending topics for daily review or meetings."
         : error
           ? `${error} Existing drafts remain available.`
           : connection(selection?.connection_id)?.external &&
@@ -182,7 +190,7 @@ export function createGenerationModels({ app, api, openSettings }) {
             ? "This external connection needs consent in Settings → Generation before it can receive activity."
             : connection(selection?.connection_id)?.external
               ? "Activity and link metadata go to this external service. Your manual-note prose and reference-note excerpts stay local."
-              : "";
+              : "Prepares a short paragraph and Done/Pending topics. Review the summary against its supporting reports before saving.";
     const provenance = app.data?.generation_provenance;
     $("draft-generation-model").hidden = !app.data?.current_revision;
     $("draft-generation-model").textContent =

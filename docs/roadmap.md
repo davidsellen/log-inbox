@@ -1,8 +1,140 @@
 # Daily Engineering Knowledge Roadmap
 
-Status: reviewed Daily workflow and direct accepted-work KB capture implemented locally; generated-summary usefulness and agent recall remain unproven. Updated 2026-10-19. Initial baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
+Status: reviewed Daily workflow, human recap generation and ordinary-activity KB suggestions deployed locally for owner verification; generated-summary usefulness and agent recall remain unproven. Updated 2026-10-23. Initial baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
 
 This roadmap defines the target direction, delivered foundation, and remaining delivery order. The [README](../README.md) and runtime specs describe the active Daily release; milestone checkboxes record implemented and pending work.
+
+## Human summaries and ordinary-activity KB suggestions — 2026-10-23
+
+Canonical task record for the owner's report that recent Daily output is a dump
+and ordinary work is not feeding the KB. Starting clean HEAD
+`c6deb798e4c041cc7dc677da7eac99907a91baa8` on inherited branch
+`codex/accepted-work-kb-capture`. Endpoint: local implementation and validation;
+publication and deployment are not part of this request.
+
+Diagnosis: both preparation modes select original report text; the earlier human
+recap delivery explicitly excluded automatic recap authorship. KB intake filters
+for special `knowledge_submission` payloads, so ordinary lifecycle reports and
+`canonical_note_candidates` never become candidates. Existing KB promotion can
+update existing eligible notes but cannot create pages.
+
+Plan accepted in chat: generate a concise cited paragraph and up to five
+Done/Pending topics in explicit Semantic preparation, retaining source history,
+manual notes, evidence exclusions and owner Apply. Daily initially selects this
+mode with an eligible saved default model and existing external consent; explicit
+source/retry choices take precedence. Keep model-free source reports available
+without a model; scheduled/API defaults remain source-based. Add reviewable KB
+suggestions from ordinary original
+activity without requiring producer payload changes, invented product attribution,
+or lifecycle-based implementation/verification claims. Capture freezes exact
+evidence; canonical updates retain separate owner review and confirmation.
+
+Factory routing: Sol/high bounded KB diagnosis, separate Sol/medium summary and KB
+implementation workers, coordinator integration/documentation, independent Sol/high
+review. Ponytail lite: reuse the recap schema, ingestion, candidate store and KB
+writer; no new provider, dependency, service or automatic Markdown write.
+
+| Contract/scenario | Evidence | State |
+| --- | --- | --- |
+| Semantic prose, bounded citations, qualifications and failure behavior | Five focused semantic regressions; core recap persistence validation | Passed deterministic checks |
+| Source mode remains model-free; manual prose and historical drafts preserved | Full workspace suite; both-browser generation/recap coverage; v22 expired-source manual amendment regression | Passed |
+| Ordinary original activity suggested without special payload or Daily | Core/API and both-browser capture regressions | Passed |
+| Exact capture, retries, stale/expired evidence, workspace and owner scopes | Core/API regressions, captured-source pre-limit filtering and truncated/oversized guards | Passed |
+| No inferred product or implementation/verification authority; reviewed existing-note writes | Reported-claim and owner-attribution tests; existing promotion/recovery suite | Passed |
+| Complete task diff, required formatting/Clippy/Rust/browser checks | Independent complete review and focused follow-ups; 314 Rust passed/13 ignored; all 256 browser scenarios covered across full/focused runs; formatting and Clippy | Passed |
+
+Implemented locally, without deployment, publication, canonical-note writes or
+changes to existing saved Daily revisions. The complete independent task review
+used base/HEAD/merge-base `c6deb798` in this checkout and inherited branch. It found
+and fixed missing v22 legacy compatibility for safe manual amendments after source
+expiry. Follow-up review removed illustrative recap prose that could be echoed as
+a purported fact. No remaining actionable code findings were reported.
+
+Validation: the serial workspace run passed 314 Rust tests with 13 ignored. An
+earlier run under concurrent compilation/browser load missed an inherited 50 ms
+mock-request deadline; the unchanged test passed in the full serial run. The full
+two-engine browser run passed 254 scenarios and exposed two failures in the new
+oversized-report test's route fixture. Correcting that fixture was followed by all
+10 KB checks passing across Chromium/Firefox, covering the remaining scenarios.
+Rust/client formatting, Clippy with warnings denied and diff whitespace checks
+passed. Final prompt changes are additionally checked by the focused semantic suite.
+Tests use disposable stores and mocked browser responses. A new release Compose
+smoke and deployed owner workflow were not run for this change.
+
+Local model evaluation uses three synthetic source reports and the production
+recap prompt/schema on `qwen3:4b-instruct-2507-q4_K_M`, without owner data or note
+writes. It exposed both-null topic statuses, fixed with strict schema alternatives,
+and an unsupported blanket negative about verification. Explicit scope-preservation
+instructions did not eliminate that error on the smaller model; its structurally
+valid recap remains unsuitable as independently verified output. The source/history and candidate validators do
+not prove semantic entailment. Private synthetic request/result material and Rust
+results are retained in ignored `tmp/evaluations/semantic-recap-20261023/`.
+The final smaller-model sample took 73.09 seconds. A comparison with the installed
+`gemma3:12b-8k` took 209.92 seconds for this recap stage and passed structural,
+text-bound and actual-citation checks. Manual inspection found a concise paragraph
+and two Done/Pending topics preserving local Chromium validation, outstanding
+Firefox/customer acceptance and the KB review gate, without the smaller model's
+blanket negative. It still put citation IDs into prose despite the prompt, and
+one pending bullet also restated the existing claims-preservation behavior. These
+are editing/quality limitations; this small synthetic trial is not a real-day or
+whole-generation performance acceptance result. No saved model choice changed.
+Real-day quality, practical whole-generation latency and owner usefulness acceptance
+remain unproven; this task does not mark the earlier usefulness or recall pilots
+passed. Scheduled preparation still produces source reports, and KB suggestions
+still require owner review and an existing eligible destination note.
+
+### Local deployment for manual verification — 2026-10-23
+
+The owner subsequently authorized deployment and verification. Built the current
+reviewed working tree on HEAD `c6deb798` and recreated only the existing collector
+and Daily containers in Compose project `log-inbox`, with the existing provider
+override, environment, ports and mounts. Ollama and saved model choices were left
+unchanged. No commit, push or PR update was requested. The 53-file runtime source
+manifest identifies the deployed uncommitted source exactly; its digest is
+`ffef097deccedb746702eb55b153ec3dc707f9a2e6849cf219daea1d0b3cba7c`.
+
+Before stopping the app writers, confirmed no active generation or pending Daily
+Apply recovery. Saved rollback image tags, copied quiesced app data, produced an
+SQLite online-backup copy from that snapshot and passed its integrity check.
+Independent deployment-script review corrected stale-copy retry behavior,
+consistent post-deployment SQLite snapshots and pre-start Apply-recovery guards.
+Verification snapshots pause both app writers only during copying and guarantee
+unpause. Recovery material and the private receipt are in ignored
+`tmp/deployments/recap-kb-20261023/`; preserve post-deployment evidence, new
+`reported` candidates and unfinished operations before any rollback.
+
+Live checks passed both health endpoints, authenticated API reads, unauthenticated
+KB rejection, exact served client/source equality and running/built image identity.
+Schema remains 29; all 1,139 existing event IDs, all 12 protected review/configuration
+tables and all 76 Markdown file hashes were preserved. The KB suggestions endpoint
+returns 100 suggestions with truncation disclosed; the existing candidate remains.
+Saved default is still `qwen2.5:1.5b`. Its real-day summary quality has not been
+accepted by this deployment verification. No existing draft was regenerated and no
+owner candidate was captured, approved or written.
+
+The exact-source disposable release Compose smoke also passed Daily review/Apply,
+KB capture/review/promotion, stale-target rejection, preservation and restart with
+idempotent confirmation. It used separate synthetic data, workspace and ports.
+Live Chromium/Firefox checks passed: Human summary initially selected, deployed
+mode controls visible, all 100 activity suggestions loaded, zero page errors and
+zero unexpected mutating requests. The temporary verification session was revoked
+and its private cookie file removed. Runtime source hashes remain unchanged.
+
+Manual verification starts at `http://127.0.0.1:8788/`: choose Human summary
+(Semantic) for the day to review, or open `/?view=knowledge` and Activity
+suggestions. Review all generated prose and KB claims before canonical confirmation.
+
+### Branch publication authorization — 2026-10-23
+
+After the local deployment, the owner requested committing and pushing the changes
+and plans to check again Monday, October 26. This is publication authorization,
+not acceptance of generated-summary usefulness. Publish on the existing
+`codex/accepted-work-kb-capture` branch; its previous PR #4 is already merged.
+No new PR, merge, model-setting change or scheduled follow-up is requested.
+The runtime still matches all 53 files in the verified deployment manifest;
+this publication includes the implementation, regression tests, contracts and
+deployment evidence above. GitHub CI for the new commit is separate from the
+completed local validation.
 
 ## Product Promise
 

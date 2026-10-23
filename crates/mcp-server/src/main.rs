@@ -5720,6 +5720,9 @@ mod knowledge_destination_tests {
     }
 
     pub(super) fn generation_model_response(body: &Value) -> Value {
+        if let Some(content) = llm::test_recap_response(body) {
+            return json!({"choices":[{"message":{"content":content.to_string()}}]});
+        }
         let prompt = body["messages"][1]["content"].as_str().unwrap();
         let properties = body["response_format"]["json_schema"]["schema"]["properties"]
             .as_object()
@@ -6884,7 +6887,7 @@ mod knowledge_destination_tests {
             .await
             .unwrap();
         assert_eq!(first.id, reused.id);
-        assert_eq!(*captured.lock().unwrap(), vec!["test", "test"]);
+        assert_eq!(*captured.lock().unwrap(), vec!["test", "test", "test"]);
         state.llm_config.as_mut().unwrap().model = "second".to_owned();
         let second = generate_daily_candidate(&state, date, false, None)
             .await
@@ -6958,7 +6961,9 @@ mod knowledge_destination_tests {
         );
         assert_eq!(
             *captured.lock().unwrap(),
-            vec!["test", "test", "second", "second", "third", "third"]
+            vec![
+                "test", "test", "test", "second", "second", "second", "third", "third", "third"
+            ]
         );
         server.abort();
     }
@@ -7316,6 +7321,7 @@ mod knowledge_destination_tests {
                                 .as_str()
                                 .unwrap()
                                 .starts_with("Stage: topic partition")
+                                || llm::test_recap_response(&body).is_some()
                             {
                                 return Json(generation_model_response(&body));
                             }
@@ -8995,6 +9001,7 @@ mod knowledge_destination_tests {
             "daily-structured-v19-source-based",
             "daily-structured-v20-source-headings",
             "daily-structured-v21-source-highlights",
+            "daily-structured-v22-source-outcomes",
         ] {
             let (mut state, profile, date) = generation_test_state();
             state.llm_config = Some(llm::LlmConfig::for_test("http://127.0.0.1:9"));

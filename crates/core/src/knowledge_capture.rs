@@ -50,6 +50,7 @@ pub struct KnowledgeClaim {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeClaimKind {
+    Reported,
     Proposed,
     Accepted,
     Implemented,
@@ -130,7 +131,23 @@ impl KnowledgeSubmission {
             text(v, 200, label)?;
         }
         text(&self.title, 300, "title")?;
-        text(&self.summary, 4000, "summary")?;
+        if self
+            .claims
+            .iter()
+            .all(|c| c.kind == KnowledgeClaimKind::Reported)
+        {
+            ensure!(
+                !self.summary.trim().is_empty()
+                    && self.summary.len() <= 4000
+                    && !self
+                        .summary
+                        .chars()
+                        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')),
+                "Knowledge reported summary must be nonempty and at most 4000 bytes"
+            );
+        } else {
+            text(&self.summary, 4000, "summary")?;
+        }
         ensure!(!self.modules.is_empty(), "Knowledge modules are required");
         strings(&self.modules, 20, 200, "modules")?;
         ensure!(
@@ -138,7 +155,19 @@ impl KnowledgeSubmission {
             "Knowledge requires 1-32 claims"
         );
         for c in &self.claims {
-            text(&c.text, 2000, "claim text")?;
+            if c.kind == KnowledgeClaimKind::Reported {
+                ensure!(
+                    !c.text.trim().is_empty()
+                        && c.text.len() <= 2000
+                        && !c
+                            .text
+                            .chars()
+                            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')),
+                    "Knowledge reported claim must be nonempty and at most 2000 bytes"
+                );
+            } else {
+                text(&c.text, 2000, "claim text")?;
+            }
             if let Some(scope) = &c.verification_scope {
                 text(scope, 1000, "verification_scope")?;
             }
@@ -248,6 +277,216 @@ fn load(conn: &Connection, workspace: &str, id: &str) -> Result<Option<Knowledge
         superseded,
     }))
 }
+/// A deterministic projection of one original report, never an inferred work status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeSuggestion {
+    pub event: StoredLogEvent,
+    pub suggestion_hash: String,
+    pub submission: KnowledgeSubmission,
+    pub capture_issue: Option<String>,
+    pub captured_candidate_id: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeSuggestionList {
+    pub suggestions: Vec<KnowledgeSuggestion>,
+    pub limit: usize,
+    pub truncated: bool,
+}
+fn suggestion_eligible(e: &StoredLogEvent, workspace: &str) -> bool {
+    !e.metadata.contains_key("knowledge_submission")
+        && e.metadata
+            .get("workspace_id")
+            .is_none_or(|v| v.as_str() == Some(workspace))
+        && matches!(
+            e.metadata.get("event_type").and_then(|v| v.as_str()),
+            Some("complete" | "completed" | "blocked" | "failed")
+        )
+        && !e.message.trim().is_empty()
+}
+fn suggestion(
+    conn: &Connection,
+    workspace: &str,
+    e: StoredLogEvent,
+) -> Result<KnowledgeSuggestion> {
+    ensure!(
+        suggestion_eligible(&e, workspace),
+        "Knowledge source event does not belong to workspace or is not eligible"
+    );
+    let mut claims = vec![KnowledgeClaim {
+        kind: KnowledgeClaimKind::Reported,
+        text: e.message.clone(),
+        verification_scope: None,
+        reported_acceptance: None,
+    }];
+    // Retain complete values, including qualifications and structured checks. No summary model.
+    for field in [
+        "outcome",
+        "decision",
+        "decisions",
+        "constraints",
+        "questions",
+        "tests",
+        "validation",
+        "blocker",
+        "follow_up",
+        "canonical_note_candidates",
+        "commit",
+        "commits",
+        "pull_request",
+        "pull_requests",
+        "artifacts",
+    ] {
+        if let Some(value) = e.metadata.get(field) {
+            let value = value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| value.to_string());
+            if !value.trim().is_empty() {
+                claims.push(KnowledgeClaim {
+                    kind: KnowledgeClaimKind::Reported,
+                    text: format!("{field}: {value}"),
+                    verification_scope: None,
+                    reported_acceptance: None,
+                });
+            }
+        }
+    }
+    let context = ["repo", "work_item", "task_id"]
+        .into_iter()
+        .filter_map(|key| {
+            e.metadata.get(key).filter(|v| !v.is_null()).map(|v| {
+                let value = v
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| v.to_string());
+                format!("{key}: {value}")
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let title = if context.is_empty() {
+        "Reported activity".into()
+    } else {
+        context
+    };
+    let summary = e
+        .metadata
+        .get("outcome")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or(&e.message)
+        .to_owned();
+    let submission = KnowledgeSubmission {
+        schema_version: 1,
+        submission_key: format!("activity-{}", e.id),
+        plan_id: format!("activity-{}", e.id),
+        plan_revision: "1".into(),
+        product: e
+            .metadata
+            .get("product")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        modules: e
+            .metadata
+            .get("modules")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
+        title,
+        summary,
+        claims,
+        decisions: vec![],
+        constraints: vec![],
+        questions: vec![],
+        artifacts: vec![],
+        commits: vec![],
+        pull_requests: vec![],
+        supersedes: None,
+    };
+    let suggestion_hash = digest(&serde_json::json!({"workspace_id":workspace,
+        "source_event_digest":event_digest(&e)?, "submission":submission}))?;
+    // Missing attribution is supplied by the owner. Other validation failures stay visible.
+    let mut checked = submission.clone();
+    checked.product = "Owner attribution".into();
+    checked.modules = vec!["Owner attribution".into()];
+    let capture_issue = (e.truncated || checked.validate().is_err()).then(|| "This exact report exceeds candidate limits or contains unsupported characters. Submit a bounded knowledge_submission retaining all relevant qualifications; the original evidence remains available here.".into());
+    let captured_candidate_id = conn
+        .query_row(
+            "SELECT id FROM knowledge_candidates WHERE source_event_id=?1 AND workspace_id=?2",
+            params![e.id, workspace],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(KnowledgeSuggestion {
+        event: e,
+        suggestion_hash,
+        submission,
+        capture_issue,
+        captured_candidate_id,
+    })
+}
+
+fn persist_candidate(
+    conn: &Connection,
+    workspace: &str,
+    e: &StoredLogEvent,
+    submission: &KnowledgeSubmission,
+    payload_digest: &str,
+) -> Result<KnowledgeCandidate> {
+    let existing:Option<(String,String)>=conn.query_row("SELECT id,payload_digest FROM knowledge_candidates WHERE workspace_id=?1 AND producer_source=?2 AND submission_key=?3",params![workspace,e.source,submission.submission_key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    if let Some((id, previous)) = existing {
+        ensure!(
+            previous == payload_digest,
+            "Knowledge submission key conflicts with existing payload"
+        );
+        let result = load(conn, workspace, &id)?.context("Knowledge candidate missing")?;
+        return Ok(result);
+    }
+    let bound: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM knowledge_candidates WHERE source_event_id=?1)",
+        [&e.id],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        !bound,
+        "Knowledge source event is already bound to a workspace"
+    );
+    if let Some(previous) = &submission.supersedes {
+        let predecessor = load(conn, workspace, previous)?
+            .context("Knowledge predecessor does not belong to workspace")?;
+        ensure!(
+            predecessor.submission.plan_id == submission.plan_id,
+            "Knowledge predecessor belongs to different plan"
+        );
+        ensure!(
+            predecessor.producer_source == e.source,
+            "Knowledge predecessor belongs to different producer"
+        );
+        ensure!(
+            predecessor.submission.product == submission.product,
+            "Knowledge predecessor belongs to different product"
+        );
+        ensure!(!predecessor.superseded, "Knowledge predecessor is stale");
+    }
+    if submission.supersedes.is_none() {
+        let plan_exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM knowledge_candidates WHERE workspace_id=?1 AND producer_source=?2 AND plan_id=?3)",
+                params![workspace,e.source,submission.plan_id], |r|r.get(0))?;
+        ensure!(
+            !plan_exists,
+            "Knowledge plan already exists; correction requires explicit supersedes"
+        );
+    }
+    let id = format!("knowledge_{}", Uuid::new_v4().simple());
+    let source_event_digest = event_digest(e)?;
+    let candidate_hash = digest(
+        &serde_json::json!({"workspace_id":workspace,"producer_source":e.source,"source_event_id":e.id,"source_event_digest":source_event_digest,"payload_digest":payload_digest}),
+    )?;
+    conn.execute("INSERT INTO knowledge_candidates(id,workspace_id,producer_source,submission_key,plan_id,source_event_id,source_event_digest,payload_digest,candidate_hash,submission_json,supersedes,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![id,workspace,e.source,submission.submission_key,submission.plan_id,e.id,source_event_digest,payload_digest,candidate_hash,serde_json::to_string(&submission)?,submission.supersedes,Utc::now().to_rfc3339()])?;
+    let result = load(conn, workspace, &id)?.context("Knowledge candidate missing")?;
+    Ok(result)
+}
+
 impl Store {
     /// Materialize only original, already-redacted metadata; never Daily prose or overlays.
     pub fn materialize_knowledge_submission(&self, event_id: &str) -> Result<KnowledgeCandidate> {
@@ -282,61 +521,79 @@ impl Store {
         submission.validate()?;
         // Hash the redacted JSON, including explicit optional/default field presence.
         let payload_digest = digest(payload)?;
-        let existing:Option<(String,String)>=tx.query_row("SELECT id,payload_digest FROM knowledge_candidates WHERE workspace_id=?1 AND producer_source=?2 AND submission_key=?3",params![workspace,e.source,submission.submission_key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-        if let Some((id, previous)) = existing {
-            ensure!(
-                previous == payload_digest,
-                "Knowledge submission key conflicts with existing payload"
-            );
-            let result = load(&tx, &workspace, &id)?.context("Knowledge candidate missing")?;
-            tx.commit()?;
-            return Ok(result);
-        }
-        let bound: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM knowledge_candidates WHERE source_event_id=?1)",
-            [event_id],
-            |r| r.get(0),
-        )?;
-        ensure!(
-            !bound,
-            "Knowledge source event is already bound to a workspace"
-        );
-        if let Some(previous) = &submission.supersedes {
-            let predecessor = load(&tx, &workspace, previous)?
-                .context("Knowledge predecessor does not belong to workspace")?;
-            ensure!(
-                predecessor.submission.plan_id == submission.plan_id,
-                "Knowledge predecessor belongs to different plan"
-            );
-            ensure!(
-                predecessor.producer_source == e.source,
-                "Knowledge predecessor belongs to different producer"
-            );
-            ensure!(
-                predecessor.submission.product == submission.product,
-                "Knowledge predecessor belongs to different product"
-            );
-            ensure!(!predecessor.superseded, "Knowledge predecessor is stale");
-        }
-        if submission.supersedes.is_none() {
-            let plan_exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM knowledge_candidates WHERE workspace_id=?1 AND producer_source=?2 AND plan_id=?3)",
-                params![workspace,e.source,submission.plan_id], |r|r.get(0))?;
-            ensure!(
-                !plan_exists,
-                "Knowledge plan already exists; correction requires explicit supersedes"
-            );
-        }
-        let id = format!("knowledge_{}", Uuid::new_v4().simple());
-        let source_event_digest = event_digest(&e)?;
-        let candidate_hash = digest(
-            &serde_json::json!({"workspace_id":workspace,"producer_source":e.source,"source_event_id":e.id,"source_event_digest":source_event_digest,"payload_digest":payload_digest}),
-        )?;
-        tx.execute("INSERT INTO knowledge_candidates(id,workspace_id,producer_source,submission_key,plan_id,source_event_id,source_event_digest,payload_digest,candidate_hash,submission_json,supersedes,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![id,workspace,e.source,submission.submission_key,submission.plan_id,e.id,source_event_digest,payload_digest,candidate_hash,serde_json::to_string(&submission)?,submission.supersedes,Utc::now().to_rfc3339()])?;
-        let result = load(&tx, &workspace, &id)?.context("Knowledge candidate missing")?;
+        let result = persist_candidate(&tx, &workspace, &e, &submission, &payload_digest)?;
         tx.commit()?;
         Ok(result)
     }
+    /// SQL applies workspace and terminal-event eligibility before the result bound.
+    pub fn list_knowledge_suggestions(
+        &self,
+        workspace: &str,
+        limit: usize,
+    ) -> Result<KnowledgeSuggestionList> {
+        text(workspace, 100, "workspace ID")?;
+        ensure!(
+            (1..=100).contains(&limit),
+            "Knowledge list limit must be 1-100"
+        );
+        let conn = self.connect()?;
+        let mut statement = conn.prepare("SELECT e.id,e.received_at,e.timestamp,e.source,e.level,e.message,e.metadata_json,e.fingerprint,e.truncated,EXISTS(SELECT 1 FROM review_state r WHERE r.event_id=e.id)
+            FROM log_events e WHERE CASE WHEN json_valid(e.metadata_json) THEN
+            json_type(e.metadata_json,'$.knowledge_submission') IS NULL
+            AND json_extract(e.metadata_json,'$.event_type') IN ('complete','completed','blocked','failed')
+            AND (json_type(e.metadata_json,'$.workspace_id') IS NULL OR (json_type(e.metadata_json,'$.workspace_id')='text' AND json_extract(e.metadata_json,'$.workspace_id')=?1))
+            AND length(trim(e.message)) > 0 ELSE 0 END
+            AND NOT EXISTS(SELECT 1 FROM knowledge_candidates k WHERE k.source_event_id=e.id)
+            ORDER BY e.received_at DESC,e.id DESC LIMIT ?2")?;
+        let events = statement
+            .query_map(params![workspace, limit + 1], stored_event_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let truncated = events.len() > limit;
+        let suggestions = events
+            .into_iter()
+            .take(limit)
+            .map(|e| suggestion(&conn, workspace, e))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(KnowledgeSuggestionList {
+            suggestions,
+            limit,
+            truncated,
+        })
+    }
+
+    /// Freeze the exact original projection and owner attribution; never mutate source evidence.
+    pub fn capture_knowledge_suggestion(
+        &self,
+        workspace: &str,
+        event_id: &str,
+        expected_suggestion_hash: &str,
+        product: &str,
+        modules: &[String],
+    ) -> Result<KnowledgeCandidate> {
+        text(event_id, 100, "event ID")?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        active(&tx, workspace)?;
+        let e = event(&tx, event_id)?.context("Knowledge source event is missing or expired")?;
+        let projected = suggestion(&tx, workspace, e.clone())?;
+        ensure!(
+            projected.suggestion_hash == expected_suggestion_hash,
+            "Knowledge suggestion hash changed"
+        );
+        ensure!(
+            projected.capture_issue.is_none(),
+            "Knowledge suggestion exceeds capture limits"
+        );
+        let mut submission = projected.submission;
+        submission.product = product.to_owned();
+        submission.modules = modules.to_vec();
+        submission.validate()?;
+        let payload_digest = digest(&submission)?;
+        let result = persist_candidate(&tx, workspace, &e, &submission, &payload_digest)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
     /// Filter original redacted submission events before bounding the result.
     /// Malformed submission payloads remain visible for validation; malformed or
     /// mismatched workspace claims are excluded rather than treated as unscoped.
@@ -599,6 +856,195 @@ mod tests {
             store
                 .list_knowledge_submission_events(&workspace, 101)
                 .is_err()
+        );
+    }
+
+    fn activity(store: &Store, metadata: Value, message: &str) -> StoredLogEvent {
+        store
+            .insert_event(LogEventInput {
+                source: "codex/activity".into(),
+                level: None,
+                timestamp: None,
+                message: message.into(),
+                metadata: Some(metadata.as_object().unwrap().clone()),
+                fingerprint: None,
+            })
+            .unwrap()
+    }
+    #[test]
+    fn knowledge_suggestions_freeze_reported_claims_attribution_and_source() {
+        let (store, workspace) = setup();
+        let e = activity(
+            &store,
+            json!({"event_type":"complete", "status":"succeeded", "outcome":"Probable cause found; fix unverified.", "validation":["not run"], "decisions":["Defer deployment"], "repo":"not-a-product"}),
+            "Investigation completed.\nImplementation remains pending.",
+        );
+        let listed = store.list_knowledge_suggestions(&workspace, 100).unwrap();
+        let suggestion = &listed.suggestions[0];
+        assert!(suggestion.submission.product.is_empty());
+        assert!(suggestion.submission.modules.is_empty());
+        assert!(suggestion.capture_issue.is_none());
+        assert_eq!(suggestion.submission.claims[0].text, e.message);
+        assert!(
+            suggestion
+                .submission
+                .claims
+                .iter()
+                .all(|c| c.kind == KnowledgeClaimKind::Reported)
+        );
+        assert!(
+            suggestion
+                .submission
+                .claims
+                .iter()
+                .any(|c| c.text.contains("fix unverified"))
+        );
+        assert!(
+            store
+                .capture_knowledge_suggestion(
+                    &workspace,
+                    &e.id,
+                    &suggestion.suggestion_hash,
+                    "",
+                    &[]
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .capture_knowledge_suggestion(
+                    &workspace,
+                    &e.id,
+                    "stale",
+                    "Log Inbox",
+                    &["knowledge".into()]
+                )
+                .is_err()
+        );
+        let capture = || {
+            store.capture_knowledge_suggestion(
+                &workspace,
+                &e.id,
+                &suggestion.suggestion_hash,
+                "Log Inbox",
+                &["knowledge".into()],
+            )
+        };
+        let c = capture().unwrap();
+        assert_eq!(capture().unwrap().id, c.id);
+        assert!(c.evidence_available && c.review.is_none());
+        assert!(
+            store
+                .list_knowledge_suggestions(&workspace, 100)
+                .unwrap()
+                .suggestions
+                .is_empty()
+        );
+        assert!(
+            store
+                .capture_knowledge_suggestion(
+                    &workspace,
+                    &e.id,
+                    &suggestion.suggestion_hash,
+                    "Other",
+                    &["knowledge".into()]
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .require_promotable_knowledge_candidate(&workspace, &c.id, &c.candidate_hash)
+                .is_err()
+        );
+        store
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE log_events SET message='Changed evidence' WHERE id=?1",
+                [&e.id],
+            )
+            .unwrap();
+        assert!(
+            !store
+                .knowledge_candidate(&workspace, &c.id)
+                .unwrap()
+                .unwrap()
+                .evidence_available
+        );
+        assert!(capture().is_err());
+        store
+            .connect()
+            .unwrap()
+            .execute("DELETE FROM log_events WHERE id=?1", [&e.id])
+            .unwrap();
+        assert!(capture().is_err());
+    }
+    #[test]
+    fn knowledge_suggestions_filter_before_bound_and_keep_oversized_reports_visible() {
+        let (store, workspace) = setup();
+        let large = activity(
+            &store,
+            json!({"event_type":"blocked", "outcome":"Pending external verification"}),
+            &"x".repeat(4001),
+        );
+        for _ in 0..110 {
+            activity(
+                &store,
+                json!({"event_type":"complete", "workspace_id":"other"}),
+                "Excluded workspace",
+            );
+            activity(&store, json!({"event_type":"start"}), "Started work");
+        }
+        let listed = store.list_knowledge_suggestions(&workspace, 1).unwrap();
+        assert_eq!(listed.suggestions[0].event.id, large.id);
+        assert!(!listed.truncated);
+        assert_eq!(listed.suggestions[0].submission.claims[0].text.len(), 4001);
+        assert!(listed.suggestions[0].capture_issue.is_some());
+        assert!(
+            store
+                .capture_knowledge_suggestion(
+                    &workspace,
+                    &large.id,
+                    &listed.suggestions[0].suggestion_hash,
+                    "Log Inbox",
+                    &["knowledge".into()]
+                )
+                .is_err()
+        );
+        let wrong = activity(
+            &store,
+            json!({"event_type":"complete", "workspace_id":"other"}),
+            "Wrong workspace",
+        );
+        assert!(
+            store
+                .capture_knowledge_suggestion(
+                    &workspace,
+                    &wrong.id,
+                    "hash",
+                    "Log Inbox",
+                    &["knowledge".into()]
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .list_knowledge_candidates(&workspace, 100)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(store.list_knowledge_suggestions(&workspace, 0).is_err());
+        assert!(store.list_knowledge_suggestions(&workspace, 101).is_err());
+        activity(
+            &store,
+            json!({"event_type":"complete"}),
+            "Another eligible report",
+        );
+        assert!(
+            store
+                .list_knowledge_suggestions(&workspace, 1)
+                .unwrap()
+                .truncated
         );
     }
 

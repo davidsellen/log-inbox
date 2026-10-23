@@ -1,6 +1,6 @@
 # Daily Preparation
 
-Preparation turns one server-resolved day of bounded automated evidence into a structured review candidate. Source-based preparation is the default and requires no model. Optional semantic preparation uses the configured model. Neither mode chooses the destination, writes Markdown, resolves review decisions, or rewrites owner-authored notes.
+Preparation turns one server-resolved day of bounded automated evidence into a structured review candidate. The server API defaults to source-based preparation and requires no model. Daily initially selects Human summary (Semantic) when an eligible saved default model is available; explicit selection and retry choices take precedence. Neither mode chooses the destination, writes Markdown, resolves review decisions, or rewrites owner-authored notes.
 
 ## Active flow
 
@@ -8,9 +8,9 @@ Preparation turns one server-resolved day of bounded automated evidence into a s
 2. Rust groups events using namespaced repository, work-item, pull-request, task, session, and source identities. Numeric/string/URL and consistent object references share identity normalization with Knowledge. A task may inherit its single unambiguous external identity. Otherwise an exact feature branch can associate tasks without explicit identities; integration branches and conflicting or malformed identities cannot authorize that merge.
 3. The service freezes event IDs and content digests in an immutable evidence snapshot.
 4. When Knowledge collections or mappings are enabled, the server resolves reviewed mappings and unique exact title, alias, or typed-reference matches. Conflicting matches produce no link. Repository-wide mappings may authorize a link but cannot merge distinct work items; only reviewed work-item/PR relationships may alias groups.
-5. Rust deterministically extracts all eligible bounded fact cards from each automated source separately, without Knowledge. Rust validates each card and assigns source-owned fact IDs. In default source-based mode, Rust retains each conservative source identity bucket and selects at most four bounded source-report bundles per field, prioritizing distinct reported tasks/events and their main reports, without inference or a configured provider. Optional semantic mode first asks the configured endpoint to propose bounded source-only topics, then to select source-backed highlights. Neither mode invents factual prose or citation lists. Only semantic mode sends activity to a provider; nonlocal endpoints require connection-specific consent. Only verified local semantic endpoints may receive bounded canonical-note excerpts.
+5. Rust deterministically extracts all eligible bounded fact cards from each automated source separately, without Knowledge. Rust validates each card and assigns source-owned fact IDs. In default source-based mode, Rust retains each conservative source identity bucket and selects at most four bounded source-report bundles per field, prioritizing distinct reported tasks/events and their main reports, without inference or a configured provider. Optional semantic mode first asks the configured endpoint to propose bounded source-only topics, then to select source-backed highlights. Selection retains source-owned prose and citations. Only semantic mode sends activity to a provider; nonlocal endpoints require connection-specific consent. Only verified local semantic endpoints may receive bounded canonical-note excerpts.
 6. Rust renders validated display projections with source times, derives citations only from visible supporting clauses, retains every original card as typed reported history, and validates group membership, complete evidence coverage, factual evidence IDs, canonical links, and text limits using the persisted revision contract. Malformed extraction, stale-only selection and invalid composition fail visibly.
-7. A valid result becomes an immutable proposal revision bound to its evidence and optional Knowledge snapshots in SQLite. Invalid, incomplete, or unrepresentable results are visible failures. Semantic model errors never silently switch the selected mode.
+7. Semantic preparation adds one final writing request using the complete original source-card ledger and source identities, without manual prose or Knowledge excerpts. It synthesizes a short recap paragraph and up to five Done/Pending topics with actual snapshot event IDs. The parser rejects malformed, oversized or unknown-citation output; invalid recap generation fails visibly rather than returning a report dump. These editorial statements are model interpretations, not independently verified facts; task completion must not imply acceptance, verification, merge, deployment or release. A valid result becomes an immutable proposal revision bound to its evidence and optional Knowledge snapshots in SQLite. Semantic model errors never silently switch the selected mode.
 8. The server renders the reviewed structure deterministically for preview. Only explicit dashboard Apply invokes the Markdown writer.
 
 Source-based and manual-only days need no model. Semantic mixed days send only automated evidence to the provider and keep manual prose verbatim in a separate section. The separately selected activity-record path remains available; source preparation is a structured, cited proposal rather than a free-form Markdown fallback.
@@ -33,7 +33,7 @@ Copy and Apply. Both modes share deterministic source extraction and the same va
 are derived exclusively from selected server-owned source facts. Existing stored
 revisions and historical string-compatible readers retain their format; no
 migration or automatic rewrite is performed. The generation contract is
-`daily-structured-v22-source-outcomes`, invalidating ordinary cache reuse from older
+`daily-structured-v23-semantic-recap`, invalidating ordinary cache reuse from older
 contracts. Final output retains four facts per field and 320 characters per fact.
 Oversized selected bundles fail rather than being clipped.
 Required visible source clauses may be impossible to fit within these inherited
@@ -217,10 +217,10 @@ Copy, Markdown preview and Apply export concise highlights, not the raw history;
 the original reports remain inspectable in Log Inbox. Evidence review exclusions
 apply equally to highlights and the history view.
 
-An explicit owner/authorized-agent `recap` edit can replace the exported
-highlights with a short editorial paragraph and Done/Pending topics. This is a
-separate interpretation with snapshot citations, not exact model-selected quotes;
-the model generation contract does not produce it. Existing source highlights
+Semantic preparation or an explicit owner/authorized-agent `recap` edit replaces
+exported highlights with a short editorial paragraph and Done/Pending topics.
+This is a separate interpretation with snapshot citations, not exact source quotes.
+Existing source highlights
 and history remain unchanged and inspectable in collapsed supporting activity.
 Whole dependent recap paragraphs/bullets disappear on source exclusion. See the
 [Daily recap contract](daily-domain.md#workstream-and-proposal-revision) for bounds

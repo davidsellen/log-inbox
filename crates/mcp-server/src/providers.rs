@@ -1234,7 +1234,7 @@ mod tests {
                     captured.lock().unwrap().push(stage.clone());
                     assert!(matches!(
                         stage.as_str(),
-                        "Stage: topic partition" | "Stage: fact composition"
+                        "Stage: topic partition" | "Stage: fact composition" | "Stage: daily recap"
                     ));
                     if body.get("max_tokens").is_some() {
                         assert!(body.get("temperature").is_some());
@@ -1249,6 +1249,8 @@ mod tests {
                             ["properties"]["assignments"];
                         assert_eq!(assignments["minItems"], 5);
                         assert_eq!(assignments["maxItems"], 5);
+                        2048
+                    } else if stage == "Stage: daily recap" {
                         2048
                     } else {
                         1536
@@ -1275,13 +1277,14 @@ mod tests {
         assert!(llm::test_compatibility(&config).await.is_err());
         config.profile = RequestProfile::MaxCompletionTokens;
         llm::test_compatibility(&config).await.unwrap();
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
         assert_eq!(
             *stages.lock().unwrap(),
             vec![
                 "Stage: topic partition",
                 "Stage: topic partition",
-                "Stage: fact composition"
+                "Stage: fact composition",
+                "Stage: daily recap"
             ]
         );
         server.abort();

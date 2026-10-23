@@ -2116,7 +2116,7 @@ test("Model override survives navigation and Settings while draft provenance sta
   await mockDaily(page);await mockGenerationSettings(page);
   await page.route("**/api/v2/daily/2026-09-08",route=>route.fulfill({json:{...dailyResponse(),generation_provenance:{connection_id:"environment",provider:"Local",model:"small"}}}));
   await openDaily(page);
-  await expect(page.locator("#next-generation-model")).toContainText("Source-based preparation");
+  await expect(page.locator("#next-generation-model")).toContainText("Local / small");
   await expect(page.locator("#draft-generation-model")).toHaveText("Current draft: Semantic · Local / small");
   await page.locator("#generation-preparation-mode").selectOption("semantic");
   await page.locator("#generation-model-change").click();
@@ -2131,7 +2131,7 @@ test("Model override survives navigation and Settings while draft provenance sta
   await page.locator("#next-day").click();
   await expect(page.locator("#next-generation-model")).toContainText("Local / large");
   await page.reload();
-  await expect(page.locator("#next-generation-model")).toContainText("Source-based preparation");
+  await expect(page.locator("#next-generation-model")).toContainText("Local / small");
 });
 
 test("Retry uses the failed model unless a different model is explicitly chosen",async({page})=>{
@@ -2427,20 +2427,41 @@ test("Compact scheduled labels mark cached automation settings as last known", a
 });
 
 
+test("Daily offers a human summary only with an eligible saved model", async ({page}) => {
+  await mockDaily(page);
+  const settings = generationSettingsFixture();
+  settings.default = null;
+  await mockGenerationSettings(page, settings);
+  await openDaily(page);
+  await expect(page.locator("#generation-preparation-mode")).toHaveValue("source_based");
+  settings.default = {connection_id:"cloud", model:"remote"};
+  await page.reload();
+  await expect(page.locator("#generation-preparation-mode")).toHaveValue("source_based");
+  settings.connections.find(item => item.id === "cloud").consent = true;
+  await page.reload();
+  await expect(page.locator("#generation-preparation-mode")).toHaveValue("semantic");
+  await expect(page.locator("#generation-model-notice")).toContainText("external service");
+});
+
 test("Source preparation omits models and keeps historical mode distinct", async ({page}) => {
   await mockDaily(page); await mockGenerationSettings(page);
   await page.route("**/api/v2/daily/2026-09-08", route => route.fulfill({json:{...dailyResponse(), revision_preparation_mode:"semantic", generation_provenance:{provider:"Local",connection_id:"environment",model:"small"}}}));
   const bodies=[];
   await page.route("**/api/v2/daily/2026-09-08/generate",route=>{bodies.push(route.request().postDataJSON());return route.fulfill({status:503,json:{error:"Unavailable"}});});
   await openDaily(page);
+  await expect(page.locator("#generation-preparation-mode")).toHaveValue("semantic");
+  await page.locator("#generation-preparation-mode").selectOption("source_based");
   await expect(page.locator("#generation-preparation-mode")).toHaveValue("source_based");
   await expect(page.locator("#next-generation-model")).toContainText("No model used");
+  await expect(page.locator("#generation-model-notice")).toContainText("Source reports only");
+  await expect(page.locator("#generation-preparation-mode option[value=semantic]")).toHaveText("Human summary (Semantic)");
   await expect(page.locator("#draft-generation-model")).toContainText("Semantic");
   await expect(page.locator("#generation-model-change")).toBeHidden();
   await page.locator("#generate").click();
   await expect.poll(()=>bodies[0]).toEqual({replace_edited:false,preparation_mode:"source_based"});
   await page.locator("#generation-preparation-mode").selectOption("semantic");
   await expect(page.locator("#generation-model-change")).toBeVisible();
+  await expect(page.locator("#generation-model-notice")).toContainText("Done/Pending topics");
   await page.locator("#generate").click();
   await expect.poll(()=>bodies[1]).toMatchObject({preparation_mode:"semantic",connection_id:"environment",model:"small"});
 });
@@ -2763,4 +2784,63 @@ test("Product KB discards unfinished previews and confirms only prepared or writ
   expect(deleted.map(item => item.path)).toEqual(["prepared", "writing", "conflict"].map(state => `/api/v2/knowledge/promotions/operation_${state}`));
   expect(deleted.every(item => item.csrf === "csrf_fixture")).toBe(true);
   expect(confirmed).toEqual([]);
+});
+
+test("Product KB suggests ordinary activity and freezes owner attribution before review", async ({ page }) => {
+  await mockDaily(page);
+  const submission = { schema_version: 1, submission_key: "activity_1", plan_id: "activity_1", plan_revision: "1", title: "Reported activity", summary: "Original producer report.", product: "", modules: [], claims: [{ kind: "reported", text: "Likely cause found; implementation and verification pending." }] };
+  const event = { id: "ordinary_1", source: "codex/test", message: submission.claims[0].text, metadata: { event_type: "complete", repo: "not-a-product", outcome: "Investigation complete; unverified" } };
+  const suggestion = { event, suggestion_hash: "original-hash", submission, capture_issue: null, captured_candidate_id: null };
+  const candidate = { id: "kb_ordinary", source_event_id: event.id, producer_source: event.source, source_event_digest: "digest", candidate_hash: "frozen-hash", evidence_available: true, superseded: false, review: null, submission };
+  const captures = [];
+  await page.route("**/api/v2/knowledge/**", async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/v2/knowledge/suggestions") return route.fulfill({ json: { suggestions: [suggestion], limit: 100, truncated: true } });
+    if (path.endsWith("/ordinary_1/capture")) {
+      const body = request.postDataJSON();
+      captures.push({ body, csrf: request.headers()["x-csrf-token"] });
+      candidate.submission = { ...submission, product: body.product, modules: body.modules };
+      suggestion.captured_candidate_id = candidate.id;
+      return route.fulfill({ json: { candidate } });
+    }
+    if (path === "/api/v2/knowledge/candidates") return route.fulfill({ json: { candidates: captures.length ? [candidate] : [] } });
+    if (path === "/api/v2/knowledge/submissions") return route.fulfill({ json: { events: [], considered_count: 0, limit: 100, truncated: false } });
+    if (path === "/api/v2/knowledge/promotions") return route.fulfill({ json: { operations: [] } });
+    return route.fallback();
+  });
+  await openDaily(page);
+  await page.locator("#settings").click();
+  await page.locator("#reference-settings").click();
+  const kb = page.locator("#product-kb-submissions");
+  await expect(kb).toContainText("Producer-reported activity, not independent verification");
+  await expect(kb).toContainText("New note creation is not supported");
+  await expect(kb.getByLabel("Confirmed product for ordinary_1")).toHaveValue("");
+  await kb.getByLabel("Confirmed product for ordinary_1").fill("Alpha");
+  await kb.getByLabel("Confirmed modules for ordinary_1").fill("Capture, Review");
+  await kb.getByRole("button", { name: "Capture activity suggestion", exact: true }).click();
+  await expect(kb).toContainText("Awaiting owner review");
+  await expect(kb).toContainText("kind: reported");
+  await expect(kb).toContainText("verification pending");
+  await expect(kb.getByRole("button", { name: "Preview KB update" })).toHaveCount(0);
+  await expect(kb.getByRole("button", { name: "Capture activity suggestion" })).toHaveCount(0);
+  expect(captures).toEqual([{ body: { expected_suggestion_hash: "original-hash", product: "Alpha", modules: ["Capture", "Review"] }, csrf: "csrf_fixture" }]);
+});
+
+test("Product KB keeps oversized reports actionable without enabling incomplete capture", async ({ page }) => {
+  await mockDaily(page);
+  const full = "Qualification retained. ".repeat(300);
+  await page.route("**/api/v2/knowledge/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/suggestions")) return route.fulfill({ json: { suggestions: [{ event: { id: "large", source: "codex/test", message: full, metadata: {} }, submission: { title: "repo: log-inbox · task_id: oversized-report", summary: full, product: "Log Inbox", modules: ["knowledge"], claims: [{ kind: "reported", text: full }] }, capture_issue: "Submit a bounded knowledge_submission retaining all relevant qualifications." }], limit: 100, truncated: false } });
+    return route.fallback();
+  });
+  await openDaily(page);
+  await page.locator("#settings").click();
+  await page.locator("#reference-settings").click();
+  const kb = page.locator("#product-kb-submissions");
+  await expect(kb).toContainText("retaining all relevant qualifications");
+  await expect(kb.getByRole("button", { name: "Capture activity suggestion" })).toBeDisabled();
+  await kb.getByText("Original activity and suggested claims", { exact: true }).click();
+  await expect(kb.locator("details > p")).toHaveText(full.trim());
 });

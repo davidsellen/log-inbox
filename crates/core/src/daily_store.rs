@@ -2430,8 +2430,9 @@ impl Store {
         );
         if let Some(recap) = &content.recap {
             anyhow::ensure!(
-                content.schema_version == 1 && origin == "structured_edit",
-                "Daily recaps require an explicit structured edit of a structured candidate"
+                content.schema_version == 1
+                    && matches!(origin, "structured_edit" | "generated" | "regenerated"),
+                "Daily recaps require a structured candidate"
             );
             let snapshot = snapshot.context("Daily recaps require a source evidence snapshot")?;
             let available = snapshot.event_ids.iter().collect::<HashSet<_>>();
@@ -3460,9 +3461,10 @@ mod tests {
             )
         };
         validate(&content, "structured_edit").unwrap();
-        for origin in ["generated", "regenerated", "manual"] {
-            assert!(validate(&content, origin).is_err());
+        for origin in ["generated", "regenerated"] {
+            validate(&content, origin).unwrap();
         }
+        assert!(validate(&content, "manual").is_err());
         let mut bad = content.clone();
         bad.schema_version = 2;
         assert!(validate(&bad, "structured_edit").is_err());

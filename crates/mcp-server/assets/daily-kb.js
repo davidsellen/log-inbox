@@ -5,6 +5,7 @@ export function createKnowledgeCapture({ app, api }) {
   const root = el("section", "knowledge-section");
   root.id = "product-kb-submissions";
   let incoming = null;
+  let suggestions = null;
   let candidates = null;
   let operations = null;
   let selected = null;
@@ -38,9 +39,10 @@ export function createKnowledgeCapture({ app, api }) {
       api("/api/v2/knowledge/submissions"),
       api("/api/v2/knowledge/candidates"),
       api("/api/v2/knowledge/promotions"),
+      api("/api/v2/knowledge/suggestions"),
     ]);
     if (version !== loadVersion) return;
-    [incoming, candidates, operations] = results.map((result) =>
+    [incoming, candidates, operations, suggestions] = results.map((result) =>
       result.status === "fulfilled" ? result.value : null,
     );
     if (results.some((result) => result.status === "rejected"))
@@ -249,13 +251,112 @@ export function createKnowledgeCapture({ app, api }) {
       el(
         "p",
         "subtle",
-        "Capture original redacted submissions, review their exact revision, then separately preview and confirm a canonical note update. Daily generation and Apply do not approve Product KB content.",
+        "Capture original redacted activity or submissions, review their exact revision, then separately preview and confirm an update to an existing canonical note. New note creation is not supported. Daily generation and Apply do not approve Product KB content.",
       ),
     );
     root.append(
       action("Reload Product KB", () => run(load), { disabled: busy }),
     );
     if (message) root.append(el("p", "notice", message));
+    root.append(el("h3", "", "Activity suggestions"));
+    root.append(
+      el(
+        "p",
+        "subtle",
+        "Producer-reported activity, not independent verification. Confirm product and modules from product navigation before capture. Capture freezes these fields for exact owner review.",
+      ),
+    );
+    if (!suggestions)
+      root.append(el("p", "empty", "Activity suggestions unavailable."));
+    else {
+      if (suggestions.truncated)
+        root.append(
+          el(
+            "p",
+            "notice",
+            "Only the latest 100 activity suggestions are shown. Older reports remain in source history.",
+          ),
+        );
+      if (!suggestions.suggestions?.length)
+        root.append(
+          el("p", "empty", "No retained terminal activity to suggest."),
+        );
+      for (const item of suggestions.suggestions || []) {
+        const row = el("div", "review-row");
+        row.append(el("h4", "", item.submission.title || "Reported activity"));
+        row.append(
+          el(
+            "p",
+            "",
+            item.submission.summary ||
+              item.event.metadata?.outcome ||
+              item.event.message,
+          ),
+        );
+        row.append(
+          el("p", "subtle", `${item.event.source} · ${item.event.id}`),
+        );
+        const evidence = el("details");
+        evidence.append(
+          el("summary", "", "Original activity and suggested claims"),
+          el("p", "", item.event.message),
+          el("pre", "", JSON.stringify(item.event.metadata, null, 2)),
+          el("pre", "", JSON.stringify(item.submission, null, 2)),
+        );
+        row.append(evidence);
+        if (item.capture_issue)
+          row.append(el("p", "notice", item.capture_issue));
+        if (item.captured_candidate_id)
+          row.append(
+            el(
+              "p",
+              "",
+              "Already captured. Select its candidate revision below for review.",
+            ),
+          );
+        else {
+          const [productLabel, product] = labelledInput(
+            `Confirmed product for ${item.event.id}`,
+          );
+          const [modulesLabel, modules] = labelledInput(
+            `Confirmed modules for ${item.event.id}`,
+          );
+          product.value = item.submission.product || "";
+          modules.value = (item.submission.modules || []).join(", ");
+          row.append(
+            productLabel,
+            modulesLabel,
+            el("p", "subtle", "Separate module names with commas."),
+            action(
+              "Capture activity suggestion",
+              () => {
+                const attribution = {
+                  product: product.value,
+                  modules: modules.value
+                    .split(",")
+                    .map((value) => value.trim())
+                    .filter(Boolean),
+                };
+                run(async () => {
+                  const result = await post(
+                    `/api/v2/knowledge/suggestions/${encodeURIComponent(item.event.id)}/capture`,
+                    {
+                      expected_suggestion_hash: item.suggestion_hash,
+                      ...attribution,
+                    },
+                  );
+                  selected = result.candidate;
+                  preview = null;
+                  await load();
+                });
+              },
+              { disabled: busy || !app.csrf || !!item.capture_issue },
+            ),
+          );
+        }
+        root.append(row);
+      }
+    }
     root.append(el("h3", "", "Incoming submissions"));
     if (!incoming)
       root.append(el("p", "empty", "Incoming submissions unavailable."));

@@ -18,6 +18,12 @@ The authenticated Daily workflow, stable workspace profile, immutable revisions,
 
 Accepted plans and implementation results can also be submitted directly for owner-reviewed Product KB capture, independently of Daily generation. In **Settings → Reference notes**, capture a submission, accept its exact revision, then preview and confirm a separate canonical-note update. See [accepted-work KB capture](docs/specs/knowledge-capture.md).
 
+Ordinary completion reports also appear under **Suggestions from activity** without
+a special producer payload. Confirm their product and modules when capturing them,
+then use the same review and canonical-update flow. Suggestions are reported
+activity, not independently verified knowledge. Canonical updates require an
+existing eligible Reference note; this flow does not create new pages.
+
 The optional **Dashboard** shows preparation status, recent days to review, and bounded model timing/outcome samples. Open it from the header or `/?view=dashboard`; Daily remains the main review workflow. [Dashboard behavior](docs/specs/dashboard.md#compact-dashboard) explains inactive schedule records and comparison limits.
 
 The browser never mounts or browses a local folder. The service receives one existing Markdown workspace as a host mount; Settings only defines the daily-note convention inside it. Log Inbox writes nothing until **Confirm Apply**, and then changes only its owned managed block.
@@ -85,8 +91,8 @@ Messages up to 1 MiB and metadata up to 512 KiB are accepted after secret redact
 
 1. Choose the calendar date you want to review. The server resolves its exact interval using the saved timezone; changing the selector loads only that day.
 2. Add work that did not come from an agent under **My notes**. Those words remain separate and are never rewritten by the model.
-3. Prepare the day candidate. Source-based preparation needs no model: it groups reported activity by source identities, selects recent cited reports, and retains the full source history for review. Optional Semantic preparation uses a tested model for grouping and selection; review its accuracy before relying on it.
-4. Correct the structured fields and include or omit evidence as needed. Under **Edit draft**, add an optional **Short recap**: a plain-language paragraph and up to five topics with **Done** and **Pending** text, each linked to supporting reports. With a recap, Copy and Apply use that short version; the original reports stay collapsed in Daily. Recap writing is currently explicit editing by you or an authorized writing agent. Each save creates an immutable revision in SQLite and still does not touch Markdown.
+3. **Human summary (Semantic)** prepares a plain-language paragraph and up to five **Done/Pending** topics using a tested model. It retains cited source reports underneath for review. Daily selects it when a saved default model is available with any required consent. **Source reports (no model)** selects original reports without writing a recap and remains available without a model. Scheduled preparation remains source-based.
+4. Review the short recap against its supporting reports, correct it under **Edit draft**, and include or omit evidence as needed. Copy and Apply use the recap; original reports stay collapsed in Daily. You can also add a recap manually to source-based drafts. Each save creates an immutable revision in SQLite and still does not touch Markdown. A model-authored recap is an interpretation requiring review, not independent verification.
 5. Select **Review Apply** to see the current and approved managed blocks plus the exact frozen destination.
 6. Select **Confirm Apply** to write. Existing frontmatter and all content outside the Log Inbox block are preserved. Interrupted or conflicting writes remain visible and retryable.
 
