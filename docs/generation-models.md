@@ -27,6 +27,12 @@ Compatibility testing allows up to 300 seconds per profile for verified local en
 
 A saved synthetic compatibility result proves the request/response contract on that probe, not accurate recap interpretation or useful summaries on real activity. Semantic preparation may still fail; source-based preparation remains available without a model.
 
+For Azure OpenAI, use the resource's compatible API base URL ending in
+`/openai/v1` and enter the Azure **deployment name** as the model ID. A model
+catalog entry does not establish that a deployment with that name exists in your
+resource. A resource-root URL can allow saving the connection while subsequent
+API calls return not found. See the [official Azure integration guidance](https://developers.openai.com/api/reference/ruby#microsoft-azure-openai).
+
 A discovered ID is not a compatibility guarantee. Tests support `max_tokens` with temperature and `max_completion_tokens` without temperature; the successful request profile is saved per model. Models must support the Daily structured JSON contract. Authentication, missing models, unsupported contracts, timeouts, and temporary service failures have separate recovery messages. Local models must be installed on their server; Log Inbox does not download them.
 
 Requests originate from the Log Inbox service. In Docker, `localhost` means the app container, not the host browser. Plain HTTP is supported for loopback and the private Compose `ollama` hostname. Other endpoints require HTTPS and publicly routable addresses. Private LAN endpoints are not currently supported. Redirects and proxy environment settings are not followed; resolved destination addresses are validated and pinned for each captured attempt.

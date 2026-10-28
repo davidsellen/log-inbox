@@ -228,11 +228,14 @@ This is editorial assistance, not successful automatic synthesis or owner Apply.
 Live Chromium and Firefox both display the exact reviewed paragraph and three
 topics, with no page errors or unexpected mutating browser requests.
 
-Only the environment/local connection is configured; no external API credential
-is available in the process or project environment. The owner selected a stronger
-provider for the next capability trial. Provider setup and saved endpoint-bound
-activity-sharing consent in Generation settings are now required before that
-trial. The owner was asked to enter credentials in the application, not chat. A next candidate must pass original-source
+The owner selected a stronger provider and configured Azure OpenAI credentials
+and activity-sharing consent through Generation settings. The connection initially
+used the resource root and returned not found. Correcting only its path on the
+same approved host to `/openai/v1`, preserving the stored key and authorized
+consent, enabled discovery. The first candidate `gpt-6.1-sol` returned model not
+found; a discovered catalog ID does not establish an Azure deployment. The owner
+was asked for the resource's deployment name before further capability trials.
+No credential or private endpoint was printed or committed. A next candidate must pass original-source
 review on this frozen day and a second held-out real day before default selection
 or a usefulness claim; practical latency also remains an acceptance gate.
 The broader recall pilot remains separate. All live attempts preserve explicit
