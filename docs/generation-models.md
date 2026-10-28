@@ -1,8 +1,8 @@
 # Choosing generation models
 
 Daily selects **Human summary (Semantic)** when a saved default model is available
-and any required external consent is saved. It requests grouping, source highlight
-selection and a final cited recap for daily review or meetings. Without an eligible
+and any required external consent is saved. It prepares retained source workstreams deterministically and requests one
+cited recap from the latest reported workstream outcomes and selected older context for daily review or meetings. Complete source history remains available for review; this focus does not establish acceptance or resolve older gates. Without an eligible
 default, Daily selects **Source reports (no model)**, which retains original report
 wording without a recap. The server API default and scheduled preparation remain
 source-based. **Change model** selects a saved, tested provider/model for one
@@ -23,7 +23,9 @@ Open **Settings → Generation**. Choose and save the model default for future e
 4. **Test & save model** sends synthetic activity through the production structured-output request and validator. Only successful models become choices. The original environment model remains available for compatibility with existing installations.
 5. Choose a saved model as the default, or return to Daily and choose it for one attempt.
 
-A saved synthetic compatibility result proves the request/response contract on that probe, not accurate grouping or useful summaries on real activity. Semantic preparation may still fail; source-based preparation remains available without a model.
+Compatibility testing allows up to 300 seconds per profile for verified local endpoints and 30 seconds per profile for other providers, always bounded by the configured request timeout. At most two profiles are tried sequentially. This does not change the generation deadline.
+
+A saved synthetic compatibility result proves the request/response contract on that probe, not accurate recap interpretation or useful summaries on real activity. Semantic preparation may still fail; source-based preparation remains available without a model.
 
 A discovered ID is not a compatibility guarantee. Tests support `max_tokens` with temperature and `max_completion_tokens` without temperature; the successful request profile is saved per model. Models must support the Daily structured JSON contract. Authentication, missing models, unsupported contracts, timeouts, and temporary service failures have separate recovery messages. Local models must be installed on their server; Log Inbox does not download them.
 

@@ -1232,10 +1232,7 @@ mod tests {
                     let prompt = body["messages"][1]["content"].as_str().unwrap();
                     let stage = prompt.lines().next().unwrap().to_owned();
                     captured.lock().unwrap().push(stage.clone());
-                    assert!(matches!(
-                        stage.as_str(),
-                        "Stage: topic partition" | "Stage: fact composition" | "Stage: daily recap"
-                    ));
+                    assert_eq!(stage, "Stage: daily recap");
                     if body.get("max_tokens").is_some() {
                         assert!(body.get("temperature").is_some());
                         return (
@@ -1243,19 +1240,7 @@ mod tests {
                             Json(json!({"error":"use completion tokens"})),
                         );
                     }
-                    let expected_tokens = if stage == "Stage: topic partition" {
-                        // The whole validation array is one card, without its duplicate child.
-                        let assignments = &body["response_format"]["json_schema"]["schema"]
-                            ["properties"]["assignments"];
-                        assert_eq!(assignments["minItems"], 5);
-                        assert_eq!(assignments["maxItems"], 5);
-                        2048
-                    } else if stage == "Stage: daily recap" {
-                        2048
-                    } else {
-                        1536
-                    };
-                    assert_eq!(body["max_completion_tokens"], expected_tokens);
+                    assert_eq!(body["max_completion_tokens"], 2048);
                     assert!(body.get("temperature").is_none());
                     (
                         StatusCode::OK,
@@ -1277,15 +1262,10 @@ mod tests {
         assert!(llm::test_compatibility(&config).await.is_err());
         config.profile = RequestProfile::MaxCompletionTokens;
         llm::test_compatibility(&config).await.unwrap();
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(
             *stages.lock().unwrap(),
-            vec![
-                "Stage: topic partition",
-                "Stage: topic partition",
-                "Stage: fact composition",
-                "Stage: daily recap"
-            ]
+            vec!["Stage: daily recap", "Stage: daily recap"]
         );
         server.abort();
     }

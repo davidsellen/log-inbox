@@ -6820,7 +6820,7 @@ mod knowledge_destination_tests {
                 if prompt.starts_with("Stage: topic partition") {
                     return Json(generation_model_response(&body));
                 }
-                assert!(prompt.starts_with("Stage: fact composition"));
+                assert!(prompt.starts_with("Stage: daily recap"));
                 Json(json!({"choices":[{"finish_reason":reason,"message":{"content":content}}],"usage":{"prompt_tokens":100,"completion_tokens":512}}))
             }));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -6887,7 +6887,7 @@ mod knowledge_destination_tests {
             .await
             .unwrap();
         assert_eq!(first.id, reused.id);
-        assert_eq!(*captured.lock().unwrap(), vec!["test", "test", "test"]);
+        assert_eq!(*captured.lock().unwrap(), vec!["test"]);
         state.llm_config.as_mut().unwrap().model = "second".to_owned();
         let second = generate_daily_candidate(&state, date, false, None)
             .await
@@ -6959,12 +6959,7 @@ mod knowledge_destination_tests {
                 .unwrap()["model"],
             "third"
         );
-        assert_eq!(
-            *captured.lock().unwrap(),
-            vec![
-                "test", "test", "test", "second", "second", "second", "third", "third", "third"
-            ]
-        );
+        assert_eq!(*captured.lock().unwrap(), vec!["test", "second", "third"]);
         server.abort();
     }
 
@@ -7321,7 +7316,6 @@ mod knowledge_destination_tests {
                                 .as_str()
                                 .unwrap()
                                 .starts_with("Stage: topic partition")
-                                || llm::test_recap_response(&body).is_some()
                             {
                                 return Json(generation_model_response(&body));
                             }
@@ -7330,7 +7324,7 @@ mod knowledge_destination_tests {
                                 body["messages"][1]["content"]
                                     .as_str()
                                     .unwrap()
-                                    .starts_with("Stage: fact composition")
+                                    .starts_with("Stage: daily recap")
                             );
                             entered.notify_one();
                             release.notified().await;
@@ -7445,6 +7439,14 @@ mod knowledge_destination_tests {
             tokio::time::timeout(std::time::Duration::from_secs(15), entered.notified())
                 .await
                 .expect("model receives request");
+            assert_eq!(
+                state
+                    .store
+                    .latest_generation_attempt(&profile.id, date)
+                    .unwrap()
+                    .unwrap()["completed_groups"],
+                0
+            );
             if scenario == "timeout" {
                 tokio::time::pause();
                 tokio::time::advance(std::time::Duration::from_secs(3601)).await;
@@ -9002,6 +9004,9 @@ mod knowledge_destination_tests {
             "daily-structured-v20-source-headings",
             "daily-structured-v21-source-highlights",
             "daily-structured-v22-source-outcomes",
+            "daily-structured-v23-semantic-recap",
+            "daily-structured-v24-direct-recap",
+            "daily-structured-v25-grounded-recap",
         ] {
             let (mut state, profile, date) = generation_test_state();
             state.llm_config = Some(llm::LlmConfig::for_test("http://127.0.0.1:9"));

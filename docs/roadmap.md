@@ -1,6 +1,6 @@
 # Daily Engineering Knowledge Roadmap
 
-Status: reviewed Daily workflow, human recap generation and ordinary-activity KB suggestions deployed locally for owner verification; generated-summary usefulness and agent recall remain unproven. Updated 2026-10-23. Initial baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
+Status: Daily generation failure repaired and deployed locally; tested local models failed factual-summary acceptance. October 22 has a source-reviewed editorial draft; automatic usefulness and agent recall remain unproven. Updated 2026-10-28. Initial baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
 
 This roadmap defines the target direction, delivered foundation, and remaining delivery order. The [README](../README.md) and runtime specs describe the active Daily release; milestone checkboxes record implemented and pending work.
 
@@ -135,6 +135,111 @@ The runtime still matches all 53 files in the verified deployment manifest;
 this publication includes the implementation, regression tests, contracts and
 deployment evidence above. GitHub CI for the new commit is separate from the
 completed local validation.
+
+## Failed human-summary generation — 2026-10-28
+
+Canonical follow-up to the owner's screenshot and request to make summaries work.
+Starting HEAD `dab8940278e1222f6571dcad326d07600aa756c4`, existing branch
+`codex/accepted-work-kb-capture`. Preserve the unrelated preexisting M5 period-API
+planning addition. Previous changes were pushed, not merged; the running local
+build already contained them. The owner previously authorized push, deployment
+and verification. No merge or new PR is included.
+
+**Diagnosis.** The failing October 22 day has 36 events. Saved local
+`qwen2.5:1.5b` failed before composing with `daily topic partition exceeds its
+subject limit`. A prerequisite model partition exceeded its twelve-subject window.
+Earlier mocks and three-event recap-only trials missed this real production path.
+
+**Plan and delivery.** Reuse deterministic source preparation, retain complete
+reported history and reviewed aliases, and ask the model only for a bounded cited
+recap. Keep source mode, manual notes, exclusions, immutable revision checks and
+explicit Apply. Errors remain visible rather than substituting a report dump.
+Factory routing used a bounded Sol/medium worker, independent Sol/high review and
+coordinator-owned replay, deployment and documentation. Ponytail lite: remove
+unnecessary model prerequisites; add no provider, dependency or automatic write.
+
+The final `daily-structured-v26-focused-recap` contract prepares workstreams in
+Rust. The writer receives all exact cards from each workstream's latest material
+report, then only already-selected older source clauses labeled as history.
+Complete history remains available for review. Request-local integer citations map
+strictly to original snapshot IDs; unoffered references are rejected. Citations
+must cover the two newest material anchors. These are relevance/source-bound
+checks, not proof of factual entailment or automatic supersession. Manual prose
+and Knowledge titles, links and excerpts are excluded from writer input.
+
+Model-only limits are 500 characters for the paragraph, one to three topics,
+240 characters per status and six references per statement. Duplicate normalized
+topics and identical Done/Pending pairs fail. Public/manual/historical limits and
+safe older-contract amendments remain supported. Local compatibility probes allow
+up to 300 seconds per profile, other providers 30 seconds, always capped by the
+configured request limit; at most two profiles run sequentially. The overall
+1,200-second generation deadline is unchanged.
+
+| Contract/scenario | Evidence | State |
+| --- | --- | --- |
+| More than twelve source subjects cannot block writing | 36-source production-entry regression with recap-only model | Passed |
+| Retained history, aliases, exclusions and focused source ownership | Semantic/source, focused anchor, offered-reference and reviewed-alias regressions | Passed |
+| Failure safety, source mode, manual notes and historical amendments | 327 workspace tests passed / 14 opt-in ignored; 14 Chromium/Firefox summary browser scenarios passed | Passed |
+| Exact request retains review history while reducing writer input | 105 history cards retained; 44 writer cards from 14 sources; prompt bytes reduced 42.3% | Passed bounds; no speed claim |
+| Independent complete diff and focused follow-up review | No actionable code or documentation findings; reviewed against starting HEAD | Passed; semantic entailment remains a human check |
+| Local deployment and preservation | Verified backup, exact images/configuration/assets, health, 12 protected tables and 77 Markdown hashes | Passed |
+| Actual October 22 automatic factual scope | Final v26 Gemma trial, independent original-source review | Failed; default unchanged |
+| Corrected October 22 editorial draft | Independently reviewed manual recap saved through normal candidate API | Passed source review; no Apply |
+
+**Actual model evidence.** Reaching the writer alone did not solve quality.
+The saved 1.5B model first exhausted its token budget after 553.65 seconds;
+a compact-reference run completed in 422.52 seconds but repeated sentences and
+topics and misclassified status. Larger 4B live attempts completed in 576.57 and
+439.29 seconds, but still repeated resolved blockers or made broad unsupported
+scope claims. A full-input 12B Gemma run completed in 1,042.73 seconds; independent
+review rejected overstatement of webhook completion and stale architecture/CI
+claims. These runs created review drafts only; none was applied. They motivated
+the final focused reported view rather than treating schema success as acceptance.
+
+The final v26 deployment source manifest is
+`abb0dbb08118a56f506f5b1f4669524711d8b6e3cc503824d3f57bd15fb8d7db`.
+It recreates only the existing collector and Daily services; Ollama is unchanged.
+The quiesced backup passed SQLite integrity checks; schema remains 29. All 1,069
+nonexpired events survived. Five older events expired at startup under the
+unchanged 30-day policy and remain in the verified backup. All 12 protected
+review/configuration tables and all 77 Markdown hashes are unchanged. Rust/client
+formatting, Clippy with warnings denied and whitespace checks passed. Sandboxed
+mock-listener/browser restrictions were resolved by authorized unsandboxed reruns.
+
+The final deployed compatibility probe passed for installed local
+`gemma3:12b-8k`. The normal real-day API generated a structured recap in 586.58
+seconds, preserving all 77 Markdown hashes, but **failed factual acceptance**.
+It marked already-passed email/TLS verification pending, omitted the cited webhook
+completion gates and called the completed read-only investigation ongoing.
+Independent Sol/high original-source review and a bounded Astra/low architecture
+escalation confirmed that the decisive qualifications were already supplied and
+cited: this is model interpretation failure, not absent evidence. Stop prompt
+retries rather than treating citation membership as entailment. The saved default
+remains `qwen2.5:1.5b`; no tested model is accepted for automatic summary quality.
+
+For immediate review value, the coordinator authored a corrected paragraph and
+three topics from original sources 35, 33 and 24. Independent factual review
+narrowed browser verification to the isolated view, distinguished a proposed
+storage approach from implementation and removed historical requirements whose
+current status is unknown. The normal candidate API saved this as a new
+`structured_edit` revision, preserving the model output in history. Its recap
+exactly matches the reviewed proposal and all 77 Markdown hashes remain unchanged.
+This is editorial assistance, not successful automatic synthesis or owner Apply.
+Live Chromium and Firefox both display the exact reviewed paragraph and three
+topics, with no page errors or unexpected mutating browser requests.
+
+Only the environment/local connection is configured; no external API credential
+is available in the process or project environment. The owner selected a stronger
+provider for the next capability trial. Provider setup and saved endpoint-bound
+activity-sharing consent in Generation settings are now required before that
+trial. The owner was asked to enter credentials in the application, not chat. A next candidate must pass original-source
+review on this frozen day and a second held-out real day before default selection
+or a usefulness claim; practical latency also remains an acceptance gate.
+The broader recall pilot remains separate. All live attempts preserve explicit
+owner Apply. Private backups, receipts and replay
+artifacts are retained under ignored `tmp/deployments/focused-recap-20261028/`
+and `tmp/evaluations/summary-failure-20261028/`; earlier trial receipts remain
+in their dated deployment directories.
 
 ## Product Promise
 
