@@ -5,6 +5,11 @@ use log_inbox_core::knowledge_capture::KnowledgeDispositionKind;
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v2/knowledge/submissions", get(submissions))
+        .route("/api/v2/knowledge/suggestions", get(suggestions))
+        .route(
+            "/api/v2/knowledge/suggestions/{id}/capture",
+            post(capture_suggestion),
+        )
         .route(
             "/api/v2/knowledge/candidates",
             get(candidates).post(materialize),
@@ -54,6 +59,54 @@ async fn submissions(
     Ok(Json(
         json!({"events": events, "considered_count": considered_count, "limit": result.limit, "truncated": result.truncated}),
     ))
+}
+
+async fn suggestions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "logs:read", false)?;
+    let profile = active_refocus_workspace(&state)?;
+    let result = state
+        .store
+        .list_knowledge_suggestions(&profile.id, 100)
+        .map_err(capture_error)?;
+    Ok(Json(serde_json::to_value(result).map_err(|_| {
+        ApiError::internal("Suggestions could not be loaded.")
+    })?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureSuggestionInput {
+    expected_suggestion_hash: String,
+    product: String,
+    modules: Vec<String>,
+}
+async fn capture_suggestion(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<CaptureSuggestionInput>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_refocus(&state, &headers, "review:write", true)?;
+    authorize_refocus(&state, &headers, "logs:read", false)?;
+    let profile = active_refocus_workspace(&state)?;
+    let _guard = state
+        .knowledge_write_lock
+        .lock()
+        .map_err(|_| ApiError::internal("Knowledge review lock unavailable."))?;
+    let candidate = state
+        .store
+        .capture_knowledge_suggestion(
+            &profile.id,
+            &id,
+            &input.expected_suggestion_hash,
+            &input.product,
+            &input.modules,
+        )
+        .map_err(capture_error)?;
+    Ok(Json(json!({"candidate":candidate})))
 }
 
 async fn candidates(
@@ -251,6 +304,112 @@ mod tests {
                 .unwrap(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn knowledge_activity_suggestion_api_keeps_owner_and_source_boundaries() {
+        let state = state();
+        let owner = session(&state, &["logs:read", "knowledge:read", "review:write"]);
+        let reader = session(&state, &["logs:read"]);
+        let reviewer = session(&state, &["review:write"]);
+        let e = state
+            .store
+            .insert_event(LogEventInput {
+                source: "codex/host".into(),
+                level: None,
+                timestamp: None,
+                message: "Investigation complete; implementation not started".into(),
+                metadata: Some(
+                    json!({"event_type":"complete", "outcome":"Likely cause; unverified"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+                fingerprint: None,
+            })
+            .unwrap();
+        let app = build_router(state.clone());
+        let list = "/api/v2/knowledge/suggestions";
+        assert_eq!(
+            call(app.clone(), "GET", list, json!({}), &reviewer)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let suggestion =
+            json(call(app.clone(), "GET", list, json!({}), &reader).await).await["suggestions"][0]
+                .clone();
+        assert_eq!(suggestion["submission"]["claims"][0]["kind"], "reported");
+        let path = format!("{}/{}/capture", list, e.id);
+        let body = json!({"expected_suggestion_hash":suggestion["suggestion_hash"], "product":"Log Inbox", "modules":["knowledge"]});
+        for credentials in [&reader, &reviewer] {
+            assert_eq!(
+                call(app.clone(), "POST", &path, body.clone(), credentials)
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(
+            request(
+                app.clone(),
+                "POST",
+                &path,
+                body.clone(),
+                None,
+                false,
+                ("localhost:8788", "http://localhost:8788")
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        for (csrf, host, origin) in [
+            (false, "localhost:8788", "http://localhost:8788"),
+            (true, "hostile.test", "http://localhost:8788"),
+            (true, "localhost:8788", "http://hostile.test"),
+        ] {
+            assert_eq!(
+                request(
+                    app.clone(),
+                    "POST",
+                    &path,
+                    body.clone(),
+                    Some(&owner),
+                    csrf,
+                    (host, origin)
+                )
+                .await
+                .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        let mut stale = body.clone();
+        stale["expected_suggestion_hash"] = json!("stale");
+        assert_eq!(
+            call(app.clone(), "POST", &path, stale, &owner)
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let mut missing = body.clone();
+        missing["product"] = json!("");
+        assert_eq!(
+            call(app.clone(), "POST", &path, missing, &owner)
+                .await
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let candidate =
+            json(call(app.clone(), "POST", &path, body.clone(), &owner).await).await["candidate"]
+                .clone();
+        assert!(candidate["review"].is_null());
+        assert_eq!(candidate["source_event_id"], e.id);
+        assert_eq!(
+            json(call(app.clone(), "POST", &path, body, &owner).await).await["candidate"]["id"],
+            candidate["id"]
+        );
+        assert!(!state.workspace.canonical_root().join("Daily").exists());
     }
 
     #[tokio::test]

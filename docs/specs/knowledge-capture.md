@@ -22,7 +22,11 @@ Place `knowledge_submission` in event metadata through the unchanged HTTP or MCP
 ingest interface. Required fields are `schema_version: 1`, `submission_key`,
 `plan_id`, `plan_revision`, confirmed `product`, nonempty `modules`, `title`,
 `summary`, and one to 32 `claims`. Each claim contains `kind` and `text`.
-Kinds are `proposed`, `accepted`, `implemented`, `verified`, `merged`, `deployed`.
+Kinds are `reported`, `proposed`, `accepted`, `implemented`, `verified`, `merged`, `deployed`.
+A `reported` claim retains an original producer report without inferring any of
+the other states. Reported claim text, and summaries containing only reported
+claims, may contain newlines/tabs; existing strict claim kinds retain their
+control-character restrictions.
 A verified claim additionally requires `verification_scope`. Accepted claims may
 include `reported_acceptance: {source, actor, at}` with an ISO8601 UTC timestamp.
 This supplied attribution remains producer-reported; the dashboard records its own
@@ -38,6 +42,33 @@ The core validator defines the remaining per-array/string limits. See the
 [producer example](../agent-integration.md#submitting-accepted-work-to-product-kb).
 Malformed submissions remain ordinary retained events; capture creates no partial
 candidate.
+
+## Suggestions from ordinary activity
+
+The Reference notes screen also lists suggestions projected from retained original
+events without requiring `knowledge_submission` or Daily generation. Eligible
+event types are `complete`, `completed`, `blocked` and `failed`. Explicit workspace
+claims must match the active workspace; malformed claims are excluded. Eligibility
+and already-captured source events are filtered before the latest-100 query limit,
+with truncation disclosed. Historical work is discoverable only while its original
+event remains retained.
+
+Each suggestion binds its exact original redacted event envelope and deterministic
+projection to a suggestion hash. Capture requires that hash plus owner-confirmed
+product and modules; missing attribution is never guessed from repository names.
+Event-derived keys and plan IDs make exact capture retries idempotent without
+inventing cross-event plans or supersession. Capture freezes the owner attribution
+and original report as an immutable candidate. It does not alter source metadata,
+approve the candidate, or write Markdown.
+
+Original messages and selected outcome, decision, validation and follow-up metadata
+remain `reported` claims, including qualifications and structured values. A terminal
+task status does not establish implementation, verification, acceptance, merge or
+deployment. Oversized or unsupported exact reports stay visible with a capture
+explanation; they require a bounded structured submission retaining qualifications
+rather than silent clipping. Review, source-expiry checks and canonical promotion
+reuse the same candidate and journal contracts below. The destination must already
+exist; suggestions do not create new Markdown pages.
 
 ## Immutable candidates and corrections
 
@@ -116,6 +147,8 @@ All paths begin `/api/v2/knowledge`:
 | Method/path | Request / result |
 | --- | --- |
 | `GET /submissions` | Latest 100 matching retained original events; SQL filters before bounding, workspace eligibility and truncation disclosed |
+| `GET /suggestions` | Latest 100 eligible ordinary activity projections and exact suggestion hashes; no write |
+| `POST /suggestions/{event_id}/capture` | `{expected_suggestion_hash, product, modules}` → immutable `{candidate}`; owner capture scopes and CSRF required |
 | `GET /candidates` | Latest 100 candidates and current source/supersession flags |
 | `POST /candidates` | `{source_event_id}` → `{candidate}` |
 | `GET /candidates/{id}` | `{candidate}` |
@@ -130,6 +163,13 @@ No producer endpoint approves, reviews, chooses an authoritative destination, or
 writes Markdown. There is no extra MCP tool, service or dependency.
 
 ## Upgrade and rollback
+
+Ordinary-activity suggestions reuse schema 29 and add no database migration.
+Captured activity stores the new `reported` claim kind; older runtimes that do not
+recognize that kind cannot read those candidates. Keep a compatible runtime and
+preserve/export post-upgrade candidates and unfinished operations before any
+rollback. An unchanged SQL schema does not make new candidate JSON compatible
+with an older application.
 
 Additive transactional migrations 28/29 add immutable candidate/review tables and
 KB operation journals. Existing workspace IDs, events, Daily revisions and existing

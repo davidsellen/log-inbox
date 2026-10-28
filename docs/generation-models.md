@@ -1,6 +1,15 @@
 # Choosing generation models
 
-Daily defaults to **Source-based** preparation: no model is used, and source grouping and current state need your review. Select **Semantic** to request model grouping and highlight selection. In that mode, **Change model** selects a saved, tested provider/model for one attempt without changing the saved model default. A temporary model choice stays with that day while navigating or visiting Settings and is consumed on success. Failed semantic attempts retain their mode/model for retry; explicitly selecting Source-based starts a source attempt instead. The mode displayed beside preparation controls always describes the next request.
+Daily selects **Human summary (Semantic)** when a saved default model is available
+and any required external consent is saved. It prepares retained source workstreams deterministically and requests one
+cited recap from each workstream’s complete latest material report for daily review or meetings. Earlier reports stay in review history and may contain distinct work omitted from the short recap; this focus does not establish acceptance or resolve older gates. Without an eligible
+default, Daily selects **Source reports (no model)**, which retains original report
+wording without a recap. The server API default and scheduled preparation remain
+source-based. **Change model** selects a saved, tested provider/model for one
+Semantic attempt without changing the saved default. A temporary choice stays with
+that day while navigating or visiting Settings and is consumed on success. Failed
+attempts retain their mode/model for retry; explicit mode choices take precedence.
+The displayed mode always describes the next request.
 
 The **Current draft** caption describes the displayed draft and its mode, independently of the next selection. Older drafts without provenance say that their generation model is unavailable. Source-based drafts, manual-only drafts and activity records do not use a model. Changing models never silently overwrites structured edits: confirm replacement first. Failures retain the last usable draft, which can still be read, copied, edited, and saved.
 
@@ -14,7 +23,15 @@ Open **Settings → Generation**. Choose and save the model default for future e
 4. **Test & save model** sends synthetic activity through the production structured-output request and validator. Only successful models become choices. The original environment model remains available for compatibility with existing installations.
 5. Choose a saved model as the default, or return to Daily and choose it for one attempt.
 
-A saved synthetic compatibility result proves the request/response contract on that probe, not accurate grouping or useful summaries on real activity. Semantic preparation may still fail; source-based preparation remains available without a model.
+Compatibility testing allows up to 300 seconds per profile for verified local endpoints and 30 seconds per profile for other providers, always bounded by the configured request timeout. At most two profiles are tried sequentially. This does not change the generation deadline.
+
+A saved synthetic compatibility result proves the request/response contract on that probe, not accurate recap interpretation or useful summaries on real activity. Semantic preparation may still fail; source-based preparation remains available without a model.
+
+For Azure OpenAI, use the resource's compatible API base URL ending in
+`/openai/v1` and enter the Azure **deployment name** as the model ID. A model
+catalog entry does not establish that a deployment with that name exists in your
+resource. A resource-root URL can allow saving the connection while subsequent
+API calls return not found. See the [official Azure integration guidance](https://developers.openai.com/api/reference/ruby#microsoft-azure-openai).
 
 A discovered ID is not a compatibility guarantee. Tests support `max_tokens` with temperature and `max_completion_tokens` without temperature; the successful request profile is saved per model. Models must support the Daily structured JSON contract. Authentication, missing models, unsupported contracts, timeouts, and temporary service failures have separate recovery messages. Local models must be installed on their server; Log Inbox does not download them.
 

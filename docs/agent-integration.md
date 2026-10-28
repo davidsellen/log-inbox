@@ -47,6 +47,16 @@ underlying defect unresolved. Use explicit `blocker` and `follow_up` metadata fo
 remaining work rather than relying on a terminal task status to imply resolution.
 Knowledge excerpts provide background; they are not evidence that work happened.
 
+Ordinary terminal reports (`complete`, `completed`, `blocked`, `failed`) can now
+appear as owner-reviewed KB suggestions without a special payload. Keep their
+outcome, decisions, validation scope and follow-ups readable and qualified. These
+are reported claims; successful task completion does not prove implementation,
+acceptance, verification, merge or deployment. The owner confirms product/modules,
+captures and reviews the exact candidate, then separately confirms an update to an
+existing Reference note. `canonical_note_candidates` remains advisory and never
+authorizes a destination or Markdown write. Structured `knowledge_submission`
+remains available for deliberate plan revisions and explicit supersession.
+
 For terminal reports, put the useful result directly in `metadata.outcome` rather
 than requiring a summary selector to recover it from a generic completion headline.
 Use a short string or small structured value; each meaningful statement should fit
