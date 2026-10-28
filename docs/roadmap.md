@@ -231,6 +231,34 @@ Private backups, source manifests, frozen replays and browser receipts remain in
 ignored `tmp/deployments/latest-report-recap-20261028/` and
 `tmp/evaluations/summary-failure-20261028/`; earlier trial receipts are retained.
 
+### Local Rust verification and merge — 2026-10-28
+
+The owner subsequently authorized merging the published changes, requiring local
+Rust verification because the remote pipeline is broken. Starting head
+`2bd92e445210b69b1b356ae6d3f465c3aa8bea2f`, target `main` at
+`1bf92f6d3f81d3d439c5bec95f1c720fe139a105`, merge base `c6deb798`.
+The prospective merge tree matches HEAD exactly; main adds only already-included
+merge history, with no file conflicts. Preserve the unrelated M5 planning edit.
+
+Plan: run locked local formatting, Clippy, workspace tests and a release build,
+then create and merge the integrated PR after verification. Remote CI is not
+represented as passing. Complete independent target-to-head review covered all
+18 paths and found no runtime/security issues; its README topic-limit mismatch
+was corrected to three generated topics, with the activity-suggestions caption
+aligned to the UI. Local Rust is 1.98.1, satisfying the declared 1.98 minimum.
+All local checks passed: `cargo fmt --all -- --check`, locked workspace/all-target
+Clippy with warnings denied, `cargo test --locked --workspace` using normal
+parallel execution (328 passed, 14 opt-in ignored), and
+`cargo build --locked --release --workspace`. Both collector and Daily/MCP release
+binaries were produced and all dynamic libraries resolved locally. Release build
+took 3m 30s. The subsequent README/task-record changes are documentation only;
+Rust sources and the dependency lockfile match the verified code. PR
+[#5](https://github.com/davidsellen/log-inbox/pull/5) contains the integrated change
+and this local validation evidence. Hosted CI was observed running on that PR;
+its completion is separate from the owner-requested local Rust merge gate.
+Private logs and binary hashes are in ignored
+`tmp/evaluations/merge-local-rust-20261028/`.
+
 ## Product Promise
 
 Turn selected engineering activity into a concise, evidence-linked daily record: what changed, why, what was validated, and what remains. Let the owner review and correct it before writing to existing Markdown notes.
