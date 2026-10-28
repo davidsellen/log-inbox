@@ -1,6 +1,6 @@
 # Daily Engineering Knowledge Roadmap
 
-Status: Daily generation failure repaired and deployed locally; tested local models failed factual-summary acceptance. October 22 has a source-reviewed editorial draft; automatic usefulness and agent recall remain unproven. Updated 2026-10-28. Initial baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
+Status: latest-report human recap generation deployed locally, with owner-approved Azure default and two source-reviewed example drafts. Raw output still needs review; broader usefulness and agent recall remain unproven. Updated 2026-10-28. Initial baseline inspected: `ae46de99fd0e80fa4d70ef92a953d076bcf04057`.
 
 This roadmap defines the target direction, delivered foundation, and remaining delivery order. The [README](../README.md) and runtime specs describe the active Daily release; milestone checkboxes record implemented and pending work.
 
@@ -139,110 +139,97 @@ completed local validation.
 ## Failed human-summary generation — 2026-10-28
 
 Canonical follow-up to the owner's screenshot and request to make summaries work.
-Starting HEAD `dab8940278e1222f6571dcad326d07600aa756c4`, existing branch
+Original base `dab8940278e1222f6571dcad326d07600aa756c4`; v27 follow-up base
+`fa6fecacf4895acc20c3339cb9cbcc1f47754aa1`, existing branch
 `codex/accepted-work-kb-capture`. Preserve the unrelated preexisting M5 period-API
-planning addition. Previous changes were pushed, not merged; the running local
-build already contained them. The owner previously authorized push, deployment
-and verification. No merge or new PR is included.
+planning addition. Earlier changes were pushed, not merged, and already deployed.
+The owner authorized repair, push and local deployment/verification; no new PR or
+merge is included.
 
-**Diagnosis.** The failing October 22 day has 36 events. Saved local
+**Diagnosis and plan.** The October 22 day contains 36 events. Saved local
 `qwen2.5:1.5b` failed before composing with `daily topic partition exceeds its
-subject limit`. A prerequisite model partition exceeded its twelve-subject window.
-Earlier mocks and three-event recap-only trials missed this real production path.
+subject limit`. The prerequisite model partition exceeded its twelve-subject window;
+earlier mocks and three-event recap-only trials missed that production path.
+Use deterministic source workstreams and one cited recap request, retaining source
+history, reviewed aliases, exclusions, manual notes, immutable revisions and Apply.
+Subsequent actual trials exposed stale blockers and misclassified scope even when
+requests passed schema validation. Removing unnecessary older writer context is
+therefore part of the repair, not evidence of factual entailment.
 
-**Plan and delivery.** Reuse deterministic source preparation, retain complete
-reported history and reviewed aliases, and ask the model only for a bounded cited
-recap. Keep source mode, manual notes, exclusions, immutable revision checks and
-explicit Apply. Errors remain visible rather than substituting a report dump.
-Factory routing used a bounded Sol/medium worker, independent Sol/high review and
-coordinator-owned replay, deployment and documentation. Ponytail lite: remove
-unnecessary model prerequisites; add no provider, dependency or automatic write.
+**Final implementation.** `daily-structured-v27-latest-report-recap` supplies each
+resolved workstream's complete latest material report, or latest context when none
+is material. Older selected clauses remain in review history. This narrow recap
+may omit distinct earlier work; it does not infer supersession or close old gates.
+Manual prose and Knowledge titles, links and excerpts are excluded from the writer.
+Strict request-local integer references map only to offered original source IDs;
+newest-two material-report coverage is required. Model limits remain a 500-character
+paragraph, one to three topics, 240 characters per status and six refs per statement.
+Duplicate topics/status pairs and generated facts ending comma/colon/semicolon
+fail. Public/manual/historical parsing and safe v26/older amendments remain intact.
+Local compatibility permits 300 seconds per profile, other providers 30, capped by
+the configured limit; at most two profiles run sequentially. Generation remains
+bounded to 1,200 seconds.
 
-The final `daily-structured-v26-focused-recap` contract prepares workstreams in
-Rust. The writer receives all exact cards from each workstream's latest material
-report, then only already-selected older source clauses labeled as history.
-Complete history remains available for review. Request-local integer citations map
-strictly to original snapshot IDs; unoffered references are rejected. Citations
-must cover the two newest material anchors. These are relevance/source-bound
-checks, not proof of factual entailment or automatic supersession. Manual prose
-and Knowledge titles, links and excerpts are excluded from writer input.
-
-Model-only limits are 500 characters for the paragraph, one to three topics,
-240 characters per status and six references per statement. Duplicate normalized
-topics and identical Done/Pending pairs fail. Public/manual/historical limits and
-safe older-contract amendments remain supported. Local compatibility probes allow
-up to 300 seconds per profile, other providers 30 seconds, always capped by the
-configured request limit; at most two profiles run sequentially. The overall
-1,200-second generation deadline is unchanged.
+Factory used a bounded Sol/medium worker, independent Sol/high complete-diff and
+source reviews, bounded Astra/low capability diagnosis and coordinator-owned
+integration/deployment/docs. Ponytail lite adds no dependency, service, second model
+checker or automatic Markdown write.
 
 | Contract/scenario | Evidence | State |
 | --- | --- | --- |
-| More than twelve source subjects cannot block writing | 36-source production-entry regression with recap-only model | Passed |
-| Retained history, aliases, exclusions and focused source ownership | Semantic/source, focused anchor, offered-reference and reviewed-alias regressions | Passed |
-| Failure safety, source mode, manual notes and historical amendments | 327 workspace tests passed / 14 opt-in ignored; 14 Chromium/Firefox summary browser scenarios passed | Passed |
-| Exact request retains review history while reducing writer input | 105 history cards retained; 44 writer cards from 14 sources; prompt bytes reduced 42.3% | Passed bounds; no speed claim |
-| Independent complete diff and focused follow-up review | No actionable code or documentation findings; reviewed against starting HEAD | Passed; semantic entailment remains a human check |
-| Local deployment and preservation | Verified backup, exact images/configuration/assets, health, 12 protected tables and 77 Markdown hashes | Passed |
-| Actual October 22 automatic factual scope | Final v26 Gemma trial, independent original-source review | Failed; default unchanged |
-| Corrected October 22 editorial draft | Independently reviewed manual recap saved through normal candidate API | Passed source review; no Apply |
+| More than twelve subjects cannot block writing | 36-source production-entry regression | Passed |
+| Latest complete bundles, retained history, aliases and exclusions | Four writer reports/20 cards; all 105 history cards retained; focused tests | Passed |
+| No older selected clauses or unoffered citations reach the writer | Old-thread sentinel absent; strict enum/parser and newest-two coverage | Passed |
+| Failure/manual/source/history/Apply safety | Cache/partial-expiry and persistence/Apply/restart component regressions | Passed |
+| Integrated checks | 328 workspace passed / 14 opt-in ignored; formatting, Clippy with warnings denied and diff checks | Passed |
+| Complete independent v27 follow-up | Code and three docs against `fa6feca`, excluding M5 addition; no actionable findings | Passed |
+| Deployment preservation | Verified backup, exact images/configuration/assets/health, 12 protected tables and 77 Markdown hashes | Passed |
+| Normal Azure generation, two frozen days | October 22: 2.48 seconds; October 27 (62 sources): 3.06 seconds | Useful review drafts; bounded corrections required |
+| Corrected drafts and next-model UI | Original-source review; exact paragraph/three topics/Azure default in Chromium and Firefox | Passed review-draft workflow; no Apply |
 
-**Actual model evidence.** Reaching the writer alone did not solve quality.
-The saved 1.5B model first exhausted its token budget after 553.65 seconds;
-a compact-reference run completed in 422.52 seconds but repeated sentences and
-topics and misclassified status. Larger 4B live attempts completed in 576.57 and
-439.29 seconds, but still repeated resolved blockers or made broad unsupported
-scope claims. A full-input 12B Gemma run completed in 1,042.73 seconds; independent
-review rejected overstatement of webhook completion and stale architecture/CI
-claims. These runs created review drafts only; none was applied. They motivated
-the final focused reported view rather than treating schema success as acceptance.
+The packed-clause Apply/restart regression now directly tests Source-based
+preparation. Semantic generation/history/citations, core persistence/restart/manual
+amendments and browser recap flow remain separately covered; the converted test
+is not claimed as one integrated Semantic-to-Apply-to-restart scenario.
 
-The final v26 deployment source manifest is
-`abb0dbb08118a56f506f5b1f4669524711d8b6e3cc503824d3f57bd15fb8d7db`.
-It recreates only the existing collector and Daily services; Ollama is unchanged.
-The quiesced backup passed SQLite integrity checks; schema remains 29. All 1,069
-nonexpired events survived. Five older events expired at startup under the
-unchanged 30-day policy and remain in the verified backup. All 12 protected
-review/configuration tables and all 77 Markdown hashes are unchanged. Rust/client
-formatting, Clippy with warnings denied and whitespace checks passed. Sandboxed
-mock-listener/browser restrictions were resolved by authorized unsandboxed reruns.
+**Model evidence and operating decision.** Actual 1.5B, 4B and 12B local runs failed
+factual acceptance despite synthetic compatibility. Earlier Azure output with selected older context
+also carried a resolved thread forward. The final latest-report-only October 22
+request is 8,367 bytes, 44.1% below v26's 14,975, with complete history preserved.
+The owner configured Azure credentials/consent in Generation settings. Correcting
+only the resource-root path to `/openai/v1` on the same host enabled discovery;
+catalog ID `gpt-6.1-sol` returned model not found. The owner supplied deployment
+`gpt-5.4-mini`, which passed compatibility using `max_completion_tokens`. No key
+or private endpoint was printed or committed.
 
-The final deployed compatibility probe passed for installed local
-`gemma3:12b-8k`. The normal real-day API generated a structured recap in 586.58
-seconds, preserving all 77 Markdown hashes, but **failed factual acceptance**.
-It marked already-passed email/TLS verification pending, omitted the cited webhook
-completion gates and called the completed read-only investigation ongoing.
-Independent Sol/high original-source review and a bounded Astra/low architecture
-escalation confirmed that the decisive qualifications were already supplied and
-cited: this is model interpretation failure, not absent evidence. Stop prompt
-retries rather than treating citation membership as entailment. The saved default
-remains `qwen2.5:1.5b`; no tested model is accepted for automatic summary quality.
+Final raw outputs preserve the main scoped accomplishments and open gates and are
+useful human-review drafts, but are not defect-free. October 22 omitted an
+investigation citation in its paragraph; October 27 inferred a reviewed PR label
+from the reporter's checkout branch. The coordinator corrected these, attributed
+the investigation requirements and removed ambiguous “landed” wording. Independent
+source review accepted both corrected recaps. The normal candidate API saved new
+`structured_edit` revisions; raw outputs remain in immutable history. This accepts
+an assisted review workflow, not unattended factual accuracy. Broader owner
+usefulness and recall pilots remain pending.
 
-For immediate review value, the coordinator authored a corrected paragraph and
-three topics from original sources 35, 33 and 24. Independent factual review
-narrowed browser verification to the isolated view, distinguished a proposed
-storage approach from implementation and removed historical requirements whose
-current status is unknown. The normal candidate API saved this as a new
-`structured_edit` revision, preserving the model output in history. Its recap
-exactly matches the reviewed proposal and all 77 Markdown hashes remain unchanged.
-This is editorial assistance, not successful automatic synthesis or owner Apply.
-Live Chromium and Firefox both display the exact reviewed paragraph and three
-topics, with no page errors or unexpected mutating browser requests.
+The owner separately approved Azure `gpt-5.4-mini` as the persistent default for
+future Human summary generations after automatic approval review required ongoing
+external-use authorization. The saved setting was verified. Source mode and
+scheduler/API defaults remain model-free; review before Apply is still necessary.
+Both edited days preserve all 77 Markdown hashes; no canonical Apply was performed.
 
-The owner selected a stronger provider and configured Azure OpenAI credentials
-and activity-sharing consent through Generation settings. The connection initially
-used the resource root and returned not found. Correcting only its path on the
-same approved host to `/openai/v1`, preserving the stored key and authorized
-consent, enabled discovery. The first candidate `gpt-6.1-sol` returned model not
-found; a discovered catalog ID does not establish an Azure deployment. The owner
-was asked for the resource's deployment name before further capability trials.
-No credential or private endpoint was printed or committed. A next candidate must pass original-source
-review on this frozen day and a second held-out real day before default selection
-or a usefulness claim; practical latency also remains an acceptance gate.
-The broader recall pilot remains separate. All live attempts preserve explicit
-owner Apply. Private backups, receipts and replay
-artifacts are retained under ignored `tmp/deployments/focused-recap-20261028/`
-and `tmp/evaluations/summary-failure-20261028/`; earlier trial receipts remain
-in their dated deployment directories.
+The final deployment manifest is `8ccdfb5137c8b243f4d11b739415d48ea1e10c34499c181b88edc55d966cbd21`.
+Only existing collector and Daily containers were recreated; Ollama, environment,
+ports and mounts were preserved. The quiesced backup passed integrity checks;
+schema remains 29. All 1,077 nonexpired original events survived; two old events
+expired under the unchanged 30-day policy and remain in backup. All 12 protected
+tables matched before intentional draft/default updates. A task-local Docker CLI
+configuration resolved an unreadable host buildx setting without changing it.
+
+Review `http://127.0.0.1:8788/?date=2026-10-22` or `/?date=2026-10-27`.
+Private backups, source manifests, frozen replays and browser receipts remain in
+ignored `tmp/deployments/latest-report-recap-20261028/` and
+`tmp/evaluations/summary-failure-20261028/`; earlier trial receipts are retained.
 
 ## Product Promise
 

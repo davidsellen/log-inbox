@@ -2,7 +2,7 @@
 
 Daily selects **Human summary (Semantic)** when a saved default model is available
 and any required external consent is saved. It prepares retained source workstreams deterministically and requests one
-cited recap from the latest reported workstream outcomes and selected older context for daily review or meetings. Complete source history remains available for review; this focus does not establish acceptance or resolve older gates. Without an eligible
+cited recap from each workstream’s complete latest material report for daily review or meetings. Earlier reports stay in review history and may contain distinct work omitted from the short recap; this focus does not establish acceptance or resolve older gates. Without an eligible
 default, Daily selects **Source reports (no model)**, which retains original report
 wording without a recap. The server API default and scheduled preparation remain
 source-based. **Change model** selects a saved, tested provider/model for one

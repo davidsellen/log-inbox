@@ -7102,21 +7102,16 @@ mod knowledge_destination_tests {
                         .id,
                 );
             }
-            let model = Router::new().route(
-                "/chat/completions",
-                post(
-                    |Json(body): Json<Value>| async move { Json(generation_model_response(&body)) },
-                ),
-            );
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            state.llm_config = Some(llm::LlmConfig::for_test(&format!(
-                "http://{}",
-                listener.local_addr().unwrap()
-            )));
-            let server = tokio::spawn(async move {
-                axum::serve(listener, model).await.unwrap();
-            });
-            let revision = generate_daily_candidate(&state, date, false, None)
+            // This regression exercises source-clause filtering. Human summaries
+            // intentionally receive only the latest report per workstream.
+            let guard = state
+                .daily_generation_lock
+                .clone()
+                .try_lock_owned()
+                .unwrap();
+            let (mut attempt, _) = generation::begin(&state, date, "manual").unwrap();
+            attempt.preparation_mode = llm::PreparationMode::SourceBased;
+            let revision = generation::run(&state, date, false, None, attempt, guard)
                 .await
                 .unwrap();
             let packed_stream = revision.content["workstreams"]
@@ -7271,7 +7266,6 @@ mod knowledge_destination_tests {
                     .contains(ALPHA),
                 "Review filters visible clauses without rewriting the frozen revision."
             );
-            server.abort();
         }
     }
 
@@ -9007,6 +9001,7 @@ mod knowledge_destination_tests {
             "daily-structured-v23-semantic-recap",
             "daily-structured-v24-direct-recap",
             "daily-structured-v25-grounded-recap",
+            "daily-structured-v26-focused-recap",
         ] {
             let (mut state, profile, date) = generation_test_state();
             state.llm_config = Some(llm::LlmConfig::for_test("http://127.0.0.1:9"));
